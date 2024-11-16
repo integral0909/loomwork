@@ -1,0 +1,134 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loomwork"
+dynamic = ["version"]
+description = "Durable, event-sourced workflow engine for Python, embeddable or run as a server."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+authors = [{ name = "Fredrik Ahman", email = "fredrik.fullstackdev@gmail.com" }]
+maintainers = [{ name = "Fredrik Ahman", email = "fredrik.fullstackdev@gmail.com" }]
+keywords = ["workflow", "durable-execution", "orchestration", "event-sourcing", "saga", "asyncio"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.9,<2.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/integral0909/loomwork"
+Documentation = "https://github.com/integral0909/loomwork/tree/main/docs"
+Repository = "https://github.com/integral0909/loomwork"
+Issues = "https://github.com/integral0909/loomwork/issues"
+Changelog = "https://github.com/integral0909/loomwork/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<8.4",
+    "pytest-asyncio>=0.24,<0.25",
+    "hypothesis>=6.112,<6.123",
+    "coverage[toml]>=7.6,<7.7",
+    "mypy>=1.11,<1.12",
+    "ruff>=0.6.9,<0.7",
+]
+
+[tool.hatch.version]
+path = "src/loomwork/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loomwork"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/loomwork", "tests", "docs", "README.md", "LICENSE", "CHANGELOG.md"]
+
+# --------------------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "C4", "UP", "SIM", "RUF", "PT", "PL", "S", "ASYNC",
+    "TID", "PERF", "N", "RET", "ARG", "PIE", "T20",
+]
+ignore = [
+    "PLR0913",  # engines and stores legitimately take many parameters
+    "PLR2004",  # magic values are fine in comparisons of protocol constants
+    "PLR0911",
+    "PLR0912",
+    "RET505",
+    "S101",     # asserts document internal invariants
+    "S311",     # random is used for jitter and deterministic replay, never for secrets
+    "ASYNC109", # timeout parameters are part of the public API
+    "N818",     # failure types are named after what they describe
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR", "ARG", "N", "PT011", "PT017", "PT018", "T20", "E501"]
+"examples/**" = ["T20"]
+"src/loomwork/runtime/loop.py" = ["ARG002"]  # overrides of the AbstractEventLoop API
+"src/loomwork/store/*.py" = ["ARG002"]       # uniform Store signatures
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.lint.isort]
+known-first-party = ["loomwork"]
+
+# --------------------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+files = ["src/loomwork", "tests"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# --------------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+    "integration: exercises several subsystems together",
+    "postgres: requires a PostgreSQL server (LOOMWORK_TEST_POSTGRES_DSN)",
+    "slow: long-running tests excluded from the quick loop",
+]
+filterwarnings = ["error"]
+
+# --------------------------------------------------------------------------- coverage
+[tool.coverage.run]
+source = ["loomwork"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+    "\\.\\.\\.$",
+]
