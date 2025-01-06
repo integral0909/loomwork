@@ -180,12 +180,22 @@ class Store(abc.ABC):
         """Release the job for another attempt no earlier than ``ready_at``."""
 
     @abc.abstractmethod
-    async def extend_step_lease(self, job_id: str, worker_id: str, expires_at: datetime) -> bool:
-        """Extend the lease on a job this worker holds. ``False`` if it was lost."""
+    async def renew_step_lease(self, job_id: str, worker_id: str, expires_at: datetime) -> bool:
+        """Set the lease expiry of a job this worker holds (heartbeats, or tightening the
+        claim-time lease to the step's own timeout). ``False`` if the lease was lost."""
 
     @abc.abstractmethod
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
         """Outstanding step jobs of a run, ordered by sequence number."""
+
+    # ------------------------------------------------------------------ retention
+
+    @abc.abstractmethod
+    async def delete_closed_before(self, cutoff: datetime, limit: int = 1000) -> int:
+        """Delete up to ``limit`` runs (record and history) closed before ``cutoff``.
+
+        Returns the number of runs deleted. Running executions are never touched.
+        """
 
     # ------------------------------------------------------------------ timers
 

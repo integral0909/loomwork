@@ -17,3 +17,8 @@ All notable changes to this project are documented here. The format follows
   durable `sleep()`.
 - In-memory store, embedded engine, workflow/step/timer workers and `Loomwork` facade.
 - JSON payload converter with pydantic, dataclass and standard-library type support.
+- SQLite store (`loomwork[sqlite]`) and PostgreSQL store (`loomwork[postgres]`) sharing one
+  SQL implementation, with `SKIP LOCKED` claims, `LISTEN/NOTIFY` wake-ups and checksummed,
+  dialect-aware migrations.
+- `store_from_url()` for `memory://`, `sqlite:///path` and `postgresql://` URLs.
+- Retention: `Store.delete_closed_before()` removes old closed runs.

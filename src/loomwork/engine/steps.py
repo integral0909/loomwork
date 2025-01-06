@@ -83,7 +83,7 @@ class StepExecutor:
         policy = job.options.retry or self.config.default_step_retry
 
         lease_until = now + timeout + self.config.step_lease_grace
-        if not await self.store.extend_step_lease(job.job_id, self.worker_id, lease_until):
+        if not await self.store.renew_step_lease(job.job_id, self.worker_id, lease_until):
             logger.info("lost lease on step job %s before starting", job.job_id)
             return
 

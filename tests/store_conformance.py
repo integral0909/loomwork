@@ -443,12 +443,19 @@ class StoreConformance:
         assert again.attempt == 2
         assert again.last_failure == failure
 
-    async def test_extend_step_lease(self, store: Store) -> None:
+    async def test_renew_step_lease_can_shorten(self, store: Store) -> None:
         await self._with_jobs(store, job("r1", 1))
         claimed = await store.claim_step("w1", T0, LEASE)
         assert claimed is not None
-        assert await store.extend_step_lease(claimed.job_id, "w1", T0 + timedelta(hours=1))
-        assert not await store.extend_step_lease(claimed.job_id, "w2", T0 + timedelta(hours=1))
+        assert await store.renew_step_lease(claimed.job_id, "w1", T0 + timedelta(seconds=1))
+        assert await store.claim_step("w2", T0 + timedelta(seconds=1), LEASE) is not None
+
+    async def test_renew_step_lease(self, store: Store) -> None:
+        await self._with_jobs(store, job("r1", 1))
+        claimed = await store.claim_step("w1", T0, LEASE)
+        assert claimed is not None
+        assert await store.renew_step_lease(claimed.job_id, "w1", T0 + timedelta(hours=1))
+        assert not await store.renew_step_lease(claimed.job_id, "w2", T0 + timedelta(hours=1))
         assert await store.claim_step("w2", T0 + LEASE, LEASE) is None
         assert await store.claim_step("w2", T0 + timedelta(hours=1), LEASE) is not None
 
@@ -485,6 +492,24 @@ class StoreConformance:
         await self.commit(store, "r1", consumed=4, cancel_timers=[1])
         assert await store.fire_due_timers(T0 + timedelta(days=1)) == 0
         assert await store.next_timer_at() is None
+
+    # ------------------------------------------------------------------ retention
+
+    async def test_delete_closed_before(self, store: Store) -> None:
+        await self.create(store, "old", workflow_id="w")
+        await self.create(store, "running")
+        await store.terminate("old", "", T0)
+        await self.create(store, "new", workflow_id="w")
+        await store.terminate("new", "", T0 + timedelta(days=2))
+        assert await store.delete_closed_before(T0 + timedelta(days=1)) == 1
+        with pytest.raises(NotFoundError):
+            await store.get_execution("old")
+        with pytest.raises(NotFoundError):
+            await store.load_history("old")
+        assert (await store.find_execution("w")).run_id == "new"
+        assert {r.run_id for r in await store.list_executions()} == {"new", "running"}
+        assert await store.delete_closed_before(T0 + timedelta(days=30), limit=5) == 1
+        assert [r.run_id for r in await store.list_executions()] == ["running"]
 
     # ------------------------------------------------------------------ notifications
 

@@ -30,6 +30,10 @@ dependencies = [
     "pydantic>=2.9,<2.10",
 ]
 
+[project.optional-dependencies]
+sqlite = ["aiosqlite>=0.20,<0.21"]
+postgres = ["psycopg[binary]>=3.2,<3.3", "psycopg-pool>=3.2,<3.3"]
+
 [project.urls]
 Homepage = "https://github.com/integral0909/loomwork"
 Documentation = "https://github.com/integral0909/loomwork/tree/main/docs"
@@ -39,6 +43,9 @@ Changelog = "https://github.com/integral0909/loomwork/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.20,<0.21",
+    "psycopg[binary]>=3.2,<3.3",
+    "psycopg-pool>=3.2,<3.3",
     "pytest>=8.3,<8.4",
     "pytest-asyncio>=0.24,<0.25",
     "hypothesis>=6.112,<6.123",
@@ -84,6 +91,8 @@ ignore = [
 "examples/**" = ["T20"]
 "src/loomwork/runtime/loop.py" = ["ARG002"]  # overrides of the AbstractEventLoop API
 "src/loomwork/store/*.py" = ["ARG002"]       # uniform Store signatures
+# Queries are assembled from constant fragments only; every value is a bound parameter.
+"src/loomwork/store/sql/base.py" = ["S608"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"

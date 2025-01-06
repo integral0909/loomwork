@@ -32,6 +32,8 @@ class Loomwork:
 
     Args:
         store: persistence backend; defaults to a non-durable :class:`MemoryStore`.
+            A store passed in is opened if necessary but never closed: whoever creates
+            a store owns its lifecycle, so several ``Loomwork`` objects can share one.
         workflows, steps: definitions this process can execute.
         clock: time source (use :class:`~loomwork.clock.ManualClock` in tests).
         run_worker: set to ``False`` to use this object purely as a client.
@@ -50,6 +52,7 @@ class Loomwork:
         worker_id: str | None = None,
         run_worker: bool = True,
     ) -> None:
+        self._owns_store = store is None
         self.store = store or MemoryStore()
         self.registry = Registry(workflows, steps)
         self.clock = clock or SystemClock()
@@ -92,9 +95,9 @@ class Loomwork:
     async def stop(self, grace: float | None = None) -> None:
         if self._run_worker:
             await self.worker.stop(grace)
-        if self._open:
+        if self._open and self._owns_store:
             await self.store.close()
-            self._open = False
+        self._open = False
 
     async def __aenter__(self) -> Loomwork:
         await self.start()

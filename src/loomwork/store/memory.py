@@ -401,12 +401,11 @@ class MemoryStore(Store):
         self.notifier.publish(TOPIC_STEPS)
         return True
 
-    async def extend_step_lease(self, job_id: str, worker_id: str, expires_at: datetime) -> bool:
+    async def renew_step_lease(self, job_id: str, worker_id: str, expires_at: datetime) -> bool:
         job = self._owned_job(job_id, worker_id)
         if job is None:
             return False
-        if job.lease_expires_at is None or expires_at > job.lease_expires_at:
-            job.lease_expires_at = expires_at
+        job.lease_expires_at = expires_at
         return True
 
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
@@ -442,6 +441,29 @@ class MemoryStore(Store):
                 self._mark_tick_pending(run, now)
             fired += 1
         return fired
+
+    # ------------------------------------------------------------------ retention
+
+    async def delete_closed_before(self, cutoff: datetime, limit: int = 1000) -> int:
+        victims = sorted(
+            (
+                run
+                for run in self._runs.values()
+                if run.record.is_closed
+                and run.record.closed_at is not None
+                and run.record.closed_at < cutoff
+            ),
+            key=lambda run: run.record.closed_at or cutoff,
+        )[:limit]
+        for run in victims:
+            run_id = run.record.run_id
+            del self._runs[run_id]
+            self._order.remove(run_id)
+            siblings = self._by_workflow_id[run.record.workflow_id]
+            siblings.remove(run_id)
+            if not siblings:
+                del self._by_workflow_id[run.record.workflow_id]
+        return len(victims)
 
     # ------------------------------------------------------------------ introspection
 
