@@ -66,5 +66,10 @@ class EngineConfig:
         return self.default_step_options.merged(requested)
 
     def step_lease(self, options: StepOptions) -> timedelta:
-        timeout = options.timeout or self.default_step_timeout
-        return timeout + self.step_lease_grace
+        """How long a claimed attempt may go without renewing its lease.
+
+        Steps with a heartbeat timeout renew on every heartbeat, so their lease only
+        needs to cover one heartbeat interval; others must cover the whole attempt.
+        """
+        window = options.heartbeat_timeout or options.timeout or self.default_step_timeout
+        return window + self.step_lease_grace

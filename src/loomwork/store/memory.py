@@ -13,6 +13,7 @@ import heapq
 from collections.abc import Collection
 from datetime import datetime, timedelta
 
+from loomwork.codec.payload import Payload
 from loomwork.errors import LeaseLostError, NotFoundError, WorkflowAlreadyStartedError
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
@@ -31,6 +32,7 @@ from loomwork.store.records import (
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
+    HeartbeatResult,
     StepJob,
     TickOutcome,
     TimerRecord,
@@ -324,6 +326,7 @@ class MemoryStore(Store):
         now: datetime,
         lease: timedelta,
         step_names: Collection[str] | None = None,
+        queues: Collection[str] | None = None,
     ) -> StepJob | None:
         best: StepJob | None = None
         abandoned: list[StepJob] = []
@@ -337,7 +340,9 @@ class MemoryStore(Store):
                 continue
             if step_names is not None and job.step_name not in step_names:
                 continue
-            if best is None or (job.ready_at, job.job_id) < (best.ready_at, best.job_id):
+            if queues is not None and job.queue not in queues:
+                continue
+            if best is None or _claim_order(job) < _claim_order(best):
                 best = job
         for job in abandoned:
             # Cancelled while an attempt was running and that attempt never reported
@@ -407,6 +412,55 @@ class MemoryStore(Store):
             return False
         job.lease_expires_at = expires_at
         return True
+
+    async def heartbeat_step(
+        self,
+        job_id: str,
+        worker_id: str,
+        expires_at: datetime,
+        details: Payload | None,
+        now: datetime,
+    ) -> HeartbeatResult | None:
+        job = self._owned_job(job_id, worker_id)
+        if job is None:
+            return None
+        job.lease_expires_at = expires_at
+        job.last_heartbeat_at = now
+        if details is not None:
+            job.heartbeat_details = details
+        return HeartbeatResult(cancel_requested=job.cancel_requested)
+
+    async def release_step(
+        self, job_id: str, worker_id: str, now: datetime, *, consume_attempt: bool
+    ) -> bool:
+        job = self._owned_job(job_id, worker_id)
+        if job is None:
+            return False
+        if job.cancel_requested:
+            self._delete_job(job)
+            return True
+        job.lease_owner = None
+        job.lease_expires_at = None
+        job.ready_at = min(job.ready_at, now)
+        if not consume_attempt:
+            job.attempt = max(job.attempt - 1, 0)
+        self.notifier.publish(TOPIC_STEPS)
+        return True
+
+    async def next_step_ready_at(
+        self,
+        step_names: Collection[str] | None = None,
+        queues: Collection[str] | None = None,
+    ) -> datetime | None:
+        candidates = [
+            job.ready_at
+            for job in self._jobs.values()
+            if job.lease_owner is None
+            and not job.cancel_requested
+            and (step_names is None or job.step_name in step_names)
+            and (queues is None or job.queue in queues)
+        ]
+        return min(candidates, default=None)
 
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
         run = self._run(run_id)
@@ -478,3 +532,7 @@ class MemoryStore(Store):
     @property
     def timer_count(self) -> int:
         return len(self._timers)
+
+
+def _claim_order(job: StepJob) -> tuple[int, datetime, str]:
+    return (-job.priority, job.ready_at, job.job_id)

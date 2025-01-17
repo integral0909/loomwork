@@ -20,6 +20,7 @@ from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta
 from typing import Any, ClassVar, Protocol
 
+from loomwork.codec.payload import Payload
 from loomwork.errors import LeaseLostError, NotFoundError, WorkflowAlreadyStartedError
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
@@ -38,6 +39,7 @@ from loomwork.store.records import (
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
+    HeartbeatResult,
     StepJob,
     TickOutcome,
 )
@@ -447,8 +449,9 @@ class SQLStore(Store, abc.ABC):
             INSERT INTO lw_step_jobs (
                 job_id, run_id, workflow_id, workflow_name, seq, step_name, args, options,
                 scheduled_at, ready_at, deadline, attempt, lease_owner, lease_expires_at,
-                last_failure, cancel_requested
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_failure, cancel_requested, queue, priority, heartbeat_details,
+                last_heartbeat_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.job_id,
@@ -467,6 +470,10 @@ class SQLStore(Store, abc.ABC):
                 self.ts_in(job.lease_expires_at),
                 codec.failure_to_json(job.last_failure),
                 job.cancel_requested,
+                job.queue,
+                job.priority,
+                codec.payload_to_json(job.heartbeat_details),
+                self.ts_in(job.last_heartbeat_at),
             ),
         )
 
@@ -500,8 +507,9 @@ class SQLStore(Store, abc.ABC):
         now: datetime,
         lease: timedelta,
         step_names: Collection[str] | None = None,
+        queues: Collection[str] | None = None,
     ) -> StepJob | None:
-        if step_names is not None and not step_names:
+        if (step_names is not None and not step_names) or (queues is not None and not queues):
             return None
         now_db = self.ts_in(now)
         async with self.transaction() as tx:
@@ -516,11 +524,8 @@ class SQLStore(Store, abc.ABC):
                 "AND (lease_owner IS NULL OR lease_expires_at <= ?)"
             )
             params: list[Any] = [now_db, False, now_db]
-            if step_names is not None:
-                clause, names = _in_clause("step_name", step_names)
-                sql += f" AND {clause}"
-                params.extend(names)
-            sql += f" ORDER BY ready_at, job_id LIMIT 1{self.SKIP_LOCKED}"
+            sql, params = self._job_filters(sql, params, step_names, queues)
+            sql += f" ORDER BY priority DESC, ready_at, job_id LIMIT 1{self.SKIP_LOCKED}"
             row = await tx.fetchone(sql, params)
             if row is None:
                 return None
@@ -600,6 +605,86 @@ class SQLStore(Store, abc.ABC):
                 (self.ts_in(expires_at), job_id),
             )
             return True
+
+    @staticmethod
+    def _job_filters(
+        sql: str,
+        params: list[Any],
+        step_names: Collection[str] | None,
+        queues: Collection[str] | None,
+    ) -> tuple[str, list[Any]]:
+        for column, values in (("step_name", step_names), ("queue", queues)):
+            if values is not None:
+                clause, items = _in_clause(column, values)
+                sql += f" AND {clause}"
+                params.extend(items)
+        return sql, params
+
+    async def heartbeat_step(
+        self,
+        job_id: str,
+        worker_id: str,
+        expires_at: datetime,
+        details: Payload | None,
+        now: datetime,
+    ) -> HeartbeatResult | None:
+        async with self.transaction() as tx:
+            job = await self._owned_job(tx, job_id, worker_id)
+            if job is None:
+                return None
+            if details is None:
+                await tx.execute(
+                    "UPDATE lw_step_jobs SET lease_expires_at = ?, last_heartbeat_at = ? "
+                    "WHERE job_id = ?",
+                    (self.ts_in(expires_at), self.ts_in(now), job_id),
+                )
+            else:
+                await tx.execute(
+                    "UPDATE lw_step_jobs SET lease_expires_at = ?, last_heartbeat_at = ?, "
+                    "heartbeat_details = ? WHERE job_id = ?",
+                    (
+                        self.ts_in(expires_at),
+                        self.ts_in(now),
+                        codec.payload_to_json(details),
+                        job_id,
+                    ),
+                )
+            return HeartbeatResult(cancel_requested=job.cancel_requested)
+
+    async def release_step(
+        self, job_id: str, worker_id: str, now: datetime, *, consume_attempt: bool
+    ) -> bool:
+        async with self.transaction() as tx:
+            job = await self._owned_job(tx, job_id, worker_id)
+            if job is None:
+                return False
+            if job.cancel_requested:
+                await tx.execute("DELETE FROM lw_step_jobs WHERE job_id = ?", (job_id,))
+                return True
+            attempt = job.attempt if consume_attempt else max(job.attempt - 1, 0)
+            await tx.execute(
+                "UPDATE lw_step_jobs SET lease_owner = NULL, lease_expires_at = NULL, "
+                "ready_at = ?, attempt = ? WHERE job_id = ?",
+                (self.ts_in(min(job.ready_at, now)), attempt, job_id),
+            )
+            tx.notify(TOPIC_STEPS)
+            return True
+
+    async def next_step_ready_at(
+        self,
+        step_names: Collection[str] | None = None,
+        queues: Collection[str] | None = None,
+    ) -> datetime | None:
+        if (step_names is not None and not step_names) or (queues is not None and not queues):
+            return None
+        sql = (
+            "SELECT MIN(ready_at) AS next_at FROM lw_step_jobs "
+            "WHERE lease_owner IS NULL AND cancel_requested = ?"
+        )
+        sql, params = self._job_filters(sql, [False], step_names, queues)
+        async with self.transaction() as tx:
+            row = await tx.fetchone(sql, params)
+        return None if row is None else self.ts_out(row["next_at"])
 
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
         async with self.transaction() as tx:

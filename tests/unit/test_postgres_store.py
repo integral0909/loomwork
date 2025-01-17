@@ -7,6 +7,7 @@ import pytest
 
 from loomwork.store.notify import TOPIC_TICKS
 from loomwork.store.postgres import PostgresStore
+from loomwork.store.sql.migrations import MIGRATIONS
 from tests.helpers import T0
 from tests.postgres_support import fresh_postgres_store, requires_postgres
 from tests.store_conformance import StoreConformance, record, started
@@ -21,7 +22,7 @@ class TestPostgresStore(StoreConformance):
             yield store
 
     async def test_schema_version(self, store: PostgresStore) -> None:
-        assert await store.schema_version() == 1
+        assert await store.schema_version() == len(MIGRATIONS)
 
     async def test_notifications_cross_store_instances(self, store: PostgresStore) -> None:
         """A second store instance (another process in production) is woken via LISTEN."""

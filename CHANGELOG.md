@@ -22,3 +22,16 @@ All notable changes to this project are documented here. The format follows
   dialect-aware migrations.
 - `store_from_url()` for `memory://`, `sqlite:///path` and `postgresql://` URLs.
 - Retention: `Store.delete_closed_before()` removes old closed runs.
+- Task queues: `@step(queue=...)` routes steps to workers subscribed through
+  `WorkerOptions(task_queues=...)`; `priority` orders claims within a queue.
+- Heartbeats: `loomwork.heartbeat(details)` renews an attempt's lease, checkpoints
+  progress that the next attempt reads with `loomwork.heartbeat_details()`, and delivers
+  workflow-side cancellation to the running step. `heartbeat_timeout` detects silent
+  attempts long before their overall timeout.
+- Worker-local per-queue rate and concurrency limits (`QueueLimit`).
+- Graceful shutdown hands in-flight step attempts back without consuming an attempt.
+- Step loops wake exactly when a retry backoff ends instead of on the next poll.
+
+### Fixed
+
+- SQLite transactions could be left open when the calling task was cancelled.

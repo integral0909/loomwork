@@ -459,6 +459,106 @@ class StoreConformance:
         assert await store.claim_step("w2", T0 + LEASE, LEASE) is None
         assert await store.claim_step("w2", T0 + timedelta(hours=1), LEASE) is not None
 
+    # ------------------------------------------------------------------ queues and heartbeats
+
+    def queued(self, seq: int, queue: str, priority: int = 0, name: str = "step") -> StepJob:
+        j = job("r1", seq, name)
+        j.queue = queue
+        j.priority = priority
+        return j
+
+    async def test_claim_step_filters_by_queue(self, store: Store) -> None:
+        await self._with_jobs(store, self.queued(1, "default"), self.queued(2, "gpu"))
+        claimed = await store.claim_step("w1", T0, LEASE, queues=["gpu"])
+        assert claimed is not None
+        assert (claimed.seq, claimed.queue) == (2, "gpu")
+        assert await store.claim_step("w1", T0, LEASE, queues=["gpu"]) is None
+        assert await store.claim_step("w1", T0, LEASE, queues=[]) is None
+        other = await store.claim_step("w1", T0, LEASE, queues=None)
+        assert other is not None and other.queue == "default"
+
+    async def test_claim_step_prefers_higher_priority(self, store: Store) -> None:
+        await self._with_jobs(
+            store, self.queued(1, "q", 0), self.queued(2, "q", 10), self.queued(3, "q", -5)
+        )
+        order = []
+        for _ in range(3):
+            claimed = await store.claim_step("w1", T0, LEASE)
+            assert claimed is not None
+            order.append(claimed.seq)
+        assert order == [2, 1, 3]
+
+    async def test_heartbeat_renews_and_stores_details(self, store: Store) -> None:
+        await self._with_jobs(store, job("r1", 1))
+        claimed = await store.claim_step("w1", T0, LEASE)
+        assert claimed is not None
+        details = default_converter.encode({"page": 7})
+        result = await store.heartbeat_step(
+            claimed.job_id, "w1", T0 + timedelta(minutes=5), details, T0 + timedelta(seconds=1)
+        )
+        assert result is not None and not result.cancel_requested
+        assert await store.heartbeat_step(claimed.job_id, "w2", T0, None, T0) is None
+        # The lease was renewed past the original expiry.
+        assert await store.claim_step("w2", T0 + LEASE, LEASE) is None
+        (stored,) = await store.get_step_jobs("r1")
+        assert stored.heartbeat_details == details
+        assert stored.last_heartbeat_at == T0 + timedelta(seconds=1)
+        # A heartbeat without details keeps the previous details.
+        await store.heartbeat_step(claimed.job_id, "w1", T0 + timedelta(minutes=5), None, T0)
+        (stored,) = await store.get_step_jobs("r1")
+        assert stored.heartbeat_details == details
+
+    async def test_heartbeat_reports_cancellation(self, store: Store) -> None:
+        await self._with_jobs(store, job("r1", 1))
+        claimed = await store.claim_step("w1", T0, LEASE)
+        assert claimed is not None
+        await store.append_input("r1", TimerFired(seq=77), T0)
+        await self.claim(store)
+        await self.commit(store, "r1", consumed=4, cancel_steps=[1])
+        result = await store.heartbeat_step(claimed.job_id, "w1", T0 + LEASE, None, T0)
+        assert result is not None and result.cancel_requested
+
+    async def test_release_step_without_consuming_attempt(self, store: Store) -> None:
+        await self._with_jobs(store, job("r1", 1))
+        claimed = await store.claim_step("w1", T0, LEASE)
+        assert claimed is not None and claimed.attempt == 1
+        assert not await store.release_step(claimed.job_id, "w2", T0, consume_attempt=False)
+        assert await store.release_step(claimed.job_id, "w1", T0, consume_attempt=False)
+        again = await store.claim_step("w2", T0, LEASE)
+        assert again is not None
+        assert again.attempt == 1
+
+    async def test_release_step_consuming_attempt(self, store: Store) -> None:
+        await self._with_jobs(store, job("r1", 1))
+        claimed = await store.claim_step("w1", T0, LEASE)
+        assert claimed is not None
+        assert await store.release_step(claimed.job_id, "w1", T0, consume_attempt=True)
+        again = await store.claim_step("w2", T0, LEASE)
+        assert again is not None and again.attempt == 2
+
+    async def test_release_of_cancelled_job_deletes_it(self, store: Store) -> None:
+        await self._with_jobs(store, job("r1", 1))
+        claimed = await store.claim_step("w1", T0, LEASE)
+        assert claimed is not None
+        await store.append_input("r1", TimerFired(seq=77), T0)
+        await self.claim(store)
+        await self.commit(store, "r1", consumed=4, cancel_steps=[1])
+        assert await store.release_step(claimed.job_id, "w1", T0, consume_attempt=True)
+        assert await store.get_step_jobs("r1") == []
+
+    async def test_next_step_ready_at(self, store: Store) -> None:
+        later = self.queued(2, "gpu", name="render")
+        later.ready_at = T0 + timedelta(seconds=30)
+        await self._with_jobs(store, self.queued(1, "default"), later)
+        assert await store.next_step_ready_at() == T0
+        assert await store.next_step_ready_at(queues=["gpu"]) == T0 + timedelta(seconds=30)
+        assert await store.next_step_ready_at(step_names=["render"]) == T0 + timedelta(seconds=30)
+        assert await store.next_step_ready_at(queues=["none"]) is None
+        assert await store.next_step_ready_at(queues=[]) is None
+        # Leased jobs are not "ready".
+        await store.claim_step("w1", T0, LEASE, queues=["default"])
+        assert await store.next_step_ready_at(queues=["default"]) is None
+
     # ------------------------------------------------------------------ timers
 
     async def test_fire_due_timers(self, store: Store) -> None:

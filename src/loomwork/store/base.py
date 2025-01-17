@@ -14,12 +14,14 @@ import abc
 from collections.abc import Collection
 from datetime import datetime, timedelta
 
+from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event, StepCompleted, StepFailed, WorkflowStarted
 from loomwork.store.notify import Notifier
 from loomwork.store.records import (
     ExecutionRecord,
     ExecutionStatus,
+    HeartbeatResult,
     StepJob,
     TickOutcome,
 )
@@ -151,8 +153,14 @@ class Store(abc.ABC):
         now: datetime,
         lease: timedelta,
         step_names: Collection[str] | None = None,
+        queues: Collection[str] | None = None,
     ) -> StepJob | None:
-        """Lease a ready step job and increment its attempt counter."""
+        """Lease a ready step job and increment its attempt counter.
+
+        Only jobs whose step name is in ``step_names`` and whose queue is in ``queues``
+        are considered (``None`` means no restriction). Higher priorities are claimed
+        first, then older ``ready_at``.
+        """
 
     @abc.abstractmethod
     async def finish_step(
@@ -183,6 +191,39 @@ class Store(abc.ABC):
     async def renew_step_lease(self, job_id: str, worker_id: str, expires_at: datetime) -> bool:
         """Set the lease expiry of a job this worker holds (heartbeats, or tightening the
         claim-time lease to the step's own timeout). ``False`` if the lease was lost."""
+
+    @abc.abstractmethod
+    async def heartbeat_step(
+        self,
+        job_id: str,
+        worker_id: str,
+        expires_at: datetime,
+        details: Payload | None,
+        now: datetime,
+    ) -> HeartbeatResult | None:
+        """Record a heartbeat: renew the lease and store progress details.
+
+        Returns ``None`` if the worker no longer holds the lease.
+        """
+
+    @abc.abstractmethod
+    async def release_step(
+        self, job_id: str, worker_id: str, now: datetime, *, consume_attempt: bool
+    ) -> bool:
+        """Give up a claimed job so that it can be claimed again immediately.
+
+        Used on graceful shutdown (``consume_attempt=False`` undoes the claim's attempt
+        increment) and when an attempt was cancelled. A job whose workflow requested
+        cancellation is deleted instead.
+        """
+
+    @abc.abstractmethod
+    async def next_step_ready_at(
+        self,
+        step_names: Collection[str] | None = None,
+        queues: Collection[str] | None = None,
+    ) -> datetime | None:
+        """Earliest ``ready_at`` among unleased jobs matching the filters."""
 
     @abc.abstractmethod
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:

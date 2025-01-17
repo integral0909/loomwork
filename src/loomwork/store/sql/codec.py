@@ -132,6 +132,10 @@ STEP_JOB_COLUMNS = (
     "lease_expires_at",
     "last_failure",
     "cancel_requested",
+    "queue",
+    "priority",
+    "heartbeat_details",
+    "last_heartbeat_at",
 )
 
 
@@ -178,4 +182,8 @@ def step_job_from_row(row: Row, ts: Any) -> StepJob:
         lease_expires_at=ts(row["lease_expires_at"]),
         last_failure=failure_from_json(row["last_failure"]),
         cancel_requested=bool(row["cancel_requested"]),
+        queue=row["queue"],
+        priority=int(row["priority"]),
+        heartbeat_details=payload_from_json(row["heartbeat_details"]),
+        last_heartbeat_at=ts(row["last_heartbeat_at"]),
     )

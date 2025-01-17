@@ -30,7 +30,7 @@ from datetime import timedelta
 from typing import Any, Generic, ParamSpec, TypeVar, overload
 
 from loomwork.errors import FailureError, NotFoundError, RegistrationError
-from loomwork.options import StepOptions, as_timedelta
+from loomwork.options import StepOptions
 from loomwork.retry import RetryPolicy
 from loomwork.runtime.context import current_instance_or_none
 
@@ -197,10 +197,18 @@ class StepDefinition(Generic[P, R]):
         retry: RetryPolicy | None = None,
         timeout: timedelta | float | None = None,
         total_timeout: timedelta | float | None = None,
+        queue: str | None = None,
+        priority: int | None = None,
+        heartbeat_timeout: timedelta | float | None = None,
     ) -> StepDefinition[P, R]:
         """A copy of this step with some options overridden for one call site."""
         override = StepOptions(
-            retry=retry, timeout=as_timedelta(timeout), total_timeout=as_timedelta(total_timeout)
+            retry=retry,
+            timeout=timeout,
+            total_timeout=total_timeout,
+            queue=queue,
+            priority=priority,
+            heartbeat_timeout=heartbeat_timeout,
         )
         return StepDefinition(self.fn, name=self.name, options=self.options.merged(override))
 
@@ -223,6 +231,9 @@ def step(
     retry: RetryPolicy | None = None,
     timeout: timedelta | float | None = None,
     total_timeout: timedelta | float | None = None,
+    queue: str | None = None,
+    priority: int | None = None,
+    heartbeat_timeout: timedelta | float | None = None,
 ) -> _StepDecorator: ...
 
 
@@ -234,6 +245,9 @@ def step(
     retry: RetryPolicy | None = None,
     timeout: timedelta | float | None = None,
     total_timeout: timedelta | float | None = None,
+    queue: str | None = None,
+    priority: int | None = None,
+    heartbeat_timeout: timedelta | float | None = None,
 ) -> StepDefinition[Any, Any] | _StepDecorator:
     """Declare a step.
 
@@ -242,9 +256,18 @@ def step(
         retry: retry policy; defaults to the engine's default policy.
         timeout: maximum duration of one attempt (seconds or ``timedelta``).
         total_timeout: maximum time from scheduling to final outcome, across retries.
+        queue: task queue to dispatch to; only workers subscribed to it run the step.
+        priority: claim priority within the queue (higher first, ``-1000..1000``).
+        heartbeat_timeout: maximum silence between :func:`loomwork.heartbeat` calls
+            before the attempt is considered lost.
     """
     options = StepOptions(
-        retry=retry, timeout=as_timedelta(timeout), total_timeout=as_timedelta(total_timeout)
+        retry=retry,
+        timeout=timeout,
+        total_timeout=total_timeout,
+        queue=queue,
+        priority=priority,
+        heartbeat_timeout=heartbeat_timeout,
     )
     decorator = _StepDecorator(name, options)
     if fn is not None:

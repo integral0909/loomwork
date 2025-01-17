@@ -152,6 +152,8 @@ class TickProcessor:
                         scheduled_at=now,
                         ready_at=now,
                         deadline=deadline,
+                        queue=options.effective_queue,
+                        priority=options.effective_priority,
                     )
                 case RequestCancelStep():
                     # Scheduled and cancelled within the same tick: never enqueue it.

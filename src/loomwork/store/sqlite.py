@@ -130,16 +130,35 @@ class SQLiteStore(SQLStore):
     async def transaction(self) -> AsyncIterator[_SqliteTransaction]:
         conn = self._connection()
         async with self._lock:
-            await conn.execute("BEGIN IMMEDIATE")
+            await self._control(conn, "BEGIN IMMEDIATE", rollback_on_cancel=True)
             tx = _SqliteTransaction(conn)
             try:
                 yield tx
             except BaseException:
-                await conn.execute("ROLLBACK")
+                await self._control(conn, "ROLLBACK")
                 raise
-            await conn.execute("COMMIT")
+            await self._control(conn, "COMMIT")
         for topic in tx.topics:
             self.notifier.publish(topic)
+
+    @staticmethod
+    async def _control(
+        conn: aiosqlite.Connection, statement: str, *, rollback_on_cancel: bool = False
+    ) -> None:
+        """Run BEGIN/COMMIT/ROLLBACK so that cancelling the caller cannot interrupt it.
+
+        aiosqlite executes statements on a background thread; if the awaiting task is
+        cancelled, the statement still runs. Without shielding, a cancelled BEGIN would
+        leave the shared connection inside a transaction nobody finishes.
+        """
+        future = asyncio.ensure_future(conn.execute(statement))
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            await future
+            if rollback_on_cancel:
+                await conn.execute("ROLLBACK")
+            raise
 
     # ------------------------------------------------------------------ migrations
 

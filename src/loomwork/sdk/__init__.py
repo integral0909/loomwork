@@ -1,6 +1,8 @@
 """The programming model: definitions and workflow/step APIs."""
 
 from loomwork.sdk.api import (
+    heartbeat,
+    heartbeat_details,
     in_workflow,
     info,
     is_replaying,
@@ -21,6 +23,8 @@ from loomwork.sdk.definitions import (
 )
 
 __all__ = [
+    "heartbeat",
+    "heartbeat_details",
     "Registry",
     "StepDefinition",
     "WorkflowDefinition",

@@ -13,13 +13,15 @@ import random as _random
 import uuid as _uuid
 from collections.abc import MutableMapping
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from loomwork.errors import NotInWorkflowError
 from loomwork.info import StepInfo, WorkflowInfo
 from loomwork.runtime.context import current_instance, current_instance_or_none, in_workflow
 
 __all__ = [
+    "heartbeat",
+    "heartbeat_details",
     "in_workflow",
     "info",
     "is_replaying",
@@ -110,6 +112,54 @@ def _set_step_info(value: StepInfo | None) -> contextvars.Token[StepInfo | None]
 
 def _reset_step_info(token: contextvars.Token[StepInfo | None]) -> None:
     _step_info.reset(token)
+
+
+class AttemptContext(Protocol):
+    """Implemented by the step executor for the attempt currently running."""
+
+    async def heartbeat(self, details: Any) -> None: ...
+
+    def previous_details(self, hint: Any) -> Any: ...
+
+
+_attempt: contextvars.ContextVar[AttemptContext | None] = contextvars.ContextVar(
+    "loomwork_attempt", default=None
+)
+
+
+def _set_attempt(value: AttemptContext | None) -> contextvars.Token[AttemptContext | None]:
+    return _attempt.set(value)
+
+
+def _reset_attempt(token: contextvars.Token[AttemptContext | None]) -> None:
+    _attempt.reset(token)
+
+
+def _require_attempt() -> AttemptContext:
+    attempt = _attempt.get()
+    if attempt is None:
+        raise NotInWorkflowError("heartbeats can only be sent while a step is executing")
+    return attempt
+
+
+async def heartbeat(details: Any = None) -> None:
+    """Report that a long-running step is alive. *Step-only.*
+
+    Heartbeats renew the attempt's lease, so a step with ``heartbeat_timeout`` is
+    retried soon after its worker dies instead of after its full ``timeout``.
+    ``details`` (any encodable value) is stored and handed to the next attempt through
+    :func:`heartbeat_details`, which lets a retry resume from the last checkpoint.
+
+    Calls are throttled, so it is fine to call this in a tight loop. If the workflow no
+    longer needs the step's result, the attempt is cancelled: the step sees
+    :class:`asyncio.CancelledError` at its next ``await``.
+    """
+    await _require_attempt().heartbeat(details)
+
+
+def heartbeat_details(hint: Any = Any) -> Any:
+    """Details from the last heartbeat of a previous attempt, or ``None``. *Step-only.*"""
+    return _require_attempt().previous_details(hint)
 
 
 # --------------------------------------------------------------------------- logging

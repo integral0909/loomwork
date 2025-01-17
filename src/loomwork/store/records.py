@@ -76,6 +76,11 @@ class StepJob:
 
     ``attempt`` counts attempts *started*; the store increments it on every claim, so a
     job whose worker died mid-attempt comes back with the next attempt number.
+
+    ``queue`` and ``priority`` are copied from the resolved step options so that claims
+    can filter and order on indexed columns. ``heartbeat_details`` is the payload of the
+    most recent :func:`loomwork.heartbeat` call; it survives retries so a new attempt
+    can resume where the previous one stopped.
     """
 
     job_id: str
@@ -94,6 +99,17 @@ class StepJob:
     lease_expires_at: datetime | None = None
     last_failure: FailureInfo | None = None
     cancel_requested: bool = False
+    queue: str = "default"
+    priority: int = 0
+    heartbeat_details: Payload | None = None
+    last_heartbeat_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HeartbeatResult:
+    """Answer to a heartbeat: whether the workflow no longer wants the result."""
+
+    cancel_requested: bool
 
 
 @dataclass(frozen=True, slots=True)

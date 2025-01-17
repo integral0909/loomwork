@@ -204,7 +204,31 @@ _0001_POSTGRES = (
     "CREATE INDEX lw_timers_fire_at ON lw_timers (fire_at)",
 )
 
-MIGRATIONS: tuple[Migration, ...] = (Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),)
+# ---------------------------------------------------------------------------------------
+# 0002: task queues, priorities and heartbeats on step jobs
+
+_0002_SQLITE = (
+    "ALTER TABLE lw_step_jobs ADD COLUMN queue TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE lw_step_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE lw_step_jobs ADD COLUMN heartbeat_details TEXT",
+    "ALTER TABLE lw_step_jobs ADD COLUMN last_heartbeat_at INTEGER",
+    "DROP INDEX lw_step_jobs_ready",
+    "CREATE INDEX lw_step_jobs_claim ON lw_step_jobs (queue, priority DESC, ready_at)",
+)
+
+_0002_POSTGRES = (
+    "ALTER TABLE lw_step_jobs ADD COLUMN queue TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE lw_step_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE lw_step_jobs ADD COLUMN heartbeat_details JSONB",
+    "ALTER TABLE lw_step_jobs ADD COLUMN last_heartbeat_at TIMESTAMPTZ",
+    "DROP INDEX lw_step_jobs_ready",
+    "CREATE INDEX lw_step_jobs_claim ON lw_step_jobs (queue, priority DESC, ready_at)",
+)
+
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
+    Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
+)
 
 
 class MigrationError(RuntimeError):
