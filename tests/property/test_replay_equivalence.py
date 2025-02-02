@@ -56,6 +56,8 @@ async def _run_op(op: list[Any], index: int) -> Any:
             return "timeout"
     if kind == "random":
         return lw.random().randint(0, 1000)
+    if kind == "child":
+        return await program([["step", False], ["random"]] * op[1])
     raise AssertionError(kind)
 
 
@@ -70,6 +72,7 @@ OPS = st.one_of(
     st.tuples(st.just("sleep"), st.integers(1, 3600)),
     st.tuples(st.just("timeout"), st.integers(30, 600)),
     st.tuples(st.just("random")),
+    st.tuples(st.just("child"), st.integers(1, 2)),
 ).map(list)
 
 
@@ -122,6 +125,7 @@ def test_live_history_replays_to_same_result(ops: list[list[Any]], cache_size: i
 
     replayer = replay_history(history, factory)
     assert replayer.is_closed
+    replayer.close()
     closing = history[-1]
     assert isinstance(closing, WorkflowCompleted)
     assert default_converter.decode(closing.result) == result

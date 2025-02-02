@@ -10,7 +10,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 import heapq
-from collections.abc import Collection
+from collections import deque
+from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
 
 from loomwork.codec.payload import Payload
@@ -27,12 +28,22 @@ from loomwork.history.events import (
     WorkflowTerminated,
 )
 from loomwork.store.base import Store
-from loomwork.store.notify import TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, closed_topic
+from loomwork.store.closing import child_start_failed_event, closing_messages
+from loomwork.store.notify import (
+    TOPIC_OUTBOX,
+    TOPIC_STEPS,
+    TOPIC_TICKS,
+    TOPIC_TIMERS,
+    closed_topic,
+    run_topic,
+)
 from loomwork.store.records import (
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
     HeartbeatResult,
+    OutboxAction,
+    OutboxMessage,
     StepJob,
     TickOutcome,
     TimerRecord,
@@ -59,6 +70,8 @@ class MemoryStore(Store):
         self._jobs: dict[str, StepJob] = {}
         self._timers: dict[tuple[str, int], TimerRecord] = {}
         self._timer_heap: list[tuple[datetime, str, int]] = []
+        self._children: dict[str, list[str]] = {}
+        self._outbox: deque[OutboxMessage] = deque()
 
     # ------------------------------------------------------------------ helpers
 
@@ -68,13 +81,13 @@ class MemoryStore(Store):
         except KeyError:
             raise NotFoundError(f"workflow run {run_id!r} does not exist") from None
 
-    @staticmethod
-    def _append(run: _Run, event: Event, now: datetime) -> Event:
+    def _append(self, run: _Run, event: Event, now: datetime) -> Event:
         stored = dataclasses.replace(event, event_id=run.record.last_event_id + 1, timestamp=now)
         run.events.append(stored)
         run.record.last_event_id = stored.event_id
         if stored.is_input:
             run.record.last_input_id = stored.event_id
+        self.notifier.publish(run_topic(run.record.run_id))
         return stored
 
     def _mark_tick_pending(self, run: _Run, now: datetime) -> None:
@@ -110,7 +123,18 @@ class MemoryStore(Store):
         for seq in run.timers:
             self._timers.pop((record.run_id, seq), None)
         run.timers.clear()
+        running_children = [
+            self._runs[child].record
+            for child in self._children.get(record.run_id, ())
+            if child in self._runs and not self._runs[child].record.is_closed
+        ]
+        self._enqueue(closing_messages(record, running_children))
         self.notifier.publish(closed_topic(record.run_id))
+
+    def _enqueue(self, messages: Sequence[OutboxMessage]) -> None:
+        if messages:
+            self._outbox.extend(messages)
+            self.notifier.publish(TOPIC_OUTBOX)
 
     def _add_timer(self, run: _Run, timer: TimerRecord) -> None:
         self._timers[(timer.run_id, timer.seq)] = timer
@@ -127,21 +151,43 @@ class MemoryStore(Store):
 
     # ------------------------------------------------------------------ executions
 
-    async def create_execution(
-        self, record: ExecutionRecord, started: WorkflowStarted, now: datetime
-    ) -> tuple[ExecutionRecord, Event]:
-        for run_id in self._by_workflow_id.get(record.workflow_id, ()):
+    def _running_for(self, workflow_id: str) -> ExecutionRecord | None:
+        for run_id in self._by_workflow_id.get(workflow_id, ()):
             existing = self._runs[run_id].record
             if not existing.is_closed:
-                raise WorkflowAlreadyStartedError(record.workflow_id, existing.run_id)
-        if record.run_id in self._runs:
-            raise WorkflowAlreadyStartedError(record.workflow_id, record.run_id)
+                return existing
+        return None
+
+    def _insert_run(
+        self, record: ExecutionRecord, started: Event, now: datetime, extra: Sequence[Event] = ()
+    ) -> tuple[_Run, Event]:
         run = _Run(record=copy.copy(record))
         self._runs[record.run_id] = run
         self._by_workflow_id.setdefault(record.workflow_id, []).append(record.run_id)
         self._order.append(record.run_id)
+        if record.parent_run_id is not None:
+            self._children.setdefault(record.parent_run_id, []).append(record.run_id)
         event = self._append(run, started, now)
+        for extra_event in extra:
+            if not extra_event.is_input:
+                raise ValueError(f"{type(extra_event).__name__} is not an input event")
+            self._append(run, extra_event, now)
         self._mark_tick_pending(run, now)
+        return run, event
+
+    async def create_execution(
+        self,
+        record: ExecutionRecord,
+        started: WorkflowStarted,
+        now: datetime,
+        extra_inputs: Sequence[Event] = (),
+    ) -> tuple[ExecutionRecord, Event]:
+        running = self._running_for(record.workflow_id)
+        if running is not None:
+            raise WorkflowAlreadyStartedError(record.workflow_id, running.run_id)
+        if record.run_id in self._runs:
+            raise WorkflowAlreadyStartedError(record.workflow_id, record.run_id)
+        run, event = self._insert_run(record, started, now, extra_inputs)
         return copy.copy(run.record), event
 
     async def get_execution(self, run_id: str) -> ExecutionRecord:
@@ -265,6 +311,10 @@ class MemoryStore(Store):
         record.tick_failures = 0
         record.last_tick_error = None
 
+        self._enqueue(outcome.outbox)
+        for child in outcome.new_children:
+            self._start_child(run, child.record, child.started, now)
+
         if outcome.close is not None:
             self._close(run, outcome.close, now)
             return appended
@@ -295,6 +345,25 @@ class MemoryStore(Store):
         record.tick_pending = False
         self._mark_tick_pending(run, now)
         return appended
+
+    def _start_child(
+        self, parent: _Run, child: ExecutionRecord, started: Event, now: datetime
+    ) -> None:
+        running = self._running_for(child.workflow_id)
+        if running is not None or child.run_id in self._runs:
+            assert child.parent_seq is not None
+            self._append(
+                parent,
+                child_start_failed_event(
+                    child.parent_seq,
+                    child.workflow_name,
+                    child.workflow_id,
+                    running.run_id if running else child.run_id,
+                ),
+                now,
+            )
+            return
+        self._insert_run(child, started, now)
 
     async def fail_tick(
         self,
@@ -495,6 +564,45 @@ class MemoryStore(Store):
                 self._mark_tick_pending(run, now)
             fired += 1
         return fired
+
+    # ------------------------------------------------------------------ outbox
+
+    async def relay_outbox(self, now: datetime, limit: int = 100) -> int:
+        # Only messages present at the start; ones enqueued while relaying (for example
+        # by a termination) wait for the next call, as in the SQL stores.
+        batch = min(limit, len(self._outbox))
+        processed = 0
+        while processed < batch:
+            message = self._outbox.popleft()
+            processed += 1
+            if message.target_run_id is not None:
+                target = self._runs.get(message.target_run_id)
+            else:
+                assert message.target_workflow_id is not None
+                running = self._running_for(message.target_workflow_id)
+                target = self._runs[running.run_id] if running else None
+            if target is None or target.record.is_closed:
+                continue
+            if message.action is OutboxAction.APPEND_INPUT:
+                assert message.event is not None
+                self._append(target, message.event, now)
+                self._mark_tick_pending(target, now)
+            elif message.action is OutboxAction.REQUEST_CANCEL:
+                await self.request_cancel(target.record.run_id, message.reason, now)
+            else:
+                await self.terminate(target.record.run_id, message.reason, now)
+        return processed
+
+    async def outbox_size(self) -> int:
+        return len(self._outbox)
+
+    async def list_children(self, run_id: str) -> list[ExecutionRecord]:
+        self._run(run_id)
+        return [
+            copy.copy(self._runs[c].record)
+            for c in self._children.get(run_id, ())
+            if c in self._runs
+        ]
 
     # ------------------------------------------------------------------ retention
 

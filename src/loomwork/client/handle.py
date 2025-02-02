@@ -7,12 +7,16 @@ from typing import Any, Generic, TypeVar
 
 from loomwork.codec.converter import DataConverter
 from loomwork.engine.engine import Engine
+from loomwork.engine.queries import QueryRunner
 from loomwork.errors import (
+    LoomworkError,
+    UpdateFailedError,
     WorkflowCanceledError,
     WorkflowFailedError,
     WorkflowTerminatedError,
 )
 from loomwork.history.events import Event
+from loomwork.sdk.messaging import Channel
 from loomwork.store.records import ExecutionRecord, ExecutionStatus, StepJob
 
 R = TypeVar("R")
@@ -35,9 +39,11 @@ class WorkflowHandle(Generic[R]):
         workflow_id: str | None = None,
         run_id: str | None = None,
         result_hint: Any = _NO_HINT,
+        queries: QueryRunner | None = None,
     ) -> None:
         if workflow_id is None and run_id is None:
             raise ValueError("a handle needs a workflow_id or a run_id")
+        self._queries = queries
         self._engine = engine
         self._converter = converter
         self.workflow_id = workflow_id
@@ -61,6 +67,62 @@ class WorkflowHandle(Generic[R]):
 
     async def pending_steps(self) -> list[StepJob]:
         return await self._engine.pending_steps(await self._run_id())
+
+    async def children(self) -> list[ExecutionRecord]:
+        return await self._engine.children(await self._run_id())
+
+    async def signal(
+        self, channel: Channel[Any] | str, value: Any, *, message_id: str | None = None
+    ) -> None:
+        """Send ``value`` to one of the workflow's channels.
+
+        When a :class:`~loomwork.Channel` is given, the value is validated against its
+        type first. ``message_id`` makes delivery idempotent: the workflow ignores a
+        second message with the same id.
+        """
+        if isinstance(channel, Channel):
+            value = channel.validate(value)
+            name = channel.name
+        else:
+            name = channel
+        await self._engine.signal(
+            await self._run_id(),
+            name,
+            self._converter.encode(value),
+            message_id=message_id or "",
+        )
+
+    async def query(self, name: str, *args: Any, result_type: Any = _NO_HINT) -> Any:
+        """Ask the workflow a read-only question (requires its code in this process)."""
+        if self._queries is None:
+            raise LoomworkError("queries need the workflow code: create the client with a registry")
+        return await self._queries.query_value(await self._run_id(), name, args, result_type)
+
+    async def update(
+        self,
+        name: str,
+        *args: Any,
+        result_type: Any = _NO_HINT,
+        timeout: float | None = None,
+        update_id: str | None = None,
+    ) -> Any:
+        """Run update handler ``name`` in the workflow and return its result.
+
+        Raises:
+            UpdateFailedError: the handler raised.
+            WorkflowClosedError: the run closed before handling the update.
+            TimeoutError: no outcome within ``timeout`` seconds (the update may still
+                run later; retry with the same ``update_id`` to wait again).
+        """
+        run_id = await self._run_id()
+        update_id = await self._engine.request_update(
+            run_id, name, self._converter.encode_args(list(args)), update_id=update_id
+        )
+        outcome = await self._engine.wait_update(run_id, update_id, timeout)
+        if outcome.failure is not None:
+            raise UpdateFailedError(update_id, outcome.failure) from outcome.failure.to_exception()
+        assert outcome.result is not None
+        return self._converter.decode(outcome.result, result_type)
 
     async def cancel(self, reason: str = "") -> bool:
         return await self._engine.request_cancel(await self._run_id(), reason)

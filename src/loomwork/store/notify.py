@@ -17,10 +17,16 @@ from collections import defaultdict
 TOPIC_TICKS = "ticks"
 TOPIC_STEPS = "steps"
 TOPIC_TIMERS = "timers"
+TOPIC_OUTBOX = "outbox"
 
 
 def closed_topic(run_id: str) -> str:
     return f"closed:{run_id}"
+
+
+def run_topic(run_id: str) -> str:
+    """Published whenever a run's history grows (used by update callers)."""
+    return f"run:{run_id}"
 
 
 class Notifier:

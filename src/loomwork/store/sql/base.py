@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta
 from typing import Any, ClassVar, Protocol
@@ -33,13 +33,24 @@ from loomwork.history.events import (
     WorkflowStarted,
     WorkflowTerminated,
 )
+from loomwork.history.serde import event_from_dict
 from loomwork.store.base import Store
-from loomwork.store.notify import TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, closed_topic
+from loomwork.store.closing import child_start_failed_event, closing_messages
+from loomwork.store.notify import (
+    TOPIC_OUTBOX,
+    TOPIC_STEPS,
+    TOPIC_TICKS,
+    TOPIC_TIMERS,
+    closed_topic,
+    run_topic,
+)
 from loomwork.store.records import (
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
     HeartbeatResult,
+    OutboxAction,
+    OutboxMessage,
     StepJob,
     TickOutcome,
 )
@@ -160,6 +171,7 @@ class SQLStore(Store, abc.ABC):
         rec.last_event_id = stored.event_id
         if stored.is_input:
             rec.last_input_id = stored.event_id
+        tx.notify(run_topic(rec.run_id))
         return stored
 
     @staticmethod
@@ -189,7 +201,35 @@ class SQLStore(Store, abc.ABC):
         rec.lease_expires_at = None
         await tx.execute("DELETE FROM lw_step_jobs WHERE run_id = ?", (rec.run_id,))
         await tx.execute("DELETE FROM lw_timers WHERE run_id = ?", (rec.run_id,))
+        rows = await tx.fetchall(
+            "SELECT * FROM lw_executions WHERE parent_run_id = ? AND status = ? ORDER BY seq",
+            (rec.run_id, ExecutionStatus.RUNNING.value),
+        )
+        await self._enqueue(tx, closing_messages(rec, [self._record(r) for r in rows]), now)
         tx.notify(closed_topic(rec.run_id))
+
+    async def _enqueue(
+        self, tx: SqlTransaction, messages: Iterable[OutboxMessage], now: datetime
+    ) -> None:
+        wrote = False
+        for message in messages:
+            event = message.event
+            await tx.execute(
+                "INSERT INTO lw_outbox (action, target_run_id, target_workflow_id, event_kind, "
+                "event_body, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    message.action.value,
+                    message.target_run_id,
+                    message.target_workflow_id,
+                    event.kind if event is not None else None,
+                    codec.event_body_to_json(event) if event is not None else None,
+                    message.reason,
+                    self.ts_in(now),
+                ),
+            )
+            wrote = True
+        if wrote:
+            tx.notify(TOPIC_OUTBOX)
 
     @staticmethod
     def _lease_free(owner: str | None, expires: datetime | None, now: datetime) -> bool:
@@ -197,8 +237,47 @@ class SQLStore(Store, abc.ABC):
 
     # ------------------------------------------------------------------ executions
 
+    async def _insert_run(
+        self,
+        tx: SqlTransaction,
+        rec: ExecutionRecord,
+        started: Event,
+        now: datetime,
+        extra_inputs: Sequence[Event] = (),
+    ) -> Event:
+        await tx.execute(
+            """
+            INSERT INTO lw_executions (
+                run_id, workflow_id, workflow_name, status, created_at,
+                parent_run_id, parent_seq, parent_close_policy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rec.run_id,
+                rec.workflow_id,
+                rec.workflow_name,
+                rec.status.value,
+                self.ts_in(rec.created_at),
+                rec.parent_run_id,
+                rec.parent_seq,
+                rec.parent_close_policy,
+            ),
+        )
+        event = await self._append(tx, rec, started, now)
+        for extra in extra_inputs:
+            if not extra.is_input:
+                raise ValueError(f"{type(extra).__name__} is not an input event")
+            await self._append(tx, rec, extra, now)
+        self._refresh_tick_pending(tx, rec, now)
+        await self._write(tx, rec)
+        return event
+
     async def create_execution(
-        self, record: ExecutionRecord, started: WorkflowStarted, now: datetime
+        self,
+        record: ExecutionRecord,
+        started: WorkflowStarted,
+        now: datetime,
+        extra_inputs: Sequence[Event] = (),
     ) -> tuple[ExecutionRecord, Event]:
         rec = dataclasses.replace(record)
         try:
@@ -211,23 +290,7 @@ class SQLStore(Store, abc.ABC):
                     raise WorkflowAlreadyStartedError(rec.workflow_id, running["run_id"])
                 if await tx.fetchone("SELECT 1 FROM lw_executions WHERE run_id = ?", (rec.run_id,)):
                     raise WorkflowAlreadyStartedError(rec.workflow_id, rec.run_id)
-                await tx.execute(
-                    """
-                    INSERT INTO lw_executions
-                        (run_id, workflow_id, workflow_name, status, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        rec.run_id,
-                        rec.workflow_id,
-                        rec.workflow_name,
-                        rec.status.value,
-                        self.ts_in(rec.created_at),
-                    ),
-                )
-                event = await self._append(tx, rec, started, now)
-                self._refresh_tick_pending(tx, rec, now)
-                await self._write(tx, rec)
+                event = await self._insert_run(tx, rec, started, now, extra_inputs)
         except WorkflowAlreadyStartedError:
             raise
         except Exception as exc:
@@ -401,6 +464,10 @@ class SQLStore(Store, abc.ABC):
             rec.tick_failures = 0
             rec.last_tick_error = None
 
+            await self._enqueue(tx, outcome.outbox, now)
+            for child in outcome.new_children:
+                await self._start_child(tx, rec, child.record, child.started, now)
+
             if outcome.close is not None:
                 await self._close(tx, rec, outcome.close, now)
                 await self._write(tx, rec)
@@ -427,6 +494,37 @@ class SQLStore(Store, abc.ABC):
             self._refresh_tick_pending(tx, rec, now)
             await self._write(tx, rec)
             return appended
+
+    async def _start_child(
+        self,
+        tx: SqlTransaction,
+        parent: ExecutionRecord,
+        child: ExecutionRecord,
+        started: Event,
+        now: datetime,
+    ) -> None:
+        running = await tx.fetchone(
+            "SELECT run_id FROM lw_executions WHERE workflow_id = ? AND status = ?",
+            (child.workflow_id, ExecutionStatus.RUNNING.value),
+        )
+        clash = running is not None or await tx.fetchone(
+            "SELECT 1 FROM lw_executions WHERE run_id = ?", (child.run_id,)
+        )
+        if clash:
+            assert child.parent_seq is not None
+            await self._append(
+                tx,
+                parent,
+                child_start_failed_event(
+                    child.parent_seq,
+                    child.workflow_name,
+                    child.workflow_id,
+                    running["run_id"] if running is not None else child.run_id,
+                ),
+                now,
+            )
+            return
+        await self._insert_run(tx, dataclasses.replace(child), started, now)
 
     async def _cancel_step(self, tx: SqlTransaction, run_id: str, seq: int, now: datetime) -> None:
         row = await tx.fetchone(
@@ -725,6 +823,89 @@ class SQLStore(Store, abc.ABC):
                     await self._write(tx, rec)
                 fired += 1
         return fired
+
+    # ------------------------------------------------------------------ outbox
+
+    def _outbox_message(self, row: Row) -> OutboxMessage:
+        event = None
+        if row["event_kind"] is not None:
+            body = dict(codec.loads(row["event_body"]) or {})
+            body["kind"] = row["event_kind"]
+            event = event_from_dict(body)
+        return OutboxMessage(
+            action=OutboxAction(row["action"]),
+            target_run_id=row["target_run_id"],
+            target_workflow_id=row["target_workflow_id"],
+            event=event,
+            reason=row["reason"] or "",
+        )
+
+    async def relay_outbox(self, now: datetime, limit: int = 100) -> int:
+        async with self.transaction() as tx:
+            ids = await tx.fetchall("SELECT id FROM lw_outbox ORDER BY id LIMIT ?", (limit,))
+        processed = 0
+        for id_row in ids:
+            # One transaction per message: lock the message, then its single target run.
+            async with self.transaction() as tx:
+                row = await tx.fetchone(
+                    f"SELECT * FROM lw_outbox WHERE id = ?{self.SKIP_LOCKED}", (id_row["id"],)
+                )
+                if row is None:
+                    continue  # taken by a concurrent relay
+                await tx.execute("DELETE FROM lw_outbox WHERE id = ?", (row["id"],))
+                processed += 1
+                message = self._outbox_message(row)
+                target = await self._outbox_target(tx, message)
+                if target is None or target.is_closed:
+                    continue
+                if message.action is OutboxAction.APPEND_INPUT:
+                    assert message.event is not None
+                    await self._append(tx, target, message.event, now)
+                    self._refresh_tick_pending(tx, target, now)
+                elif message.action is OutboxAction.REQUEST_CANCEL:
+                    if not target.cancel_requested:
+                        target.cancel_requested = True
+                        await self._append(tx, target, CancelRequested(reason=message.reason), now)
+                        self._refresh_tick_pending(tx, target, now)
+                else:
+                    await self._append(tx, target, WorkflowTerminated(reason=message.reason), now)
+                    await self._close(
+                        tx,
+                        target,
+                        CloseOutcome(ExecutionStatus.TERMINATED, reason=message.reason),
+                        now,
+                    )
+                await self._write(tx, target)
+        return processed
+
+    async def _outbox_target(
+        self, tx: SqlTransaction, message: OutboxMessage
+    ) -> ExecutionRecord | None:
+        if message.target_run_id is not None:
+            row = await tx.fetchone(
+                f"SELECT * FROM lw_executions WHERE run_id = ?{self.FOR_UPDATE}",
+                (message.target_run_id,),
+            )
+        else:
+            row = await tx.fetchone(
+                "SELECT * FROM lw_executions WHERE workflow_id = ? AND status = ?"
+                f"{self.FOR_UPDATE}",
+                (message.target_workflow_id, ExecutionStatus.RUNNING.value),
+            )
+        return None if row is None else self._record(row)
+
+    async def outbox_size(self) -> int:
+        async with self.transaction() as tx:
+            row = await tx.fetchone("SELECT COUNT(*) AS n FROM lw_outbox")
+        return int(row["n"]) if row else 0
+
+    async def list_children(self, run_id: str) -> list[ExecutionRecord]:
+        async with self.transaction() as tx:
+            await self._load(tx, run_id, lock=False)
+            rows = await tx.fetchall(
+                "SELECT * FROM lw_executions WHERE parent_run_id = ? ORDER BY seq", (run_id,)
+            )
+        return [self._record(row) for row in rows]
 
     # ------------------------------------------------------------------ maintenance
 

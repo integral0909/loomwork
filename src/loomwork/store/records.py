@@ -64,6 +64,9 @@ class ExecutionRecord:
     result: Payload | None = None
     failure: FailureInfo | None = None
     close_reason: str = ""
+    parent_run_id: str | None = None
+    parent_seq: int | None = None
+    parent_close_policy: str = "terminate"
 
     @property
     def is_closed(self) -> bool:
@@ -119,6 +122,47 @@ class TimerRecord:
     fire_at: datetime
 
 
+class OutboxAction(enum.StrEnum):
+    APPEND_INPUT = "append_input"
+    REQUEST_CANCEL = "request_cancel"
+    TERMINATE = "terminate"
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxMessage:
+    """A change to *another* run, recorded in the same transaction as its cause.
+
+    The outbox keeps every transaction confined to a single execution row: a child
+    reporting to its parent, or a parent terminating its children, writes an outbox
+    message instead of locking the other run. A relay applies messages afterwards.
+
+    Exactly one of ``target_run_id`` and ``target_workflow_id`` is set; a workflow id
+    addresses that workflow's currently running execution.
+    """
+
+    action: OutboxAction
+    target_run_id: str | None = None
+    target_workflow_id: str | None = None
+    event: Event | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if (self.target_run_id is None) == (self.target_workflow_id is None):
+            raise ValueError("exactly one of target_run_id and target_workflow_id is required")
+        if self.action is OutboxAction.APPEND_INPUT and (
+            self.event is None or not self.event.is_input
+        ):
+            raise ValueError("APPEND_INPUT messages carry an input event")
+
+
+@dataclass(frozen=True, slots=True)
+class ChildSpec:
+    """A child execution to create atomically with the parent's tick."""
+
+    record: ExecutionRecord
+    started: Event
+
+
 @dataclass(frozen=True, slots=True)
 class CloseOutcome:
     status: ExecutionStatus
@@ -139,4 +183,6 @@ class TickOutcome:
     cancel_steps: list[int] = field(default_factory=list)
     new_timers: list[TimerRecord] = field(default_factory=list)
     cancel_timers: list[int] = field(default_factory=list)
+    new_children: list[ChildSpec] = field(default_factory=list)
+    outbox: list[OutboxMessage] = field(default_factory=list)
     close: CloseOutcome | None = None

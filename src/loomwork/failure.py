@@ -16,6 +16,7 @@ from typing import Any
 from loomwork.errors import (
     ApplicationError,
     CanceledFailure,
+    ChildWorkflowError,
     FailureError,
     StepError,
     TimeoutFailure,
@@ -35,7 +36,7 @@ class FailureInfo:
         type: stable type identifier (``ApplicationError.type`` or the exception's
             qualified class name).
         kind: which Loomwork error family produced it: ``application``, ``step``,
-            ``timeout``, ``canceled`` or ``unknown``.
+            ``child``, ``timeout``, ``canceled`` or ``unknown``.
         stack_trace: formatted traceback of the original exception, truncated.
         non_retryable: whether retry policies must stop immediately.
         details: JSON-compatible extra data supplied by the raiser.
@@ -76,6 +77,12 @@ class FailureInfo:
                     "seq": exc.seq,
                     "attempts": exc.attempts,
                 }
+            elif isinstance(exc, ChildWorkflowError):
+                attributes = {
+                    "workflow_id": exc.workflow_id,
+                    "run_id": exc.run_id,
+                    "status": exc.status,
+                }
             return cls(
                 message=_truncate(exc.message),
                 type=exc.type,
@@ -103,6 +110,15 @@ class FailureInfo:
                 step_name=str(self.attributes.get("step_name", "")),
                 seq=int(self.attributes.get("seq", 0)),
                 attempts=int(self.attributes.get("attempts", 0)),
+                type=self.type,
+                non_retryable=self.non_retryable,
+            )
+        elif self.kind == "child":
+            exc = ChildWorkflowError(
+                self.message,
+                workflow_id=str(self.attributes.get("workflow_id", "")),
+                run_id=str(self.attributes.get("run_id", "")),
+                status=str(self.attributes.get("status", "")),
                 type=self.type,
                 non_retryable=self.non_retryable,
             )
@@ -173,6 +189,8 @@ class FailureInfo:
 def _kind_of(exc: FailureError) -> str:
     if isinstance(exc, StepError):
         return "step"
+    if isinstance(exc, ChildWorkflowError):
+        return "child"
     if isinstance(exc, TimeoutFailure):
         return "timeout"
     if isinstance(exc, CanceledFailure):

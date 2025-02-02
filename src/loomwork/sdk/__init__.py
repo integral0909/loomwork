@@ -21,8 +21,26 @@ from loomwork.sdk.definitions import (
     step,
     workflow,
 )
+from loomwork.sdk.messaging import (
+    Channel,
+    ChannelEmpty,
+    ChildHandle,
+    Compensations,
+    query,
+    signal_external,
+    start_child,
+    update,
+)
 
 __all__ = [
+    "Channel",
+    "ChannelEmpty",
+    "ChildHandle",
+    "Compensations",
+    "query",
+    "signal_external",
+    "start_child",
+    "update",
     "heartbeat",
     "heartbeat_details",
     "Registry",

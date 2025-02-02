@@ -11,7 +11,7 @@ detail and is run against every backend.
 from __future__ import annotations
 
 import abc
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
 
 from loomwork.codec.payload import Payload
@@ -45,9 +45,14 @@ class Store(abc.ABC):
 
     @abc.abstractmethod
     async def create_execution(
-        self, record: ExecutionRecord, started: WorkflowStarted, now: datetime
+        self,
+        record: ExecutionRecord,
+        started: WorkflowStarted,
+        now: datetime,
+        extra_inputs: Sequence[Event] = (),
     ) -> tuple[ExecutionRecord, Event]:
-        """Insert a new running execution whose history starts with ``started``.
+        """Insert a new running execution whose history starts with ``started``,
+        followed by ``extra_inputs`` (used by signal-with-start).
 
         Raises:
             WorkflowAlreadyStartedError: another run with the same workflow id is
@@ -126,7 +131,13 @@ class Store(abc.ABC):
         A ``TickCompleted`` event is written unless the tick consumed no new input and
         produced no decision. Step jobs and timers are created or cancelled as described
         by ``outcome``; a closing outcome deletes every remaining job and timer of the
-        run.
+        run. Child executions in ``outcome.new_children`` are created in the same
+        transaction; a child whose workflow id is already running is not created and
+        the parent receives a ``ChildFailed`` input instead. Outbox messages are stored
+        for the relay.
+
+        Closing a run (here or through :meth:`terminate`) also enqueues outbox messages:
+        the run's result to its parent, and its parent-close policy to running children.
 
         Raises:
             LeaseLostError: ``worker_id`` no longer holds the lease, or the run was
@@ -228,6 +239,24 @@ class Store(abc.ABC):
     @abc.abstractmethod
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
         """Outstanding step jobs of a run, ordered by sequence number."""
+
+    # ------------------------------------------------------------------ outbox
+
+    @abc.abstractmethod
+    async def relay_outbox(self, now: datetime, limit: int = 100) -> int:
+        """Apply up to ``limit`` outbox messages, each in its own transaction.
+
+        Messages whose target does not exist or has closed are discarded. Returns the
+        number of messages processed.
+        """
+
+    @abc.abstractmethod
+    async def outbox_size(self) -> int:
+        """Number of messages waiting for the relay."""
+
+    @abc.abstractmethod
+    async def list_children(self, run_id: str) -> list[ExecutionRecord]:
+        """Executions started as children of ``run_id``, oldest first."""
 
     # ------------------------------------------------------------------ retention
 

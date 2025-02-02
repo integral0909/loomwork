@@ -5,8 +5,10 @@ A :class:`Worker` runs three kinds of loops against one store:
 * ``workflow_concurrency`` tick loops, each executing one workflow tick at a time,
 * ``step_concurrency`` step loops, each executing one step attempt at a time, taking
   work only from the worker's ``task_queues`` and within its per-queue limits,
-* one timer loop that fires due timers (optional; only one is needed per deployment,
-  although running several is safe because firing is atomic).
+* one timer loop that fires due timers, and
+* one outbox relay loop that delivers cross-run messages (child results, parent-close
+  policies, signals between workflows). Both are optional per worker; one of each is
+  needed per deployment, and running several is safe because both are atomic.
 
 Idle loops sleep until the store publishes a notification for their topic or the poll
 interval elapses, whichever comes first.
@@ -30,7 +32,7 @@ from loomwork.ids import new_id
 from loomwork.options import validate_queue
 from loomwork.sdk.definitions import Registry
 from loomwork.store.base import Store
-from loomwork.store.notify import TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, Notifier
+from loomwork.store.notify import TOPIC_OUTBOX, TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, Notifier
 from loomwork.worker.limits import QueueGate, QueueLimit
 
 logger = logging.getLogger("loomwork.worker")
@@ -54,6 +56,7 @@ class WorkerOptions:
         workflow_concurrency: concurrent workflow ticks.
         step_concurrency: concurrent step attempts across all queues.
         run_timers: whether this worker fires due timers.
+        run_outbox: whether this worker relays outbox messages between runs.
         shutdown_grace: seconds in-flight work gets to finish on :meth:`Worker.stop`.
         task_queues: queues whose steps this worker executes; ``None`` means every
             queue. Workers that hold special credentials or hardware subscribe to their
@@ -65,6 +68,7 @@ class WorkerOptions:
     workflow_concurrency: int = 4
     step_concurrency: int = 16
     run_timers: bool = True
+    run_outbox: bool = True
     shutdown_grace: float = 10.0
     task_queues: tuple[str, ...] | None = None
     queue_limits: Mapping[str, QueueLimit] = field(default_factory=dict)
@@ -142,6 +146,8 @@ class Worker:
             self._spawn(f"steps-{index}", self._step_loop())
         if self.options.run_timers:
             self._spawn("timers", self._timer_loop())
+        if self.options.run_outbox:
+            self._spawn("outbox", self._outbox_loop())
         logger.info(
             "worker %s started (%d workflows, %d steps registered)",
             self.worker_id,
@@ -261,6 +267,21 @@ class Worker:
             if next_at is not None:
                 waits.append(self.clock.sleep_until(next_at))
             await self._idle(*waits)
+
+    async def _outbox_loop(self) -> None:
+        notifier = self.store.notifier
+        batch = self.config.timer_batch_size
+        while not self._stopping.is_set():
+            token = notifier.token(TOPIC_OUTBOX)
+            try:
+                relayed = await self.store.relay_outbox(self.clock.now(), batch)
+            except Exception:
+                logger.exception("error while relaying outbox messages")
+                await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
+                continue
+            if relayed >= batch:
+                continue
+            await self._idle(notifier.wait(TOPIC_OUTBOX, token, self.config.poll_interval))
 
     @staticmethod
     async def _sleep(seconds: float) -> None:

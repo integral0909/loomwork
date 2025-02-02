@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import re
 from dataclasses import dataclass
 from datetime import timedelta
@@ -13,6 +14,14 @@ DEFAULT_QUEUE = "default"
 _QUEUE_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,100}$")
 MIN_PRIORITY = -1000
 MAX_PRIORITY = 1000
+
+
+class ParentClosePolicy(enum.StrEnum):
+    """What happens to a running child workflow when its parent closes first."""
+
+    TERMINATE = "terminate"
+    REQUEST_CANCEL = "request_cancel"
+    ABANDON = "abandon"
 
 
 def as_timedelta(value: timedelta | float | None) -> timedelta | None:

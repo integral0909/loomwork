@@ -113,6 +113,9 @@ EXECUTION_COLUMNS = (
     "result",
     "failure",
     "close_reason",
+    "parent_run_id",
+    "parent_seq",
+    "parent_close_policy",
 )
 
 STEP_JOB_COLUMNS = (
@@ -161,6 +164,9 @@ def execution_from_row(row: Row, ts: Any) -> ExecutionRecord:
         result=payload_from_json(row["result"]),
         failure=failure_from_json(row["failure"]),
         close_reason=row["close_reason"] or "",
+        parent_run_id=row["parent_run_id"],
+        parent_seq=int(row["parent_seq"]) if row["parent_seq"] is not None else None,
+        parent_close_policy=row["parent_close_policy"] or "terminate",
     )
 
 

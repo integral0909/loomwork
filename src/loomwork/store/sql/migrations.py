@@ -225,9 +225,53 @@ _0002_POSTGRES = (
     "CREATE INDEX lw_step_jobs_claim ON lw_step_jobs (queue, priority DESC, ready_at)",
 )
 
+# ---------------------------------------------------------------------------------------
+# 0003: child workflows and the cross-run outbox
+
+_0003_SQLITE = (
+    "ALTER TABLE lw_executions ADD COLUMN parent_run_id TEXT",
+    "ALTER TABLE lw_executions ADD COLUMN parent_seq INTEGER",
+    "ALTER TABLE lw_executions ADD COLUMN parent_close_policy TEXT NOT NULL DEFAULT 'terminate'",
+    "CREATE INDEX lw_executions_parent ON lw_executions (parent_run_id) "
+    "WHERE parent_run_id IS NOT NULL",
+    """
+    CREATE TABLE lw_outbox (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        action             TEXT    NOT NULL,
+        target_run_id      TEXT,
+        target_workflow_id TEXT,
+        event_kind         TEXT,
+        event_body         TEXT,
+        reason             TEXT    NOT NULL DEFAULT '',
+        created_at         INTEGER NOT NULL
+    )
+    """,
+)
+
+_0003_POSTGRES = (
+    "ALTER TABLE lw_executions ADD COLUMN parent_run_id TEXT",
+    "ALTER TABLE lw_executions ADD COLUMN parent_seq INTEGER",
+    "ALTER TABLE lw_executions ADD COLUMN parent_close_policy TEXT NOT NULL DEFAULT 'terminate'",
+    "CREATE INDEX lw_executions_parent ON lw_executions (parent_run_id) "
+    "WHERE parent_run_id IS NOT NULL",
+    """
+    CREATE TABLE lw_outbox (
+        id                 BIGSERIAL   PRIMARY KEY,
+        action             TEXT        NOT NULL,
+        target_run_id      TEXT,
+        target_workflow_id TEXT,
+        event_kind         TEXT,
+        event_body         JSONB,
+        reason             TEXT        NOT NULL DEFAULT '',
+        created_at         TIMESTAMPTZ NOT NULL
+    )
+    """,
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
+    Migration(3, "child workflows and outbox", _0003_SQLITE, _0003_POSTGRES),
 )
 
 

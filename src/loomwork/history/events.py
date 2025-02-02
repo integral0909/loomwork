@@ -91,6 +91,8 @@ class WorkflowStarted(Event):
     args: list[Payload] = field(default_factory=list)
     random_seed: int = 0
     attempt: int = 1
+    parent_workflow_id: str = ""
+    parent_run_id: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -127,6 +129,51 @@ class CancelRequested(Event):
     category: ClassVar[EventCategory] = EventCategory.INPUT
 
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SignalReceived(Event):
+    """A message was sent to one of the workflow's channels."""
+
+    kind: ClassVar[str] = "signal_received"
+    category: ClassVar[EventCategory] = EventCategory.INPUT
+
+    channel: str
+    payload: Payload
+    message_id: str = ""
+    sender: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UpdateRequested(Event):
+    """A caller asked the workflow to run an update handler and waits for its result."""
+
+    kind: ClassVar[str] = "update_requested"
+    category: ClassVar[EventCategory] = EventCategory.INPUT
+
+    update_id: str
+    name: str
+    args: list[Payload] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChildCompleted(Event):
+    kind: ClassVar[str] = "child_completed"
+    category: ClassVar[EventCategory] = EventCategory.INPUT
+
+    seq: int
+    result: Payload
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChildFailed(Event):
+    """A child run failed, was cancelled, was terminated, or could not be started."""
+
+    kind: ClassVar[str] = "child_failed"
+    category: ClassVar[EventCategory] = EventCategory.INPUT
+
+    seq: int
+    failure: FailureInfo
 
 
 # --------------------------------------------------------------------------- markers
@@ -203,6 +250,47 @@ class WorkflowCanceled(Event):
     category: ClassVar[EventCategory] = EventCategory.DECISION
 
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChildScheduled(Event):
+    """A child run was created in the same transaction as this event."""
+
+    kind: ClassVar[str] = "child_scheduled"
+    category: ClassVar[EventCategory] = EventCategory.DECISION
+
+    seq: int
+    workflow_name: str
+    workflow_id: str
+    run_id: str
+    args: list[Payload] = field(default_factory=list)
+    parent_close_policy: str = "terminate"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UpdateCompleted(Event):
+    """The outcome of an update handler: exactly one of ``result`` and ``failure``."""
+
+    kind: ClassVar[str] = "update_completed"
+    category: ClassVar[EventCategory] = EventCategory.DECISION
+
+    update_id: str
+    result: Payload | None = None
+    failure: FailureInfo | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExternalSignalScheduled(Event):
+    """The workflow sent a message to another workflow's channel (via the outbox)."""
+
+    kind: ClassVar[str] = "external_signal_scheduled"
+    category: ClassVar[EventCategory] = EventCategory.DECISION
+
+    seq: int
+    workflow_id: str
+    channel: str
+    payload: Payload
+    message_id: str = ""
 
 
 # --------------------------------------------------------------------------- system

@@ -8,7 +8,9 @@ from typing import Any, TypeVar, overload
 from loomwork.client.handle import WorkflowHandle
 from loomwork.codec.converter import DataConverter, default_converter, return_hint
 from loomwork.engine.engine import Engine
-from loomwork.sdk.definitions import WorkflowDefinition
+from loomwork.engine.queries import QueryRunner
+from loomwork.sdk.definitions import Registry, WorkflowDefinition
+from loomwork.sdk.messaging import Channel
 from loomwork.store.records import ExecutionRecord, ExecutionStatus
 
 R = TypeVar("R")
@@ -24,9 +26,18 @@ class Client:
     code is not importable by the caller).
     """
 
-    def __init__(self, engine: Engine, converter: DataConverter | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        converter: DataConverter | None = None,
+        *,
+        registry: Registry | None = None,
+    ) -> None:
         self.engine = engine
         self.converter = converter or default_converter
+        self.queries = (
+            QueryRunner(engine.store, registry, self.converter) if registry is not None else None
+        )
 
     @overload
     async def start(
@@ -62,6 +73,7 @@ class Client:
             workflow_id=record.workflow_id,
             run_id=record.run_id,
             result_hint=hint,
+            queries=self.queries,
         )
 
     @overload
@@ -102,6 +114,43 @@ class Client:
             workflow_id=workflow_id,
             run_id=run_id,
             result_hint=result_type,
+            queries=self.queries,
+        )
+
+    async def signal_with_start(
+        self,
+        workflow: WorkflowDefinition[..., Any] | str,
+        *args: Any,
+        id: str,
+        channel: Channel[Any] | str,
+        value: Any,
+        message_id: str | None = None,
+    ) -> WorkflowHandle[Any]:
+        """Send a message to workflow ``id``, starting it with ``args`` if not running."""
+        if isinstance(workflow, WorkflowDefinition):
+            name, positional, hint = workflow.name, workflow.bind(args), return_hint(workflow.fn)
+        else:
+            name, positional, hint = workflow, list(args), _NO_HINT
+        if isinstance(channel, Channel):
+            value = channel.validate(value)
+            channel_name = channel.name
+        else:
+            channel_name = channel
+        record = await self.engine.signal_with_start(
+            name,
+            self.converter.encode_args(positional),
+            workflow_id=id,
+            channel=channel_name,
+            payload=self.converter.encode(value),
+            message_id=message_id or "",
+        )
+        return WorkflowHandle(
+            self.engine,
+            self.converter,
+            workflow_id=record.workflow_id,
+            run_id=record.run_id,
+            result_hint=hint,
+            queries=self.queries,
         )
 
     async def list(

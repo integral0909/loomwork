@@ -9,22 +9,27 @@ from __future__ import annotations
 
 import logging
 import random
+import secrets
 from datetime import timedelta
+from typing import Any
 
 from loomwork.clock import Clock
 from loomwork.codec.converter import DataConverter
 from loomwork.engine.cache import ReplayerCache
 from loomwork.engine.config import EngineConfig
 from loomwork.errors import LeaseLostError, NondeterminismError
-from loomwork.history.events import TickCompleted, WorkflowStarted
+from loomwork.history.events import SignalReceived, TickCompleted, WorkflowStarted
 from loomwork.ids import new_id
 from loomwork.runtime.commands import (
     CancelTimer,
     CancelWorkflow,
+    CompleteUpdate,
     CompleteWorkflow,
     FailWorkflow,
     RequestCancelStep,
+    ScheduleChild,
     ScheduleStep,
+    SignalExternal,
     StartTimer,
 )
 from loomwork.runtime.instance import WorkflowInstance
@@ -32,9 +37,12 @@ from loomwork.runtime.replayer import LiveTick, Replayer
 from loomwork.sdk.definitions import Registry
 from loomwork.store.base import Store
 from loomwork.store.records import (
+    ChildSpec,
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
+    OutboxAction,
+    OutboxMessage,
     StepJob,
     TickOutcome,
     TimerRecord,
@@ -166,6 +174,23 @@ class TickProcessor:
                 case CancelTimer():
                     if new_timers.pop(command.seq, None) is None:
                         outcome.cancel_timers.append(command.seq)
+                case ScheduleChild():
+                    outcome.new_children.append(self._child_spec(record, command, now))
+                case SignalExternal():
+                    outcome.outbox.append(
+                        OutboxMessage(
+                            action=OutboxAction.APPEND_INPUT,
+                            target_workflow_id=command.workflow_id,
+                            event=SignalReceived(
+                                channel=command.channel,
+                                payload=command.payload,
+                                message_id=command.message_id,
+                                sender=record.workflow_id,
+                            ),
+                        )
+                    )
+                case CompleteUpdate():
+                    pass  # recorded as a decision; callers read it from the history
                 case CompleteWorkflow():
                     outcome.close = CloseOutcome(ExecutionStatus.COMPLETED, result=command.result)
                 case FailWorkflow():
@@ -178,6 +203,29 @@ class TickProcessor:
             outcome.new_steps = list(new_steps.values())
             outcome.new_timers = list(new_timers.values())
         return outcome
+
+    @staticmethod
+    def _child_spec(parent: ExecutionRecord, command: ScheduleChild, now: Any) -> ChildSpec:
+        child = ExecutionRecord(
+            run_id=command.run_id,
+            workflow_id=command.workflow_id,
+            workflow_name=command.workflow_name,
+            status=ExecutionStatus.RUNNING,
+            created_at=now,
+            parent_run_id=parent.run_id,
+            parent_seq=command.seq,
+            parent_close_policy=command.parent_close_policy,
+        )
+        started = WorkflowStarted(
+            workflow_name=command.workflow_name,
+            workflow_id=command.workflow_id,
+            run_id=command.run_id,
+            args=list(command.args),
+            random_seed=secrets.randbits(63),
+            parent_workflow_id=parent.workflow_id,
+            parent_run_id=parent.run_id,
+        )
+        return ChildSpec(record=child, started=started)
 
     async def _fail(self, record: ExecutionRecord, exc: Exception) -> None:
         self.ticks_failed += 1

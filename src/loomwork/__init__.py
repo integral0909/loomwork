@@ -14,6 +14,7 @@ from loomwork.engine.engine import Engine
 from loomwork.errors import (
     ApplicationError,
     CanceledFailure,
+    ChildWorkflowError,
     DeterminismViolation,
     FailureError,
     LoomworkError,
@@ -22,16 +23,22 @@ from loomwork.errors import (
     NotInWorkflowError,
     StepError,
     TimeoutFailure,
+    UpdateFailedError,
     WorkflowAlreadyStartedError,
     WorkflowCanceledError,
+    WorkflowClosedError,
     WorkflowFailedError,
     WorkflowTerminatedError,
 )
 from loomwork.failure import FailureInfo
 from loomwork.info import StepInfo, WorkflowInfo
-from loomwork.options import StepOptions
+from loomwork.options import ParentClosePolicy, StepOptions
 from loomwork.retry import RetryPolicy
 from loomwork.sdk import (
+    Channel,
+    ChannelEmpty,
+    ChildHandle,
+    Compensations,
     Registry,
     StepDefinition,
     WorkflowDefinition,
@@ -42,11 +49,15 @@ from loomwork.sdk import (
     is_replaying,
     logger,
     now,
+    query,
     random,
+    signal_external,
     sleep,
     sleep_until,
+    start_child,
     step,
     step_info,
+    update,
     uuid4,
     workflow,
 )
@@ -54,6 +65,18 @@ from loomwork.store import ExecutionRecord, ExecutionStatus, MemoryStore, Store
 from loomwork.worker import Worker, WorkerOptions
 
 __all__ = [
+    "Channel",
+    "ChannelEmpty",
+    "ChildHandle",
+    "ChildWorkflowError",
+    "Compensations",
+    "ParentClosePolicy",
+    "UpdateFailedError",
+    "WorkflowClosedError",
+    "query",
+    "signal_external",
+    "start_child",
+    "update",
     "ApplicationError",
     "CanceledFailure",
     "Client",

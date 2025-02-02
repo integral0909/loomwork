@@ -20,11 +20,14 @@ from datetime import datetime
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
+    ChildScheduled,
     Event,
+    ExternalSignalScheduled,
     StepCancelRequested,
     StepScheduled,
     TimerCanceled,
     TimerStarted,
+    UpdateCompleted,
     WorkflowCanceled,
     WorkflowCompleted,
     WorkflowFailed,
@@ -164,6 +167,83 @@ class CancelWorkflow(Command):
     @property
     def closes_workflow(self) -> bool:
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleChild(Command):
+    """Start a child run. Its run id is derived from the parent's, so it is known to the
+    workflow immediately and identical on replay."""
+
+    seq: int
+    workflow_name: str
+    workflow_id: str
+    run_id: str
+    args: list[Payload] = field(default_factory=list)
+    parent_close_policy: str = "terminate"
+
+    def to_event(self) -> Event:
+        return ChildScheduled(
+            seq=self.seq,
+            workflow_name=self.workflow_name,
+            workflow_id=self.workflow_id,
+            run_id=self.run_id,
+            args=self.args,
+            parent_close_policy=self.parent_close_policy,
+        )
+
+    def matches(self, event: Event) -> bool:
+        return (
+            isinstance(event, ChildScheduled)
+            and event.seq == self.seq
+            and event.workflow_name == self.workflow_name
+        )
+
+    def describe(self) -> str:
+        return f"ScheduleChild(seq={self.seq}, workflow={self.workflow_name!r})"
+
+
+@dataclass(frozen=True, slots=True)
+class CompleteUpdate(Command):
+    update_id: str
+    result: Payload | None = None
+    failure: FailureInfo | None = None
+
+    def to_event(self) -> Event:
+        return UpdateCompleted(update_id=self.update_id, result=self.result, failure=self.failure)
+
+    def matches(self, event: Event) -> bool:
+        return isinstance(event, UpdateCompleted) and event.update_id == self.update_id
+
+    def describe(self) -> str:
+        return f"CompleteUpdate(update_id={self.update_id!r})"
+
+
+@dataclass(frozen=True, slots=True)
+class SignalExternal(Command):
+    seq: int
+    workflow_id: str
+    channel: str
+    payload: Payload
+    message_id: str = ""
+
+    def to_event(self) -> Event:
+        return ExternalSignalScheduled(
+            seq=self.seq,
+            workflow_id=self.workflow_id,
+            channel=self.channel,
+            payload=self.payload,
+            message_id=self.message_id,
+        )
+
+    def matches(self, event: Event) -> bool:
+        return (
+            isinstance(event, ExternalSignalScheduled)
+            and event.seq == self.seq
+            and event.channel == self.channel
+        )
+
+    def describe(self) -> str:
+        return f"SignalExternal(seq={self.seq}, channel={self.channel!r})"
 
 
 def describe_event(event: Event) -> str:

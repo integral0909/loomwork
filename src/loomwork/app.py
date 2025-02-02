@@ -59,7 +59,7 @@ class Loomwork:
         self.converter = converter or default_converter
         self.config = config or EngineConfig()
         self.engine = Engine(self.store, clock=self.clock, config=self.config)
-        self.client = Client(self.engine, self.converter)
+        self.client = Client(self.engine, self.converter, registry=self.registry)
         self.worker = Worker(
             self.store,
             self.registry,

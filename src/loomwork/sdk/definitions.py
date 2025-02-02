@@ -98,8 +98,18 @@ class WorkflowDefinition(Generic[P, R]):
         self.fail_on: tuple[type[BaseException], ...] = tuple(fail_on)
         functools.update_wrapper(self, fn)
 
-    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, R]:
-        return self.fn(*args, **kwargs)
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Awaitable[R]:
+        """Inside a workflow: start this workflow as a child and wait for its result.
+        Anywhere else: call the function directly (useful in unit tests)."""
+        instance = current_instance_or_none()
+        if instance is None:
+            return self.fn(*args, **kwargs)
+        positional = bind_positional(self.fn, args, kwargs)
+        future, _, _ = instance.start_child(
+            self, positional, workflow_id=None, parent_close_policy="terminate"
+        )
+        result: Awaitable[R] = future
+        return result
 
     def bind(self, args: Sequence[Any], kwargs: dict[str, Any] | None = None) -> list[Any]:
         return bind_positional(self.fn, args, kwargs or {})

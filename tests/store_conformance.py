@@ -16,6 +16,9 @@ from loomwork.errors import LeaseLostError, NotFoundError, WorkflowAlreadyStarte
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
     CancelRequested,
+    ChildCompleted,
+    ChildFailed,
+    SignalReceived,
     StepCompleted,
     StepFailed,
     StepScheduled,
@@ -30,9 +33,12 @@ from loomwork.options import StepOptions
 from loomwork.store.base import Store
 from loomwork.store.notify import TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, closed_topic
 from loomwork.store.records import (
+    ChildSpec,
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
+    OutboxAction,
+    OutboxMessage,
     StepJob,
     TickOutcome,
     TimerRecord,
@@ -558,6 +564,151 @@ class StoreConformance:
         # Leased jobs are not "ready".
         await store.claim_step("w1", T0, LEASE, queues=["default"])
         assert await store.next_step_ready_at(queues=["default"]) is None
+
+    # ------------------------------------------------------------------ children and outbox
+
+    def child_spec(
+        self, parent: str, seq: int, workflow_id: str, policy: str = "terminate"
+    ) -> ChildSpec:
+        rec = record(f"{parent}.c{seq}", workflow_id=workflow_id, name="child")
+        rec.parent_run_id = parent
+        rec.parent_seq = seq
+        rec.parent_close_policy = policy
+        return ChildSpec(record=rec, started=started(rec))
+
+    async def test_children_are_created_with_the_tick(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        await self.commit(store, "r1", consumed=1, new_children=[self.child_spec("r1", 1, "kid")])
+        child = await store.get_execution("r1.c1")
+        assert (child.parent_run_id, child.parent_seq, child.parent_close_policy) == (
+            "r1",
+            1,
+            "terminate",
+        )
+        assert child.tick_pending
+        assert [c.run_id for c in await store.list_children("r1")] == ["r1.c1"]
+        assert await store.list_children("r1.c1") == []
+
+    async def test_child_with_running_workflow_id_fails_to_start(self, store: Store) -> None:
+        await self.create(store, "busy", workflow_id="kid")
+        await self.create(store)
+        await store.claim_tick("w1", T0, LEASE, ["wf"])  # claims one of them
+        rec = await store.get_execution("r1")
+        if rec.lease_owner is None:
+            await store.complete_tick("busy", "w1", TickOutcome("w1", 1, T0), T0)
+            await self.claim(store)
+        await self.commit(store, "r1", consumed=1, new_children=[self.child_spec("r1", 1, "kid")])
+        with pytest.raises(NotFoundError):
+            await store.get_execution("r1.c1")
+        history = await store.load_history("r1")
+        failed = history[-1]
+        assert isinstance(failed, ChildFailed)
+        assert failed.failure.type == "ChildWorkflowAlreadyStarted"
+        assert (await store.get_execution("r1")).tick_pending
+
+    async def test_child_result_reaches_parent_through_outbox(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        await self.commit(store, "r1", consumed=1, new_children=[self.child_spec("r1", 1, "kid")])
+        child_lease = await store.claim_tick("w2", T0, LEASE, ["child"])
+        assert child_lease is not None
+        await store.complete_tick(
+            "r1.c1",
+            "w2",
+            TickOutcome(
+                "w2",
+                1,
+                T0,
+                decisions=[WorkflowCompleted(result=PAYLOAD)],
+                close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD),
+            ),
+            T0,
+        )
+        assert await store.outbox_size() == 1
+        assert await store.relay_outbox(T0) == 1
+        assert await store.outbox_size() == 0
+        last = (await store.load_history("r1"))[-1]
+        assert isinstance(last, ChildCompleted)
+        assert (last.seq, last.result) == (1, PAYLOAD)
+
+    async def test_parent_close_policies(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            new_children=[
+                self.child_spec("r1", 1, "k1", "terminate"),
+                self.child_spec("r1", 2, "k2", "request_cancel"),
+                self.child_spec("r1", 3, "k3", "abandon"),
+            ],
+        )
+        await store.terminate("r1", "parent done", T0)
+        assert await store.outbox_size() == 2
+        await store.relay_outbox(T0)
+        k1 = await store.get_execution("r1.c1")
+        assert k1.status is ExecutionStatus.TERMINATED
+        assert "parent run r1 closed" in k1.close_reason
+        k2 = await store.get_execution("r1.c2")
+        assert k2.status is ExecutionStatus.RUNNING and k2.cancel_requested
+        assert (await store.get_execution("r1.c3")).status is ExecutionStatus.RUNNING
+        # The terminated child reports back to its (closed) parent; the relay drops it.
+        assert await store.outbox_size() == 1
+        assert await store.relay_outbox(T0) == 1
+        assert not any(isinstance(e, ChildFailed) for e in await store.load_history("r1"))
+
+    async def test_outbox_signal_by_workflow_id(self, store: Store) -> None:
+        await self.create(store, "target", workflow_id="orders-1")
+        await self.create(store)
+        await store.claim_tick("w1", T0, LEASE, ["wf"])
+        rec = await store.get_execution("r1")
+        worker_run = "r1" if rec.lease_owner else "target"
+        signal = SignalReceived(channel="c", payload=PAYLOAD, message_id="m1")
+        await store.complete_tick(
+            worker_run,
+            "w1",
+            TickOutcome(
+                "w1",
+                1,
+                T0,
+                outbox=[
+                    OutboxMessage(
+                        OutboxAction.APPEND_INPUT, target_workflow_id="orders-1", event=signal
+                    ),
+                    OutboxMessage(
+                        OutboxAction.APPEND_INPUT, target_workflow_id="missing", event=signal
+                    ),
+                ],
+            ),
+            T0,
+        )
+        assert await store.relay_outbox(T0, limit=1) == 1
+        assert await store.relay_outbox(T0) == 1
+        delivered = (await store.load_history("target"))[-1]
+        assert isinstance(delivered, SignalReceived)
+        assert delivered.message_id == "m1"
+        assert delivered.event_id > 1
+        assert (await store.get_execution("target")).tick_pending
+
+    async def test_create_execution_with_extra_inputs(self, store: Store) -> None:
+        rec = record("r1")
+        signal = SignalReceived(channel="c", payload=PAYLOAD)
+        await store.create_execution(rec, started(rec), T0, extra_inputs=[signal])
+        history = await store.load_history("r1")
+        assert [e.kind for e in history] == ["workflow_started", "signal_received"]
+        assert (await store.get_execution("r1")).last_input_id == 2
+        other = record("r2")
+        bad_extra = [WorkflowCompleted(result=PAYLOAD)]
+        with pytest.raises(ValueError, match="not an input"):
+            await store.create_execution(other, started(other), T0, extra_inputs=bad_extra)
+
+    def test_outbox_message_validation(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            OutboxMessage(OutboxAction.TERMINATE)
+        with pytest.raises(ValueError, match="input event"):
+            OutboxMessage(OutboxAction.APPEND_INPUT, target_run_id="x")
 
     # ------------------------------------------------------------------ timers
 

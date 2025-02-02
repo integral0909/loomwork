@@ -79,6 +79,28 @@ class StepError(FailureError):
         self.attempts = attempts
 
 
+class ChildWorkflowError(FailureError):
+    """A child workflow failed, was cancelled or terminated, or could not start.
+
+    The child's own failure (if any) is available as ``__cause__``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        workflow_id: str,
+        run_id: str,
+        status: str,
+        type: str | None = None,
+        non_retryable: bool = False,
+    ) -> None:
+        super().__init__(message, type=type or "ChildWorkflowError", non_retryable=non_retryable)
+        self.workflow_id = workflow_id
+        self.run_id = run_id
+        self.status = status
+
+
 class TimeoutFailure(FailureError):
     """A step attempt or a whole step exceeded its configured timeout."""
 
@@ -93,6 +115,15 @@ class WorkflowFailedError(LoomworkError):
     def __init__(self, run_id: str, failure: FailureInfo) -> None:
         super().__init__(f"workflow run {run_id} failed: {failure.message}")
         self.run_id = run_id
+        self.failure = failure
+
+
+class UpdateFailedError(LoomworkError):
+    """Raised by :meth:`WorkflowHandle.update` when the update handler failed."""
+
+    def __init__(self, update_id: str, failure: FailureInfo) -> None:
+        super().__init__(f"update {update_id} failed: {failure.message}")
+        self.update_id = update_id
         self.failure = failure
 
 
