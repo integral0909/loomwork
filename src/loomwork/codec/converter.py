@@ -16,6 +16,7 @@ from typing import Any, get_type_hints
 import pydantic_core
 from pydantic import TypeAdapter, ValidationError
 
+from loomwork.codec.base import PayloadCodec
 from loomwork.codec.payload import (
     ENCODING_BYTES,
     ENCODING_JSON,
@@ -87,12 +88,21 @@ class PayloadConverter:
 class DataConverter:
     """Converts argument lists and results using a :class:`PayloadConverter`.
 
-    Payload *codecs* (compression, encryption) wrap this layer and are added in a later
-    milestone; the converter itself only deals with value <-> bytes.
+    An optional :class:`~loomwork.codec.base.PayloadCodec` runs after conversion on
+    encode and before it on decode -- compression, encryption, size limits, or a chain
+    of them. It is only used by the ``_async`` methods: the synchronous methods (used
+    wherever no I/O is acceptable, such as inside workflow code) only ever do value <->
+    bytes conversion and never touch the codec, so attaching a codec cannot change their
+    behaviour.
     """
 
-    def __init__(self, payload_converter: PayloadConverter | None = None) -> None:
+    def __init__(
+        self,
+        payload_converter: PayloadConverter | None = None,
+        codec: PayloadCodec | None = None,
+    ) -> None:
         self.payload_converter = payload_converter or PayloadConverter()
+        self.codec = codec
 
     def encode(self, value: Any) -> Payload:
         return self.payload_converter.to_payload(value)
@@ -114,6 +124,40 @@ class DataConverter:
 
     def decode_result(self, fn: Callable[..., Any], payload: Payload) -> Any:
         return self.decode(payload, return_hint(fn))
+
+    # ------------------------------------------------------------------- codec-aware
+
+    async def encode_async(self, value: Any) -> Payload:
+        """Convert ``value`` and run it through the codec, if one is configured."""
+        payload = self.encode(value)
+        if self.codec is None:
+            return payload
+        (encoded,) = await self.codec.encode([payload])
+        return encoded
+
+    async def decode_async(self, payload: Payload, hint: Any = _NO_HINT) -> Any:
+        """Reverse the codec, if one is configured, then convert back to a value."""
+        if self.codec is not None:
+            (payload,) = await self.codec.decode([payload])
+        return self.decode(payload, hint)
+
+    async def encode_args_async(self, args: Sequence[Any]) -> list[Payload]:
+        payloads = self.encode_args(args)
+        if self.codec is None:
+            return payloads
+        return await self.codec.encode(payloads)
+
+    async def decode_args_async(
+        self, fn: Callable[..., Any], payloads: Sequence[Payload]
+    ) -> list[Any]:
+        if self.codec is not None:
+            payloads = await self.codec.decode(payloads)
+        return self.decode_args(fn, payloads)
+
+    async def decode_result_async(self, fn: Callable[..., Any], payload: Payload) -> Any:
+        if self.codec is not None:
+            (payload,) = await self.codec.decode([payload])
+        return self.decode_result(fn, payload)
 
 
 def _resolved_hints(fn: Callable[..., Any]) -> dict[str, Any]:

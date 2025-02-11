@@ -43,6 +43,11 @@ All notable changes to this project are documented here. The format follows
 - `loomwork.Compensations` for saga-style rollbacks.
 - A transactional outbox and relay for effects between runs (ADR-0004; migration 0003).
 
+- Payload codec chain: `CompressionCodec` (zlib with a size threshold),
+  `EncryptionCodec` (AES-256-GCM with authenticated metadata, key rotation through
+  static, environment or file key rings, and an opt-in strict mode against downgrade),
+  `PayloadSizeLimitCodec`, and `CodecChain` for layering; `loomwork[crypto]` extra.
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.
