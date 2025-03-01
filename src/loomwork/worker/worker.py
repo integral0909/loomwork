@@ -30,9 +30,17 @@ from loomwork.engine.steps import StepExecutor
 from loomwork.engine.ticks import TickProcessor
 from loomwork.ids import new_id
 from loomwork.options import validate_queue
+from loomwork.schedules.service import ScheduleService
 from loomwork.sdk.definitions import Registry
 from loomwork.store.base import Store
-from loomwork.store.notify import TOPIC_OUTBOX, TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, Notifier
+from loomwork.store.notify import (
+    TOPIC_OUTBOX,
+    TOPIC_SCHEDULES,
+    TOPIC_STEPS,
+    TOPIC_TICKS,
+    TOPIC_TIMERS,
+    Notifier,
+)
 from loomwork.worker.limits import QueueGate, QueueLimit
 
 logger = logging.getLogger("loomwork.worker")
@@ -57,6 +65,7 @@ class WorkerOptions:
         step_concurrency: concurrent step attempts across all queues.
         run_timers: whether this worker fires due timers.
         run_outbox: whether this worker relays outbox messages between runs.
+        run_schedules: whether this worker evaluates schedules and starts their runs.
         shutdown_grace: seconds in-flight work gets to finish on :meth:`Worker.stop`.
         task_queues: queues whose steps this worker executes; ``None`` means every
             queue. Workers that hold special credentials or hardware subscribe to their
@@ -69,6 +78,7 @@ class WorkerOptions:
     step_concurrency: int = 16
     run_timers: bool = True
     run_outbox: bool = True
+    run_schedules: bool = True
     shutdown_grace: float = 10.0
     task_queues: tuple[str, ...] | None = None
     queue_limits: Mapping[str, QueueLimit] = field(default_factory=dict)
@@ -124,6 +134,7 @@ class Worker:
             config=self.config,
             worker_id=self.worker_id,
         )
+        self.schedules = ScheduleService(store, self.clock)
         self._gate = QueueGate(self.options.task_queues, self.options.queue_limits)
         self._local = Notifier()
         self._tasks: list[asyncio.Task[None]] = []
@@ -148,6 +159,8 @@ class Worker:
             self._spawn("timers", self._timer_loop())
         if self.options.run_outbox:
             self._spawn("outbox", self._outbox_loop())
+        if self.options.run_schedules:
+            self._spawn("schedules", self._schedule_loop())
         logger.info(
             "worker %s started (%d workflows, %d steps registered)",
             self.worker_id,
@@ -282,6 +295,24 @@ class Worker:
             if relayed >= batch:
                 continue
             await self._idle(notifier.wait(TOPIC_OUTBOX, token, self.config.poll_interval))
+
+    async def _schedule_loop(self) -> None:
+        notifier = self.store.notifier
+        while not self._stopping.is_set():
+            token = notifier.token(TOPIC_SCHEDULES)
+            try:
+                await self.schedules.run_once()
+                next_at = await self.store.next_schedule_at()
+            except Exception:
+                logger.exception("error while evaluating schedules")
+                await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
+                continue
+            waits: list[Awaitable[object]] = [
+                notifier.wait(TOPIC_SCHEDULES, token, self.config.poll_interval)
+            ]
+            if next_at is not None:
+                waits.append(self.clock.sleep_until(next_at))
+            await self._idle(*waits)
 
     @staticmethod
     async def _sleep(seconds: float) -> None:

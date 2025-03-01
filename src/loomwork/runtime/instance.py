@@ -104,6 +104,10 @@ class WorkflowInstance:
             workflow_name=started.workflow_name,
             attempt=started.attempt,
             started_at=started.timestamp,
+            parent_workflow_id=started.parent_workflow_id or None,
+            parent_run_id=started.parent_run_id or None,
+            schedule_id=started.schedule_id or None,
+            scheduled_time=started.scheduled_time,
         )
         self.random = random.Random(started.random_seed)
         self.loop = DeterministicEventLoop(self, start_time=started.timestamp.timestamp())

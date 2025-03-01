@@ -18,6 +18,7 @@ TOPIC_TICKS = "ticks"
 TOPIC_STEPS = "steps"
 TOPIC_TIMERS = "timers"
 TOPIC_OUTBOX = "outbox"
+TOPIC_SCHEDULES = "schedules"
 
 
 def closed_topic(run_id: str) -> str:

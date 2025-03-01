@@ -15,7 +15,13 @@ from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
 
 from loomwork.codec.payload import Payload
-from loomwork.errors import LeaseLostError, NotFoundError, WorkflowAlreadyStartedError
+from loomwork.errors import (
+    LeaseLostError,
+    NotFoundError,
+    ScheduleConflictError,
+    ScheduleExistsError,
+    WorkflowAlreadyStartedError,
+)
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
     CancelRequested,
@@ -27,10 +33,12 @@ from loomwork.history.events import (
     WorkflowStarted,
     WorkflowTerminated,
 )
+from loomwork.schedules.model import ScheduleState
 from loomwork.store.base import Store
-from loomwork.store.closing import child_start_failed_event, closing_messages
+from loomwork.store.closing import child_start_failed_event, closing_messages, drop_unstarted
 from loomwork.store.notify import (
     TOPIC_OUTBOX,
+    TOPIC_SCHEDULES,
     TOPIC_STEPS,
     TOPIC_TICKS,
     TOPIC_TIMERS,
@@ -38,6 +46,7 @@ from loomwork.store.notify import (
     run_topic,
 )
 from loomwork.store.records import (
+    ChildSpec,
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
@@ -71,6 +80,7 @@ class MemoryStore(Store):
         self._timers: dict[tuple[str, int], TimerRecord] = {}
         self._timer_heap: list[tuple[datetime, str, int]] = []
         self._children: dict[str, list[str]] = {}
+        self._schedules: dict[str, ScheduleState] = {}
         self._outbox: deque[OutboxMessage] = deque()
 
     # ------------------------------------------------------------------ helpers
@@ -603,6 +613,86 @@ class MemoryStore(Store):
             for c in self._children.get(run_id, ())
             if c in self._runs
         ]
+
+    # ------------------------------------------------------------------ schedules
+
+    async def create_schedule(self, state: ScheduleState, now: datetime) -> ScheduleState:
+        if state.schedule_id in self._schedules:
+            raise ScheduleExistsError(f"schedule {state.schedule_id!r} already exists")
+        stored = state.with_(version=1, created_at=now, updated_at=now)
+        self._schedules[state.schedule_id] = stored
+        self.notifier.publish(TOPIC_SCHEDULES)
+        return stored
+
+    async def get_schedule(self, schedule_id: str) -> ScheduleState:
+        try:
+            return self._schedules[schedule_id]
+        except KeyError:
+            raise NotFoundError(f"schedule {schedule_id!r} does not exist") from None
+
+    async def list_schedules(self, limit: int = 100) -> list[ScheduleState]:
+        return [self._schedules[k] for k in sorted(self._schedules)[:limit]]
+
+    def _check_version(self, schedule_id: str, expected: int) -> None:
+        current = self._schedules.get(schedule_id)
+        if current is None:
+            raise NotFoundError(f"schedule {schedule_id!r} does not exist")
+        if current.version != expected:
+            raise ScheduleConflictError(
+                f"schedule {schedule_id!r} is at version {current.version}, expected {expected}"
+            )
+
+    async def update_schedule(
+        self, state: ScheduleState, expected_version: int, now: datetime
+    ) -> ScheduleState:
+        self._check_version(state.schedule_id, expected_version)
+        stored = state.with_(version=expected_version + 1, updated_at=now)
+        self._schedules[state.schedule_id] = stored
+        self.notifier.publish(TOPIC_SCHEDULES)
+        return stored
+
+    async def delete_schedule(self, schedule_id: str) -> bool:
+        return self._schedules.pop(schedule_id, None) is not None
+
+    async def due_schedules(self, now: datetime, limit: int = 100) -> list[ScheduleState]:
+        due = [
+            s
+            for s in self._schedules.values()
+            if s.buffered is not None
+            or (not s.paused and s.next_fire_at is not None and s.next_fire_at <= now)
+        ]
+        return sorted(due, key=lambda s: s.schedule_id)[:limit]
+
+    async def fire_schedule(
+        self,
+        state: ScheduleState,
+        expected_version: int,
+        starts: Sequence[ChildSpec],
+        outbox: Sequence[OutboxMessage],
+        now: datetime,
+    ) -> ScheduleState:
+        self._check_version(state.schedule_id, expected_version)
+        conflicts: set[str] = set()
+        for spec in starts:
+            if self._running_for(spec.record.workflow_id) or spec.record.run_id in self._runs:
+                conflicts.add(spec.record.run_id)
+                continue
+            self._insert_run(spec.record, spec.started, now)
+        self._enqueue(outbox)
+        stored = drop_unstarted(state, conflicts).with_(
+            version=expected_version + 1, updated_at=now
+        )
+        self._schedules[state.schedule_id] = stored
+        self.notifier.publish(TOPIC_SCHEDULES)
+        return stored
+
+    async def next_schedule_at(self) -> datetime | None:
+        times = [
+            s.next_fire_at
+            for s in self._schedules.values()
+            if not s.paused and s.next_fire_at is not None
+        ]
+        return min(times, default=None)
 
     # ------------------------------------------------------------------ retention
 

@@ -12,6 +12,8 @@ so the closing transaction only ever locks the closing run.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from loomwork.failure import FailureInfo
 from loomwork.history.events import ChildCompleted, ChildFailed, Event
 from loomwork.options import ParentClosePolicy
@@ -21,6 +23,9 @@ from loomwork.store.records import (
     OutboxAction,
     OutboxMessage,
 )
+
+if TYPE_CHECKING:
+    from loomwork.schedules.model import ScheduleState
 
 CHILD_ALREADY_STARTED = "ChildWorkflowAlreadyStarted"
 
@@ -99,3 +104,23 @@ def closing_messages(
                 )
             )
     return messages
+
+
+def drop_unstarted(state: ScheduleState, conflicts: set[str]) -> ScheduleState:
+    """Remove runs that could not be created from a schedule state being saved."""
+    from loomwork.schedules.model import ScheduledRun
+
+    if not conflicts:
+        return state
+    running = tuple(r for r in state.running if r.run_id not in conflicts)
+    recent = tuple(
+        ScheduledRun(r.nominal_time, r.started_at, r.workflow_id, r.run_id, "already_running")
+        if r.run_id in conflicts
+        else r
+        for r in state.recent
+    )
+    return state.with_(
+        running=running,
+        recent=recent,
+        total_started=state.total_started - len(conflicts),
+    )

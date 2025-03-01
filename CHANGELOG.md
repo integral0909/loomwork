@@ -48,6 +48,13 @@ All notable changes to this project are documented here. The format follows
   static, environment or file key rings, and an opt-in strict mode against downgrade),
   `PayloadSizeLimitCodec`, and `CodecChain` for layering; `loomwork[crypto]` extra.
 
+- Cron expressions with seconds, names, `L`, `nL`, `n#k`, macros and IANA time zones,
+  with defined behaviour across daylight-saving transitions.
+- Schedules: recurring workflow starts on a cron expression or interval, with overlap
+  policies (`skip`, `buffer_one`, `allow_all`, `cancel_other`, `terminate_other`),
+  catch-up windows, jitter, pause-on-failure, manual trigger and backfill; scheduled runs
+  see their nominal fire time in `loomwork.info().scheduled_time` (migration 0004).
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.

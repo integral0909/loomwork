@@ -21,7 +21,13 @@ from datetime import datetime, timedelta
 from typing import Any, ClassVar, Protocol
 
 from loomwork.codec.payload import Payload
-from loomwork.errors import LeaseLostError, NotFoundError, WorkflowAlreadyStartedError
+from loomwork.errors import (
+    LeaseLostError,
+    NotFoundError,
+    ScheduleConflictError,
+    ScheduleExistsError,
+    WorkflowAlreadyStartedError,
+)
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
     CancelRequested,
@@ -34,10 +40,12 @@ from loomwork.history.events import (
     WorkflowTerminated,
 )
 from loomwork.history.serde import event_from_dict
+from loomwork.schedules.model import ScheduleState
 from loomwork.store.base import Store
-from loomwork.store.closing import child_start_failed_event, closing_messages
+from loomwork.store.closing import child_start_failed_event, closing_messages, drop_unstarted
 from loomwork.store.notify import (
     TOPIC_OUTBOX,
+    TOPIC_SCHEDULES,
     TOPIC_STEPS,
     TOPIC_TICKS,
     TOPIC_TIMERS,
@@ -45,6 +53,7 @@ from loomwork.store.notify import (
     run_topic,
 )
 from loomwork.store.records import (
+    ChildSpec,
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
@@ -906,6 +915,142 @@ class SQLStore(Store, abc.ABC):
                 "SELECT * FROM lw_executions WHERE parent_run_id = ? ORDER BY seq", (run_id,)
             )
         return [self._record(row) for row in rows]
+
+    # ------------------------------------------------------------------ schedules
+
+    def _schedule(self, row: Row) -> ScheduleState:
+        return ScheduleState.from_dict(codec.loads(row["body"])).with_(version=int(row["version"]))
+
+    def _schedule_params(self, state: ScheduleState, now: datetime) -> tuple[Any, ...]:
+        return (
+            self.ts_in(state.next_fire_at),
+            state.paused,
+            state.buffered is not None,
+            state.version,
+            codec.dumps(state.to_dict()),
+            self.ts_in(now),
+        )
+
+    async def create_schedule(self, state: ScheduleState, now: datetime) -> ScheduleState:
+        stored = state.with_(version=1, created_at=now, updated_at=now)
+        try:
+            async with self.transaction() as tx:
+                if await tx.fetchone(
+                    "SELECT 1 FROM lw_schedules WHERE schedule_id = ?", (state.schedule_id,)
+                ):
+                    raise ScheduleExistsError(f"schedule {state.schedule_id!r} already exists")
+                await tx.execute(
+                    "INSERT INTO lw_schedules (next_fire_at, paused, has_buffer, version, body, "
+                    "updated_at, schedule_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (*self._schedule_params(stored, now), stored.schedule_id),
+                )
+                tx.notify(TOPIC_SCHEDULES)
+        except ScheduleExistsError:
+            raise
+        except Exception as exc:
+            if self.is_unique_violation(exc):
+                raise ScheduleExistsError(f"schedule {state.schedule_id!r} already exists") from exc
+            raise
+        return stored
+
+    async def get_schedule(self, schedule_id: str) -> ScheduleState:
+        async with self.transaction() as tx:
+            row = await tx.fetchone(
+                "SELECT version, body FROM lw_schedules WHERE schedule_id = ?", (schedule_id,)
+            )
+        if row is None:
+            raise NotFoundError(f"schedule {schedule_id!r} does not exist")
+        return self._schedule(row)
+
+    async def list_schedules(self, limit: int = 100) -> list[ScheduleState]:
+        async with self.transaction() as tx:
+            rows = await tx.fetchall(
+                "SELECT version, body FROM lw_schedules ORDER BY schedule_id LIMIT ?", (limit,)
+            )
+        return [self._schedule(row) for row in rows]
+
+    async def _lock_schedule(
+        self, tx: SqlTransaction, schedule_id: str, expected_version: int
+    ) -> None:
+        row = await tx.fetchone(
+            f"SELECT version FROM lw_schedules WHERE schedule_id = ?{self.FOR_UPDATE}",
+            (schedule_id,),
+        )
+        if row is None:
+            raise NotFoundError(f"schedule {schedule_id!r} does not exist")
+        if int(row["version"]) != expected_version:
+            raise ScheduleConflictError(
+                f"schedule {schedule_id!r} is at version {row['version']}, "
+                f"expected {expected_version}"
+            )
+
+    async def _save_schedule(self, tx: SqlTransaction, state: ScheduleState, now: datetime) -> None:
+        await tx.execute(
+            "UPDATE lw_schedules SET next_fire_at = ?, paused = ?, has_buffer = ?, version = ?, "
+            "body = ?, updated_at = ? WHERE schedule_id = ?",
+            (*self._schedule_params(state, now), state.schedule_id),
+        )
+        tx.notify(TOPIC_SCHEDULES)
+
+    async def update_schedule(
+        self, state: ScheduleState, expected_version: int, now: datetime
+    ) -> ScheduleState:
+        stored = state.with_(version=expected_version + 1, updated_at=now)
+        async with self.transaction() as tx:
+            await self._lock_schedule(tx, state.schedule_id, expected_version)
+            await self._save_schedule(tx, stored, now)
+        return stored
+
+    async def delete_schedule(self, schedule_id: str) -> bool:
+        async with self.transaction() as tx:
+            deleted = await tx.execute(
+                "DELETE FROM lw_schedules WHERE schedule_id = ?", (schedule_id,)
+            )
+        return bool(deleted)
+
+    async def due_schedules(self, now: datetime, limit: int = 100) -> list[ScheduleState]:
+        async with self.transaction() as tx:
+            rows = await tx.fetchall(
+                "SELECT version, body FROM lw_schedules WHERE has_buffer = ? "
+                "OR (paused = ? AND next_fire_at <= ?) ORDER BY schedule_id LIMIT ?",
+                (True, False, self.ts_in(now), limit),
+            )
+        return [self._schedule(row) for row in rows]
+
+    async def fire_schedule(
+        self,
+        state: ScheduleState,
+        expected_version: int,
+        starts: Sequence[ChildSpec],
+        outbox: Sequence[OutboxMessage],
+        now: datetime,
+    ) -> ScheduleState:
+        async with self.transaction() as tx:
+            await self._lock_schedule(tx, state.schedule_id, expected_version)
+            conflicts: set[str] = set()
+            for spec in starts:
+                running = await tx.fetchone(
+                    "SELECT 1 FROM lw_executions WHERE (workflow_id = ? AND status = ?) "
+                    "OR run_id = ?",
+                    (spec.record.workflow_id, ExecutionStatus.RUNNING.value, spec.record.run_id),
+                )
+                if running is not None:
+                    conflicts.add(spec.record.run_id)
+                    continue
+                await self._insert_run(tx, dataclasses.replace(spec.record), spec.started, now)
+            await self._enqueue(tx, outbox, now)
+            stored = drop_unstarted(state, conflicts).with_(
+                version=expected_version + 1, updated_at=now
+            )
+            await self._save_schedule(tx, stored, now)
+        return stored
+
+    async def next_schedule_at(self) -> datetime | None:
+        async with self.transaction() as tx:
+            row = await tx.fetchone(
+                "SELECT MIN(next_fire_at) AS next_at FROM lw_schedules WHERE paused = ?", (False,)
+            )
+        return None if row is None else self.ts_out(row["next_at"])
 
     # ------------------------------------------------------------------ maintenance
 

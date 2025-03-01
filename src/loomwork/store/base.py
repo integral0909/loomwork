@@ -17,11 +17,14 @@ from datetime import datetime, timedelta
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event, StepCompleted, StepFailed, WorkflowStarted
+from loomwork.schedules.model import ScheduleState
 from loomwork.store.notify import Notifier
 from loomwork.store.records import (
+    ChildSpec,
     ExecutionRecord,
     ExecutionStatus,
     HeartbeatResult,
+    OutboxMessage,
     StepJob,
     TickOutcome,
 )
@@ -257,6 +260,65 @@ class Store(abc.ABC):
     @abc.abstractmethod
     async def list_children(self, run_id: str) -> list[ExecutionRecord]:
         """Executions started as children of ``run_id``, oldest first."""
+
+    # ------------------------------------------------------------------ schedules
+
+    @abc.abstractmethod
+    async def create_schedule(self, state: ScheduleState, now: datetime) -> ScheduleState:
+        """Store a new schedule (its version becomes 1).
+
+        Raises:
+            ScheduleExistsError: the schedule id is taken.
+        """
+
+    @abc.abstractmethod
+    async def get_schedule(self, schedule_id: str) -> ScheduleState:
+        """Raises :class:`~loomwork.errors.NotFoundError` if it does not exist."""
+
+    @abc.abstractmethod
+    async def list_schedules(self, limit: int = 100) -> list[ScheduleState]:
+        """Schedules ordered by id."""
+
+    @abc.abstractmethod
+    async def update_schedule(
+        self, state: ScheduleState, expected_version: int, now: datetime
+    ) -> ScheduleState:
+        """Replace a schedule if its stored version is ``expected_version``.
+
+        Raises:
+            ScheduleConflictError: it was changed concurrently.
+            NotFoundError: it does not exist.
+        """
+
+    @abc.abstractmethod
+    async def delete_schedule(self, schedule_id: str) -> bool:
+        """Delete a schedule (runs it started are unaffected)."""
+
+    @abc.abstractmethod
+    async def due_schedules(self, now: datetime, limit: int = 100) -> list[ScheduleState]:
+        """Schedules to evaluate: next fire time reached, or a buffered fire pending."""
+
+    @abc.abstractmethod
+    async def fire_schedule(
+        self,
+        state: ScheduleState,
+        expected_version: int,
+        starts: Sequence[ChildSpec],
+        outbox: Sequence[OutboxMessage],
+        now: datetime,
+    ) -> ScheduleState:
+        """Atomically save ``state``, create the runs in ``starts`` and enqueue ``outbox``.
+
+        A start whose workflow id is already running is not created; the corresponding
+        entry is removed from ``state.running`` and recorded as ``already_running``.
+
+        Raises:
+            ScheduleConflictError: the schedule changed concurrently; nothing is applied.
+        """
+
+    @abc.abstractmethod
+    async def next_schedule_at(self) -> datetime | None:
+        """Earliest ``next_fire_at`` of any unpaused schedule."""
 
     # ------------------------------------------------------------------ retention
 

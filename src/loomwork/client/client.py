@@ -6,9 +6,11 @@ import inspect
 from typing import Any, TypeVar, overload
 
 from loomwork.client.handle import WorkflowHandle
+from loomwork.client.schedules import ScheduleClient
 from loomwork.codec.converter import DataConverter, default_converter, return_hint
 from loomwork.engine.engine import Engine
 from loomwork.engine.queries import QueryRunner
+from loomwork.schedules.service import ScheduleService
 from loomwork.sdk.definitions import Registry, WorkflowDefinition
 from loomwork.sdk.messaging import Channel
 from loomwork.store.records import ExecutionRecord, ExecutionStatus
@@ -38,6 +40,7 @@ class Client:
         self.queries = (
             QueryRunner(engine.store, registry, self.converter) if registry is not None else None
         )
+        self.schedules = ScheduleClient(ScheduleService(engine.store, engine.clock), self.converter)
 
     @overload
     async def start(

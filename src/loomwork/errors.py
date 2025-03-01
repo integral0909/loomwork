@@ -164,6 +164,14 @@ class WorkflowClosedError(LoomworkError):
     """An operation required a running execution but the run has already closed."""
 
 
+class ScheduleExistsError(LoomworkError):
+    """A schedule with this id already exists."""
+
+
+class ScheduleConflictError(LoomworkError):
+    """The schedule changed since it was read (optimistic concurrency check failed)."""
+
+
 class RegistrationError(LoomworkError):
     """A workflow or step definition is invalid or registered twice."""
 

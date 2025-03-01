@@ -12,7 +12,13 @@ from datetime import timedelta
 import pytest
 
 from loomwork.codec import default_converter
-from loomwork.errors import LeaseLostError, NotFoundError, WorkflowAlreadyStartedError
+from loomwork.errors import (
+    LeaseLostError,
+    NotFoundError,
+    ScheduleConflictError,
+    ScheduleExistsError,
+    WorkflowAlreadyStartedError,
+)
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
     CancelRequested,
@@ -30,6 +36,12 @@ from loomwork.history.events import (
     WorkflowTerminated,
 )
 from loomwork.options import StepOptions
+from loomwork.schedules.model import (
+    ScheduleAction,
+    ScheduledRun,
+    ScheduleSpec,
+    ScheduleState,
+)
 from loomwork.store.base import Store
 from loomwork.store.notify import TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, closed_topic
 from loomwork.store.records import (
@@ -709,6 +721,91 @@ class StoreConformance:
             OutboxMessage(OutboxAction.TERMINATE)
         with pytest.raises(ValueError, match="input event"):
             OutboxMessage(OutboxAction.APPEND_INPUT, target_run_id="x")
+
+    # ------------------------------------------------------------------ schedules
+
+    def schedule(self, schedule_id: str = "s1", **changes: object) -> ScheduleState:
+        base = ScheduleState(
+            schedule_id=schedule_id,
+            spec=ScheduleSpec(cron="0 * * * *"),
+            action=ScheduleAction("wf", [PAYLOAD]),
+            next_fire_at=T0 + timedelta(hours=1),
+        )
+        return base.with_(**changes)
+
+    async def test_schedule_crud(self, store: Store) -> None:
+        created = await store.create_schedule(self.schedule(note="hello"), T0)
+        assert created.version == 1
+        assert created.created_at == T0
+        with pytest.raises(ScheduleExistsError):
+            await store.create_schedule(self.schedule(), T0)
+        fetched = await store.get_schedule("s1")
+        assert fetched == created
+        assert fetched.action.args == [PAYLOAD]
+        updated = await store.update_schedule(fetched.with_(note="changed"), 1, T0)
+        assert updated.version == 2
+        with pytest.raises(ScheduleConflictError):
+            await store.update_schedule(fetched.with_(note="stale"), 1, T0)
+        assert (await store.get_schedule("s1")).note == "changed"
+        await store.create_schedule(self.schedule("a0"), T0)
+        assert [s.schedule_id for s in await store.list_schedules()] == ["a0", "s1"]
+        assert await store.delete_schedule("s1")
+        assert not await store.delete_schedule("s1")
+        with pytest.raises(NotFoundError):
+            await store.get_schedule("s1")
+        with pytest.raises(NotFoundError):
+            await store.update_schedule(self.schedule(), 1, T0)
+
+    async def test_due_schedules_and_next_time(self, store: Store) -> None:
+        await store.create_schedule(
+            self.schedule("early", next_fire_at=T0 + timedelta(minutes=5)), T0
+        )
+        await store.create_schedule(self.schedule("late", next_fire_at=T0 + timedelta(hours=2)), T0)
+        await store.create_schedule(
+            self.schedule("paused", paused=True, next_fire_at=T0 + timedelta(minutes=1)), T0
+        )
+        await store.create_schedule(
+            self.schedule("buffered", buffered=T0, next_fire_at=T0 + timedelta(days=1)), T0
+        )
+        assert await store.next_schedule_at() == T0 + timedelta(minutes=5)
+        due = await store.due_schedules(T0 + timedelta(minutes=10))
+        assert [s.schedule_id for s in due] == ["buffered", "early"]
+
+    async def test_fire_schedule_starts_runs_atomically(self, store: Store) -> None:
+        created = await store.create_schedule(self.schedule(), T0)
+        rec = record("sched-run-1", workflow_id="s1@1")
+        run = ScheduledRun(T0, T0, "s1@1", "sched-run-1")
+        fired = await store.fire_schedule(
+            created.with_(running=(run,), recent=(run,), total_started=1),
+            1,
+            [ChildSpec(rec, started(rec))],
+            [],
+            T0,
+        )
+        assert fired.version == 2
+        assert fired.running == (run,)
+        assert (await store.get_execution("sched-run-1")).tick_pending
+        with pytest.raises(ScheduleConflictError):
+            await store.fire_schedule(fired, 1, [], [], T0)
+
+    async def test_fire_schedule_skips_running_workflow_ids(self, store: Store) -> None:
+        await self.create(store, "existing", workflow_id="s1@1")
+        created = await store.create_schedule(self.schedule(), T0)
+        rec = record("dup-run", workflow_id="s1@1")
+        run = ScheduledRun(T0, T0, "s1@1", "dup-run")
+        fired = await store.fire_schedule(
+            created.with_(running=(run,), recent=(run,), total_started=1),
+            1,
+            [ChildSpec(rec, started(rec))],
+            [OutboxMessage(OutboxAction.TERMINATE, target_run_id="existing", reason="newer")],
+            T0,
+        )
+        assert fired.running == ()
+        assert fired.recent[-1].status == "already_running"
+        assert fired.total_started == 0
+        with pytest.raises(NotFoundError):
+            await store.get_execution("dup-run")
+        assert await store.outbox_size() == 1
 
     # ------------------------------------------------------------------ timers
 

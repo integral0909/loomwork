@@ -93,6 +93,8 @@ class WorkflowStarted(Event):
     attempt: int = 1
     parent_workflow_id: str = ""
     parent_run_id: str = ""
+    schedule_id: str = ""
+    scheduled_time: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

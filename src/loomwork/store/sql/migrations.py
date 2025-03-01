@@ -268,10 +268,44 @@ _0003_POSTGRES = (
     """,
 )
 
+# ---------------------------------------------------------------------------------------
+# 0004: schedules
+
+_0004_SQLITE = (
+    """
+    CREATE TABLE lw_schedules (
+        schedule_id  TEXT    PRIMARY KEY,
+        next_fire_at INTEGER,
+        paused       INTEGER NOT NULL DEFAULT 0,
+        has_buffer   INTEGER NOT NULL DEFAULT 0,
+        version      INTEGER NOT NULL,
+        body         TEXT    NOT NULL,
+        updated_at   INTEGER NOT NULL
+    )
+    """,
+    "CREATE INDEX lw_schedules_due ON lw_schedules (next_fire_at) WHERE paused = 0",
+)
+
+_0004_POSTGRES = (
+    """
+    CREATE TABLE lw_schedules (
+        schedule_id  TEXT        PRIMARY KEY,
+        next_fire_at TIMESTAMPTZ,
+        paused       BOOLEAN     NOT NULL DEFAULT FALSE,
+        has_buffer   BOOLEAN     NOT NULL DEFAULT FALSE,
+        version      INTEGER     NOT NULL,
+        body         JSONB       NOT NULL,
+        updated_at   TIMESTAMPTZ NOT NULL
+    )
+    """,
+    "CREATE INDEX lw_schedules_due ON lw_schedules (next_fire_at) WHERE NOT paused",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
     Migration(3, "child workflows and outbox", _0003_SQLITE, _0003_POSTGRES),
+    Migration(4, "schedules", _0004_SQLITE, _0004_POSTGRES),
 )
 
 

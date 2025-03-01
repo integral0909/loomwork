@@ -16,7 +16,7 @@ requires_postgres = pytest.mark.skipif(
     not DSN, reason="set LOOMWORK_TEST_POSTGRES_DSN to run PostgreSQL tests"
 )
 
-TABLES = ("lw_events", "lw_step_jobs", "lw_timers", "lw_executions")
+TABLES = ("lw_events", "lw_step_jobs", "lw_timers", "lw_outbox", "lw_schedules", "lw_executions")
 
 
 @asynccontextmanager
