@@ -55,6 +55,12 @@ All notable changes to this project are documented here. The format follows
   catch-up windows, jitter, pause-on-failure, manual trigger and backfill; scheduled runs
   see their nominal fire time in `loomwork.info().scheduled_time` (migration 0004).
 
+- Determinism linter (`python -m loomwork.lint`): static analysis of workflow code for
+  wall-clock time, unseeded randomness, I/O, threads, environment access, set iteration
+  order, identity-based branching and global mutation, including violations reached
+  through same-module helpers; suppression comments, `[tool.loomwork.lint]`
+  configuration, and text, JSON and SARIF reports.
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.
