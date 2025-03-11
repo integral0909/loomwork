@@ -41,6 +41,7 @@ from loomwork.history import (
     UpdateRequested,
     WorkflowCanceled,
     WorkflowCompleted,
+    WorkflowContinuedAsNew,
     WorkflowFailed,
     WorkflowStarted,
     WorkflowTerminated,
@@ -226,6 +227,7 @@ SAMPLE_EVENTS = [
     UpdateCompleted(update_id="u-1", result=P),
     UpdateCompleted(update_id="u-2", failure=F),
     ExternalSignalScheduled(seq=1, workflow_id="other", channel="c", payload=P, message_id="x"),
+    WorkflowContinuedAsNew(new_run_id="r2", workflow_name="wf", args=[P]),
 ]
 
 
@@ -255,6 +257,7 @@ class TestEvents:
             "workflow_failed",
             "workflow_canceled",
             "workflow_terminated",
+            "workflow_continued_as_new",
         }
 
     def test_unknown_kind(self) -> None:

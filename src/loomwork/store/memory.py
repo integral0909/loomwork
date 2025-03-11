@@ -122,6 +122,7 @@ class MemoryStore(Store):
         record.result = outcome.result
         record.failure = outcome.failure
         record.close_reason = outcome.reason
+        record.continued_run_id = outcome.continued_run_id
         record.tick_pending = False
         record.tick_ready_at = None
         record.lease_owner = None
@@ -327,6 +328,9 @@ class MemoryStore(Store):
 
         if outcome.close is not None:
             self._close(run, outcome.close, now)
+            if outcome.continuation is not None:
+                # The closing run released its workflow id a moment ago.
+                self._insert_run(outcome.continuation.record, outcome.continuation.started, now)
             return appended
 
         for seq in outcome.cancel_steps:

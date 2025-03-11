@@ -144,6 +144,19 @@ class WorkflowTerminatedError(LoomworkError):
         self.reason = reason
 
 
+class ContinueAsNew(BaseException):
+    """Raised by :func:`loomwork.continue_as_new` to end the run and start a fresh one.
+
+    It derives from :class:`BaseException` (like :class:`asyncio.CancelledError`) so
+    that ``except Exception`` in workflow code does not swallow it by accident.
+    """
+
+    def __init__(self, workflow_name: str | None, args: list[object]) -> None:
+        super().__init__("continue as new")
+        self.workflow_name = workflow_name
+        self.args = args
+
+
 # --------------------------------------------------------------------------- engine / API
 
 

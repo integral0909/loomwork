@@ -82,7 +82,10 @@ def closing_messages(
 ) -> list[OutboxMessage]:
     """Outbox messages to enqueue in the transaction that closed ``closed``."""
     messages: list[OutboxMessage] = []
-    if closed.parent_run_id is not None and closed.parent_seq is not None:
+    continued = closed.status is ExecutionStatus.CONTINUED_AS_NEW
+    # A run that continued as new hands its place in the parent to its successor, which
+    # reports when it truly closes.
+    if closed.parent_run_id is not None and closed.parent_seq is not None and not continued:
         messages.append(
             OutboxMessage(
                 action=OutboxAction.APPEND_INPUT,

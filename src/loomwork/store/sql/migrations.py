@@ -301,11 +301,17 @@ _0004_POSTGRES = (
     "CREATE INDEX lw_schedules_due ON lw_schedules (next_fire_at) WHERE NOT paused",
 )
 
+# ---------------------------------------------------------------------------------------
+# 0005: continue-as-new
+
+_0005 = ("ALTER TABLE lw_executions ADD COLUMN continued_run_id TEXT",)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
     Migration(3, "child workflows and outbox", _0003_SQLITE, _0003_POSTGRES),
     Migration(4, "schedules", _0004_SQLITE, _0004_POSTGRES),
+    Migration(5, "continue as new", _0005, _0005),
 )
 
 

@@ -7,6 +7,7 @@ resulting :class:`~loomwork.store.records.TickOutcome`.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import random
 import secrets
@@ -25,6 +26,7 @@ from loomwork.runtime.commands import (
     CancelWorkflow,
     CompleteUpdate,
     CompleteWorkflow,
+    ContinueAsNewCommand,
     FailWorkflow,
     RequestCancelStep,
     ScheduleChild,
@@ -90,7 +92,9 @@ class TickProcessor:
 
     def _make_instance(self, started: WorkflowStarted) -> WorkflowInstance:
         definition = self.registry.workflow(started.workflow_name)
-        return WorkflowInstance(definition, started, converter=self.converter)
+        instance = WorkflowInstance(definition, started, converter=self.converter)
+        instance.continue_as_new_suggested_at = self.config.continue_as_new_after_events
+        return instance
 
     async def process(self, record: ExecutionRecord) -> None:
         """Execute one tick of ``record``, which this worker must have leased."""
@@ -142,7 +146,11 @@ class TickProcessor:
         )
         new_steps: dict[int, StepJob] = {}
         new_timers: dict[int, TimerRecord] = {}
-        for command in live.commands:
+        for issued in live.commands:
+            command = issued
+            if isinstance(command, ContinueAsNewCommand):
+                # The successor's run id is assigned now, at commit, and recorded.
+                command = dataclasses.replace(command, new_run_id=new_id())
             outcome.decisions.append(command.to_event())
             match command:
                 case ScheduleStep():
@@ -191,6 +199,11 @@ class TickProcessor:
                     )
                 case CompleteUpdate():
                     pass  # recorded as a decision; callers read it from the history
+                case ContinueAsNewCommand():
+                    outcome.close = CloseOutcome(
+                        ExecutionStatus.CONTINUED_AS_NEW, continued_run_id=command.new_run_id
+                    )
+                    outcome.continuation = self._continuation(record, command, now)
                 case CompleteWorkflow():
                     outcome.close = CloseOutcome(ExecutionStatus.COMPLETED, result=command.result)
                 case FailWorkflow():
@@ -226,6 +239,31 @@ class TickProcessor:
             parent_run_id=parent.run_id,
         )
         return ChildSpec(record=child, started=started)
+
+    @staticmethod
+    def _continuation(
+        record: ExecutionRecord, command: ContinueAsNewCommand, now: Any
+    ) -> ChildSpec:
+        """The successor run: same workflow id and parent, fresh history."""
+        successor = ExecutionRecord(
+            run_id=command.new_run_id,
+            workflow_id=record.workflow_id,
+            workflow_name=command.workflow_name,
+            status=ExecutionStatus.RUNNING,
+            created_at=now,
+            parent_run_id=record.parent_run_id,
+            parent_seq=record.parent_seq,
+            parent_close_policy=record.parent_close_policy,
+        )
+        started = WorkflowStarted(
+            workflow_name=command.workflow_name,
+            workflow_id=record.workflow_id,
+            run_id=command.new_run_id,
+            args=list(command.args),
+            random_seed=secrets.randbits(63),
+            continued_from=record.run_id,
+        )
+        return ChildSpec(record=successor, started=started)
 
     async def _fail(self, record: ExecutionRecord, exc: Exception) -> None:
         self.ticks_failed += 1

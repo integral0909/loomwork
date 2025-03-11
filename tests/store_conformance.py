@@ -722,6 +722,31 @@ class StoreConformance:
         with pytest.raises(ValueError, match="input event"):
             OutboxMessage(OutboxAction.APPEND_INPUT, target_run_id="x")
 
+    async def test_continue_as_new(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        await self.commit(store, "r1", consumed=1, new_children=[self.child_spec("r1", 1, "kid")])
+        await store.append_input("r1", TimerFired(seq=5), T0)
+        assert await store.claim_tick("w1", T0, LEASE, ["wf"]) is not None
+        successor = record("r1-next", workflow_id="wid-r1")
+        await self.commit(
+            store,
+            "r1",
+            consumed=4,
+            close=CloseOutcome(ExecutionStatus.CONTINUED_AS_NEW, continued_run_id="r1-next"),
+            continuation=ChildSpec(successor, started(successor)),
+        )
+        old = await store.get_execution("r1")
+        assert old.status is ExecutionStatus.CONTINUED_AS_NEW
+        assert old.continued_run_id == "r1-next"
+        new = await store.get_execution("r1-next")
+        assert new.status is ExecutionStatus.RUNNING
+        assert new.tick_pending
+        assert (await store.find_execution("wid-r1")).run_id == "r1-next"
+        # The old run's child follows its parent-close policy.
+        await store.relay_outbox(T0)
+        assert (await store.get_execution("r1.c1")).status is ExecutionStatus.TERMINATED
+
     # ------------------------------------------------------------------ schedules
 
     def schedule(self, schedule_id: str = "s1", **changes: object) -> ScheduleState:

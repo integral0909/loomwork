@@ -1,8 +1,11 @@
 """The programming model: definitions and workflow/step APIs."""
 
 from loomwork.sdk.api import (
+    continue_as_new,
+    continue_as_new_suggested,
     heartbeat,
     heartbeat_details,
+    history_length,
     in_workflow,
     info,
     is_replaying,
@@ -33,6 +36,9 @@ from loomwork.sdk.messaging import (
 )
 
 __all__ = [
+    "continue_as_new",
+    "continue_as_new_suggested",
+    "history_length",
     "Channel",
     "ChannelEmpty",
     "ChildHandle",

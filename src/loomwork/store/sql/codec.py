@@ -116,6 +116,7 @@ EXECUTION_COLUMNS = (
     "parent_run_id",
     "parent_seq",
     "parent_close_policy",
+    "continued_run_id",
 )
 
 STEP_JOB_COLUMNS = (
@@ -167,6 +168,7 @@ def execution_from_row(row: Row, ts: Any) -> ExecutionRecord:
         parent_run_id=row["parent_run_id"],
         parent_seq=int(row["parent_seq"]) if row["parent_seq"] is not None else None,
         parent_close_policy=row["parent_close_policy"] or "terminate",
+        continued_run_id=row["continued_run_id"],
     )
 
 

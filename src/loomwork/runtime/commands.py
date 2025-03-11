@@ -30,6 +30,7 @@ from loomwork.history.events import (
     UpdateCompleted,
     WorkflowCanceled,
     WorkflowCompleted,
+    WorkflowContinuedAsNew,
     WorkflowFailed,
 )
 from loomwork.options import StepOptions
@@ -163,6 +164,31 @@ class CancelWorkflow(Command):
 
     def matches(self, event: Event) -> bool:
         return isinstance(event, WorkflowCanceled)
+
+    @property
+    def closes_workflow(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True, slots=True)
+class ContinueAsNewCommand(Command):
+    """Close the run and start ``workflow_name`` afresh with ``args``.
+
+    The new run id is assigned by the engine when it commits the tick; it is not part
+    of the command because workflow code never needs it.
+    """
+
+    workflow_name: str
+    args: list[Payload] = field(default_factory=list)
+    new_run_id: str = ""
+
+    def to_event(self) -> Event:
+        return WorkflowContinuedAsNew(
+            new_run_id=self.new_run_id, workflow_name=self.workflow_name, args=self.args
+        )
+
+    def matches(self, event: Event) -> bool:
+        return isinstance(event, WorkflowContinuedAsNew)
 
     @property
     def closes_workflow(self) -> bool:

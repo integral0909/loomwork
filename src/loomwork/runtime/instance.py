@@ -24,6 +24,7 @@ from loomwork.codec.converter import DataConverter, return_hint
 from loomwork.codec.payload import Payload
 from loomwork.errors import (
     ApplicationError,
+    ContinueAsNew,
     NondeterminismError,
     NotFoundError,
     WorkflowTickError,
@@ -48,6 +49,7 @@ from loomwork.runtime.commands import (
     Command,
     CompleteUpdate,
     CompleteWorkflow,
+    ContinueAsNewCommand,
     FailWorkflow,
     RequestCancelStep,
     ScheduleChild,
@@ -108,7 +110,13 @@ class WorkflowInstance:
             parent_run_id=started.parent_run_id or None,
             schedule_id=started.schedule_id or None,
             scheduled_time=started.scheduled_time,
+            continued_from_run_id=started.continued_from or None,
         )
+        #: Approximate history size: the id of the newest input the current activation
+        #: consumed (identical on replay). Workflows use it to decide when to continue
+        #: as new.
+        self.history_length = 0
+        self.continue_as_new_suggested_at = 10_000
         self.random = random.Random(started.random_seed)
         self.loop = DeterministicEventLoop(self, start_time=started.timestamp.timestamp())
         self.loop.owner = self
@@ -224,6 +232,12 @@ class WorkflowInstance:
             raise NondeterminismError(f"result delivered for step {seq}, which was never scheduled")
         return pending
 
+    def _continue_as_new(self, request: ContinueAsNew) -> Command:
+        name = request.workflow_name or self.info.workflow_name
+        return ContinueAsNewCommand(
+            workflow_name=name, args=self.converter.encode_args(list(request.args))
+        )
+
     def _resolve_child(self, seq: int) -> _PendingStep | None:
         child = self._children.pop(seq, None)
         if child is None and seq > self._child_seq:
@@ -242,6 +256,8 @@ class WorkflowInstance:
             exc = main.exception()
             if exc is None:
                 command = CompleteWorkflow(result=self.converter.encode(main.result()))
+            elif isinstance(exc, ContinueAsNew):
+                command = self._continue_as_new(exc)
             elif self.definition.is_failure(exc):
                 command = FailWorkflow(failure=FailureInfo.from_exception(exc))
             else:

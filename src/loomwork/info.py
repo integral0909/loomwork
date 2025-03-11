@@ -21,6 +21,8 @@ class WorkflowInfo:
     scheduled_time: datetime | None = None
     """The nominal fire time of the schedule that started this run (for example the
     date a daily report is about), independent of when the run actually started."""
+    continued_from_run_id: str | None = None
+    """The run that continued as new into this one, if any."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from typing import Any, Generic, TypeVar
 
@@ -140,8 +141,16 @@ class WorkflowHandle(Generic[R]):
             TimeoutError: the run did not close within ``timeout`` seconds.
         """
         run_id = await self._run_id()
-        record = await self._engine.wait_closed(run_id, timeout)
-        return self._outcome(record)
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        while True:
+            remaining = None if deadline is None else max(deadline - loop.time(), 0.0)
+            record = await self._engine.wait_closed(run_id, remaining)
+            if record.status is ExecutionStatus.CONTINUED_AS_NEW and record.continued_run_id:
+                # The workflow handed over to a new run; its result is the chain's result.
+                run_id = record.continued_run_id
+                continue
+            return self._outcome(record)
 
     def _outcome(self, record: ExecutionRecord) -> R:
         match record.status:

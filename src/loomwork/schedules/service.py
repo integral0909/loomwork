@@ -63,12 +63,21 @@ class ScheduleService:
         return len(due)
 
     async def _statuses(self, state: ScheduleState) -> dict[str, ExecutionStatus]:
+        """Status of each run the schedule started, following continue-as-new chains
+        (a run that continued as new is still "running" if its successor is)."""
         statuses: dict[str, ExecutionStatus] = {}
         for run in state.running:
-            try:
-                statuses[run.run_id] = (await self.store.get_execution(run.run_id)).status
-            except NotFoundError:
-                continue
+            run_id: str | None = run.run_id
+            for _ in range(100):  # bound pathological chains
+                try:
+                    record = await self.store.get_execution(run_id)  # type: ignore[arg-type]
+                except NotFoundError:
+                    break
+                if record.status is ExecutionStatus.CONTINUED_AS_NEW and record.continued_run_id:
+                    run_id = record.continued_run_id
+                    continue
+                statuses[run.run_id] = record.status
+                break
         return statuses
 
     async def evaluate(self, state: ScheduleState, now: datetime) -> ScheduleState:

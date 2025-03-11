@@ -139,7 +139,8 @@ class SQLStore(Store, abc.ABC):
                 status = ?, closed_at = ?, last_event_id = ?, last_input_id = ?,
                 consumed_through = ?, tick_pending = ?, tick_ready_at = ?, tick_failures = ?,
                 last_tick_error = ?, lease_owner = ?, lease_expires_at = ?,
-                cancel_requested = ?, result = ?, failure = ?, close_reason = ?
+                cancel_requested = ?, result = ?, failure = ?, close_reason = ?,
+                continued_run_id = ?
             WHERE run_id = ?
             """,
             (
@@ -158,6 +159,7 @@ class SQLStore(Store, abc.ABC):
                 codec.payload_to_json(rec.result),
                 codec.failure_to_json(rec.failure),
                 rec.close_reason,
+                rec.continued_run_id,
                 rec.run_id,
             ),
         )
@@ -204,6 +206,7 @@ class SQLStore(Store, abc.ABC):
         rec.result = outcome.result
         rec.failure = outcome.failure
         rec.close_reason = outcome.reason
+        rec.continued_run_id = outcome.continued_run_id
         rec.tick_pending = False
         rec.tick_ready_at = None
         rec.lease_owner = None
@@ -479,7 +482,16 @@ class SQLStore(Store, abc.ABC):
 
             if outcome.close is not None:
                 await self._close(tx, rec, outcome.close, now)
+                # Write the closed status first: the successor reuses the workflow id,
+                # which the partial unique index only allows once this run is closed.
                 await self._write(tx, rec)
+                if outcome.continuation is not None:
+                    await self._insert_run(
+                        tx,
+                        dataclasses.replace(outcome.continuation.record),
+                        outcome.continuation.started,
+                        now,
+                    )
                 return appended
 
             for seq in outcome.cancel_steps:

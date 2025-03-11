@@ -22,6 +22,7 @@ class ExecutionStatus(enum.StrEnum):
     FAILED = "failed"
     CANCELED = "canceled"
     TERMINATED = "terminated"
+    CONTINUED_AS_NEW = "continued_as_new"
 
     @property
     def is_closed(self) -> bool:
@@ -67,6 +68,7 @@ class ExecutionRecord:
     parent_run_id: str | None = None
     parent_seq: int | None = None
     parent_close_policy: str = "terminate"
+    continued_run_id: str | None = None
 
     @property
     def is_closed(self) -> bool:
@@ -169,6 +171,7 @@ class CloseOutcome:
     result: Payload | None = None
     failure: FailureInfo | None = None
     reason: str = ""
+    continued_run_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -186,3 +189,5 @@ class TickOutcome:
     new_children: list[ChildSpec] = field(default_factory=list)
     outbox: list[OutboxMessage] = field(default_factory=list)
     close: CloseOutcome | None = None
+    continuation: ChildSpec | None = None
+    """With a ``CONTINUED_AS_NEW`` close: the run to start in the same transaction."""

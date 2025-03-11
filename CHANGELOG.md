@@ -61,6 +61,12 @@ All notable changes to this project are documented here. The format follows
   through same-module helpers; suppression comments, `[tool.loomwork.lint]`
   configuration, and text, JSON and SARIF reports.
 
+- Continue-as-new: `loomwork.continue_as_new()` closes a run and atomically starts its
+  successor under the same workflow id (optionally a different workflow), keeping
+  histories of long-lived workflows bounded. Handles, parents and schedules follow the
+  chain; `history_length()` and `continue_as_new_suggested()` help decide when
+  (migration 0005).
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.

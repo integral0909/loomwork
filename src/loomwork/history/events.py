@@ -95,6 +95,7 @@ class WorkflowStarted(Event):
     parent_run_id: str = ""
     schedule_id: str = ""
     scheduled_time: datetime | None = None
+    continued_from: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -295,6 +296,18 @@ class ExternalSignalScheduled(Event):
     message_id: str = ""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WorkflowContinuedAsNew(Event):
+    """The run closed and handed over to a fresh run with the same workflow id."""
+
+    kind: ClassVar[str] = "workflow_continued_as_new"
+    category: ClassVar[EventCategory] = EventCategory.DECISION
+
+    new_run_id: str
+    workflow_name: str
+    args: list[Payload] = field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- system
 
 
@@ -308,6 +321,7 @@ class WorkflowTerminated(Event):
 
 CLOSING_EVENTS: tuple[type[Event], ...] = (
     WorkflowCompleted,
+    WorkflowContinuedAsNew,
     WorkflowFailed,
     WorkflowCanceled,
     WorkflowTerminated,

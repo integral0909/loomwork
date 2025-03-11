@@ -13,13 +13,16 @@ import random as _random
 import uuid as _uuid
 from collections.abc import MutableMapping
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
-from loomwork.errors import NotInWorkflowError
+from loomwork.errors import ContinueAsNew, NotInWorkflowError
 from loomwork.info import StepInfo, WorkflowInfo
 from loomwork.runtime.context import current_instance, current_instance_or_none, in_workflow
 
 __all__ = [
+    "continue_as_new",
+    "continue_as_new_suggested",
+    "history_length",
     "heartbeat",
     "heartbeat_details",
     "in_workflow",
@@ -67,6 +70,30 @@ def uuid4() -> _uuid.UUID:
 def is_replaying() -> bool:
     """Whether the current activation is re-executing recorded history. *Workflow-only.*"""
     return current_instance().replaying
+
+
+def continue_as_new(*args: Any, workflow: Any = None) -> NoReturn:
+    """End this run and start a fresh run of the same workflow id. *Workflow-only.*
+
+    Long-lived workflows (an entity that lives for months, a loop over millions of items)
+    call this periodically to keep their history small. The new run starts with
+    ``args`` and an empty history; pass whatever state it needs to resume. ``workflow``
+    (a definition) switches to a different workflow, for example a newer version.
+    """
+    current_instance()
+    name = getattr(workflow, "name", None) if workflow is not None else None
+    raise ContinueAsNew(name, list(args))
+
+
+def history_length() -> int:
+    """Approximate number of events in this run's history. *Workflow-only.*"""
+    return current_instance().history_length
+
+
+def continue_as_new_suggested() -> bool:
+    """Whether the history has grown past the engine's recommended size. *Workflow-only.*"""
+    instance = current_instance()
+    return instance.history_length >= instance.continue_as_new_suggested_at
 
 
 async def sleep(duration: timedelta | float) -> None:

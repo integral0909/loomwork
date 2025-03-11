@@ -112,6 +112,9 @@ class Replayer:
             return
         instance = self._require_instance()
         batch = self._drop_consumed(tick.consumed_through)
+        # consumed_through is recorded in the tick, so live and replayed activations see
+        # exactly the same value (the load position of the live tick is not recorded).
+        instance.history_length = tick.consumed_through
         commands = instance.activate(tick.time, batch, replaying=True)
         self._expected.extend(commands)
         self.replayed_ticks += 1
@@ -177,8 +180,9 @@ class Replayer:
             raise WorkflowTickError("the run is already closed")
         time = now if self.last_tick_time is None else max(now, self.last_tick_time)
         batch, self._pending = self._pending, []
-        commands = instance.activate(time, batch, replaying=False)
         consumed = max((e.event_id for e in batch), default=self.consumed_through)
+        instance.history_length = consumed
+        commands = instance.activate(time, batch, replaying=False)
         self.consumed_through = consumed
         self.last_tick_time = time
         return LiveTick(

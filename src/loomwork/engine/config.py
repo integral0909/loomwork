@@ -26,6 +26,8 @@ class EngineConfig:
         poll_interval: upper bound, in seconds, on how long an idle worker waits before
             checking for work again when no notification arrives.
         timer_batch_size: timers fired per store call.
+        continue_as_new_after_events: history size at which
+            :func:`loomwork.continue_as_new_suggested` starts returning ``True``.
     """
 
     tick_lease: timedelta = timedelta(seconds=30)
@@ -44,6 +46,7 @@ class EngineConfig:
     replay_cache_size: int = 1000
     poll_interval: float = 1.0
     timer_batch_size: int = 100
+    continue_as_new_after_events: int = 10_000
 
     def __post_init__(self) -> None:
         if self.tick_lease <= timedelta(0):
