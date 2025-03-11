@@ -16,6 +16,7 @@ from typing import Any
 
 from loomwork.clock import Clock
 from loomwork.codec.converter import DataConverter
+from loomwork.codec.transform import CodecBoundary
 from loomwork.engine.cache import ReplayerCache
 from loomwork.engine.config import EngineConfig
 from loomwork.errors import LeaseLostError, NondeterminismError
@@ -73,6 +74,7 @@ class TickProcessor:
         self.config = config
         self.worker_id = worker_id
         self.cache = ReplayerCache(config.replay_cache_size)
+        self.boundary = CodecBoundary(converter.codec)
         self._rng = random.Random()
         self.ticks_completed = 0
         self.ticks_failed = 0
@@ -102,7 +104,7 @@ class TickProcessor:
         replayer = self.cache.take(run_id) or Replayer(self._make_instance)
         try:
             events = await self.store.load_history(run_id, after_id=replayer.last_event_id)
-            replayer.feed(events)
+            replayer.feed(await self.boundary.decode(events))
             if replayer.is_closed:
                 # The history is closed but the record still asked for a tick; nothing
                 # can run. Release the lease without changing anything.
@@ -112,6 +114,8 @@ class TickProcessor:
                 )
                 return
             live = replayer.live_tick(self.clock.now())
+            if self.boundary.active:
+                live = dataclasses.replace(live, commands=await self.boundary.encode(live.commands))
             outcome = self._build_outcome(record, live)
             committed = await self._commit(record, outcome)
         except LeaseLostError as exc:

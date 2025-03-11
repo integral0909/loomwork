@@ -68,7 +68,7 @@ class Client:
             positional = list(args)
             hint = _NO_HINT
         record = await self.engine.start_workflow(
-            name, self.converter.encode_args(positional), workflow_id=id
+            name, await self.converter.encode_args_async(positional), workflow_id=id
         )
         return WorkflowHandle(
             self.engine,
@@ -141,10 +141,10 @@ class Client:
             channel_name = channel
         record = await self.engine.signal_with_start(
             name,
-            self.converter.encode_args(positional),
+            await self.converter.encode_args_async(positional),
             workflow_id=id,
             channel=channel_name,
-            payload=self.converter.encode(value),
+            payload=await self.converter.encode_async(value),
             message_id=message_id or "",
         )
         return WorkflowHandle(

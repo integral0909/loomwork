@@ -15,6 +15,7 @@ from typing import Any
 
 from loomwork.codec.converter import DataConverter
 from loomwork.codec.payload import Payload
+from loomwork.codec.transform import CodecBoundary
 from loomwork.errors import NotFoundError
 from loomwork.history.events import WorkflowStarted
 from loomwork.runtime.instance import WorkflowInstance
@@ -39,7 +40,9 @@ class QueryRunner:
         return WorkflowInstance(definition, started, converter=self.converter)
 
     async def query(self, run_id: str, name: str, args: Sequence[Payload]) -> Payload:
-        history = await self.store.load_history(run_id)
+        history = await CodecBoundary(self.converter.codec).decode(
+            await self.store.load_history(run_id)
+        )
         replayer = Replayer(self._make_instance)
         try:
             replayer.feed(history)

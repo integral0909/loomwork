@@ -67,6 +67,10 @@ All notable changes to this project are documented here. The format follows
   chain; `history_length()` and `continue_as_new_suggested()` help decide when
   (migration 0005).
 
+- Payload codecs are applied end to end: clients encode arguments, signals and updates;
+  workers decode histories before replay and encode commands, step results and
+  heartbeat details before they reach the store.
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.

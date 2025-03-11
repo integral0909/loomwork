@@ -89,7 +89,7 @@ class WorkflowHandle(Generic[R]):
         await self._engine.signal(
             await self._run_id(),
             name,
-            self._converter.encode(value),
+            await self._converter.encode_async(value),
             message_id=message_id or "",
         )
 
@@ -117,13 +117,13 @@ class WorkflowHandle(Generic[R]):
         """
         run_id = await self._run_id()
         update_id = await self._engine.request_update(
-            run_id, name, self._converter.encode_args(list(args)), update_id=update_id
+            run_id, name, await self._converter.encode_args_async(list(args)), update_id=update_id
         )
         outcome = await self._engine.wait_update(run_id, update_id, timeout)
         if outcome.failure is not None:
             raise UpdateFailedError(update_id, outcome.failure) from outcome.failure.to_exception()
         assert outcome.result is not None
-        return self._converter.decode(outcome.result, result_type)
+        return await self._converter.decode_async(outcome.result, result_type)
 
     async def cancel(self, reason: str = "") -> bool:
         return await self._engine.request_cancel(await self._run_id(), reason)
@@ -150,13 +150,13 @@ class WorkflowHandle(Generic[R]):
                 # The workflow handed over to a new run; its result is the chain's result.
                 run_id = record.continued_run_id
                 continue
-            return self._outcome(record)
+            return await self._outcome(record)
 
-    def _outcome(self, record: ExecutionRecord) -> R:
+    async def _outcome(self, record: ExecutionRecord) -> R:
         match record.status:
             case ExecutionStatus.COMPLETED:
                 assert record.result is not None
-                value: R = self._converter.decode(record.result, self._result_hint)
+                value: R = await self._converter.decode_async(record.result, self._result_hint)
                 return value
             case ExecutionStatus.FAILED:
                 assert record.failure is not None

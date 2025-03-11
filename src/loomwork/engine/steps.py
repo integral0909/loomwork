@@ -33,6 +33,7 @@ from typing import Any
 
 from loomwork.clock import Clock
 from loomwork.codec.converter import DataConverter
+from loomwork.codec.transform import CodecBoundary
 from loomwork.engine.config import EngineConfig
 from loomwork.failure import FailureInfo
 from loomwork.history.events import StepCompleted, StepFailed
@@ -97,7 +98,9 @@ class _Attempt:
         executor = self._executor
         payload = None
         if self._has_pending:
-            payload = executor.converter.encode(self._pending_details)
+            (payload,) = await executor.boundary.encode_payloads(
+                [executor.converter.encode(self._pending_details)]
+            )
             self._has_pending = False
         self._last_sent = self._loop.time()
         now = executor.clock.now()
@@ -146,6 +149,7 @@ class StepExecutor:
         self.converter = converter
         self.config = config
         self.worker_id = worker_id
+        self.boundary = CodecBoundary(converter.codec)
         self._rng = random.Random()
         self.attempts_started = 0
         self.steps_completed = 0
@@ -174,6 +178,8 @@ class StepExecutor:
         return True
 
     async def execute(self, job: StepJob) -> None:
+        # Arguments and heartbeat details arrive encoded; the step sees plain values.
+        job = await self.boundary.decode_one(job)
         now = self.clock.now()
         policy = job.options.retry or self.config.default_step_retry
         lease = self.config.step_lease(job.options)
@@ -213,6 +219,7 @@ class StepExecutor:
             )
             return
         if isinstance(outcome, StepCompleted):
+            outcome = await self.boundary.encode_one(outcome)
             if await self.store.finish_step(job.job_id, self.worker_id, outcome, finished_at):
                 self.steps_completed += 1
             return

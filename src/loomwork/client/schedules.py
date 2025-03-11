@@ -112,7 +112,7 @@ class ScheduleClient:
                 end_at=end_at,
                 jitter=jitter,
             ),
-            action=ScheduleAction(name, self._converter.encode_args(positional)),
+            action=ScheduleAction(name, await self._converter.encode_args_async(positional)),
             policy=SchedulePolicy(overlap, catchup_window, pause_on_failure),
             paused=paused,
             note=note,
