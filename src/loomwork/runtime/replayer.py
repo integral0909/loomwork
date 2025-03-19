@@ -22,6 +22,7 @@ from loomwork.errors import NondeterminismError, WorkflowTickError
 from loomwork.history.events import (
     Event,
     EventCategory,
+    PatchRecorded,
     TickCompleted,
     WorkflowStarted,
     is_closing,
@@ -66,11 +67,18 @@ class Replayer:
         self._expected: collections.deque[Command] = collections.deque()
         self._own_ticks: set[int] = set()
         self._skipping_own = False
+        self._recorded_patches: set[str] = set()
 
     # ------------------------------------------------------------------ feeding
 
     def feed(self, events: Iterable[Event]) -> None:
         """Apply history events. Already-seen events are ignored."""
+        events = list(events)
+        # patched() must know about markers recorded *later* in the batch, because the
+        # marker's decision event follows the tick in which the call happened.
+        self._recorded_patches.update(e.patch_id for e in events if isinstance(e, PatchRecorded))
+        if self.instance is not None:
+            self.instance.recorded_patches = self._recorded_patches
         for event in events:
             if event.event_id <= self.last_event_id:
                 continue
@@ -96,6 +104,7 @@ class Replayer:
         if event.category is EventCategory.INPUT:
             if isinstance(event, WorkflowStarted) and self.instance is None:
                 self.instance = self._factory(event)
+                self.instance.recorded_patches = self._recorded_patches
             self._pending.append(event)
         elif isinstance(event, TickCompleted):
             self._apply_tick(event)

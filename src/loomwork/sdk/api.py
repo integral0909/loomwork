@@ -20,6 +20,8 @@ from loomwork.info import StepInfo, WorkflowInfo
 from loomwork.runtime.context import current_instance, current_instance_or_none, in_workflow
 
 __all__ = [
+    "deprecate_patch",
+    "patched",
     "continue_as_new",
     "continue_as_new_suggested",
     "history_length",
@@ -83,6 +85,33 @@ def continue_as_new(*args: Any, workflow: Any = None) -> NoReturn:
     current_instance()
     name = getattr(workflow, "name", None) if workflow is not None else None
     raise ContinueAsNew(name, list(args))
+
+
+def patched(patch_id: str) -> bool:
+    """Branch between old and new workflow logic safely. *Workflow-only.*
+
+    Returns ``True`` when the run reaches this point under code that knows the patch
+    (every new run, and running ones that get here after the deploy), and ``False``
+    while replaying history recorded before the patch existed::
+
+        if lw.patched("send-sms-receipt"):
+            await send_sms(order)        # new behaviour
+        else:
+            await send_email(order)      # what old runs already did
+
+    Once no run that predates the patch is left, replace the call with
+    :func:`deprecate_patch` and delete the old branch; later remove that call too.
+    """
+    return current_instance().patched(patch_id)
+
+
+def deprecate_patch(patch_id: str) -> None:
+    """Mark a patch whose old branch has been deleted. *Workflow-only.*
+
+    Keeps runs that recorded the patch replaying correctly while the new code no longer
+    branches.
+    """
+    current_instance().deprecate_patch(patch_id)
 
 
 def history_length() -> int:

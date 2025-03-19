@@ -467,6 +467,7 @@ class SQLStore(Store, abc.ABC):
                     consumed_through=max(outcome.consumed_through, rec.consumed_through),
                     time=outcome.time,
                     worker_id=worker_id,
+                    code_version=outcome.code_version,
                 )
                 for event in (tick, *outcome.decisions):
                     appended.append(await self._append(tx, rec, event, now))  # noqa: PERF401

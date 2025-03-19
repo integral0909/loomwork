@@ -190,6 +190,7 @@ class TickCompleted(Event):
     consumed_through: int
     time: datetime
     worker_id: str = ""
+    code_version: str = ""
 
 
 # --------------------------------------------------------------------------- decisions
@@ -294,6 +295,16 @@ class ExternalSignalScheduled(Event):
     channel: str
     payload: Payload
     message_id: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PatchRecorded(Event):
+    """Workflow code took the new branch of ``loomwork.patched(patch_id)``."""
+
+    kind: ClassVar[str] = "patch_recorded"
+    category: ClassVar[EventCategory] = EventCategory.DECISION
+
+    patch_id: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

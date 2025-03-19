@@ -96,7 +96,17 @@ class WorkflowDefinition(Generic[P, R]):
         self.fn = fn
         self.name = _validate_name(name or fn.__name__, "workflow")
         self.fail_on: tuple[type[BaseException], ...] = tuple(fail_on)
+        self._fingerprint: str | None = None
         functools.update_wrapper(self, fn)
+
+    @property
+    def fingerprint(self) -> str:
+        """Hash of the workflow's normalised source; see :mod:`loomwork.versioning`."""
+        if self._fingerprint is None:
+            from loomwork.versioning.fingerprint import code_fingerprint
+
+            self._fingerprint = code_fingerprint(self.fn)
+        return self._fingerprint
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Awaitable[R]:
         """Inside a workflow: start this workflow as a child and wait for its result.

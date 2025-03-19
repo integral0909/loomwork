@@ -28,6 +28,7 @@ from loomwork.history import (
     EventCategory,
     ExternalSignalScheduled,
     HistoryFormatError,
+    PatchRecorded,
     SignalReceived,
     StepCancelRequested,
     StepCompleted,
@@ -228,6 +229,7 @@ SAMPLE_EVENTS = [
     UpdateCompleted(update_id="u-2", failure=F),
     ExternalSignalScheduled(seq=1, workflow_id="other", channel="c", payload=P, message_id="x"),
     WorkflowContinuedAsNew(new_run_id="r2", workflow_name="wf", args=[P]),
+    PatchRecorded(patch_id="sms-receipts"),
 ]
 
 

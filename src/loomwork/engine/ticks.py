@@ -29,6 +29,7 @@ from loomwork.runtime.commands import (
     CompleteWorkflow,
     ContinueAsNewCommand,
     FailWorkflow,
+    RecordPatch,
     RequestCancelStep,
     ScheduleChild,
     ScheduleStep,
@@ -146,7 +147,10 @@ class TickProcessor:
     def _build_outcome(self, record: ExecutionRecord, live: LiveTick) -> TickOutcome:
         now = self.clock.now()
         outcome = TickOutcome(
-            worker_id=self.worker_id, consumed_through=live.consumed_through, time=live.time
+            worker_id=self.worker_id,
+            consumed_through=live.consumed_through,
+            time=live.time,
+            code_version=self._code_version(record.workflow_name),
         )
         new_steps: dict[int, StepJob] = {}
         new_timers: dict[int, TimerRecord] = {}
@@ -201,8 +205,8 @@ class TickProcessor:
                             ),
                         )
                     )
-                case CompleteUpdate():
-                    pass  # recorded as a decision; callers read it from the history
+                case CompleteUpdate() | RecordPatch():
+                    pass  # recorded as a decision event only; no side effect
                 case ContinueAsNewCommand():
                     outcome.close = CloseOutcome(
                         ExecutionStatus.CONTINUED_AS_NEW, continued_run_id=command.new_run_id
@@ -220,6 +224,11 @@ class TickProcessor:
             outcome.new_steps = list(new_steps.values())
             outcome.new_timers = list(new_timers.values())
         return outcome
+
+    def _code_version(self, workflow_name: str) -> str:
+        if not self.registry.has_workflow(workflow_name):
+            return ""
+        return self.registry.workflow(workflow_name).fingerprint
 
     @staticmethod
     def _child_spec(parent: ExecutionRecord, command: ScheduleChild, now: Any) -> ChildSpec:

@@ -35,6 +35,8 @@ from loomwork.info import StepInfo, WorkflowInfo
 from loomwork.options import ParentClosePolicy, StepOptions
 from loomwork.retry import RetryPolicy
 from loomwork.sdk import (
+    deprecate_patch,
+    patched,
     Channel,
     ChannelEmpty,
     ChildHandle,
@@ -119,6 +121,8 @@ __all__ = [
     "WorkflowInfo",
     "WorkflowTerminatedError",
     "__version__",
+    "deprecate_patch",
+    "patched",
     "continue_as_new",
     "continue_as_new_suggested",
     "history_length",

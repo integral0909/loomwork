@@ -3,6 +3,7 @@
 from loomwork.sdk.api import (
     continue_as_new,
     continue_as_new_suggested,
+    deprecate_patch,
     heartbeat,
     heartbeat_details,
     history_length,
@@ -11,6 +12,7 @@ from loomwork.sdk.api import (
     is_replaying,
     logger,
     now,
+    patched,
     random,
     sleep,
     sleep_until,
@@ -36,6 +38,8 @@ from loomwork.sdk.messaging import (
 )
 
 __all__ = [
+    "deprecate_patch",
+    "patched",
     "continue_as_new",
     "continue_as_new_suggested",
     "history_length",

@@ -23,6 +23,7 @@ from loomwork.history.events import (
     ChildScheduled,
     Event,
     ExternalSignalScheduled,
+    PatchRecorded,
     StepCancelRequested,
     StepScheduled,
     TimerCanceled,
@@ -171,6 +172,20 @@ class CancelWorkflow(Command):
 
 
 @dataclass(frozen=True, slots=True)
+class RecordPatch(Command):
+    patch_id: str
+
+    def to_event(self) -> Event:
+        return PatchRecorded(patch_id=self.patch_id)
+
+    def matches(self, event: Event) -> bool:
+        return isinstance(event, PatchRecorded) and event.patch_id == self.patch_id
+
+    def describe(self) -> str:
+        return f"RecordPatch({self.patch_id!r})"
+
+
+@dataclass(frozen=True, slots=True)
 class ContinueAsNewCommand(Command):
     """Close the run and start ``workflow_name`` afresh with ``args``.
 
@@ -277,6 +292,9 @@ def describe_event(event: Event) -> str:
     seq = getattr(event, "seq", None)
     name = getattr(event, "step_name", None)
     parts = []
+    patch_id = getattr(event, "patch_id", None)
+    if patch_id is not None:
+        parts.append(repr(patch_id))
     if seq is not None:
         parts.append(f"seq={seq}")
     if name is not None:

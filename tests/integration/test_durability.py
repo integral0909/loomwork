@@ -14,6 +14,7 @@ import pytest
 
 import loomwork as lw
 from loomwork import ExecutionStatus, ManualClock
+from loomwork.history.events import StepCompleted
 from loomwork.store.base import Store
 from loomwork.store.sqlite import SQLiteStore
 from loomwork.worker import WorkerOptions
@@ -130,7 +131,14 @@ async def test_run_survives_process_restarts(open_store: StoreFactory, clock: Ma
     async with open_store() as store:
         app = app_on(store, clock)
         async with app:
-            await eventually(lambda: executions.get("restart.1") == 1)
+
+            async def second_step_recorded() -> bool:
+                # Wait for the *recorded* completion: stopping after the step body ran
+                # but before its result was committed would (correctly) re-run it.
+                history = await store.load_history(run_id or "")
+                return sum(isinstance(e, StepCompleted) for e in history) == 2
+
+            await eventually(second_step_recorded)
 
     # Process 3 finishes the run.
     async with open_store() as store:

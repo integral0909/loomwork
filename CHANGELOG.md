@@ -71,6 +71,11 @@ All notable changes to this project are documented here. The format follows
   workers decode histories before replay and encode commands, step results and
   heartbeat details before they reach the store.
 
+- Versioning: `loomwork.patched()` and `deprecate_patch()` for changing workflow logic
+  safely while runs are in flight; every tick records a fingerprint of the workflow code
+  that executed it (`TickCompleted.code_version`); `loomwork.versioning` replays stored
+  or exported histories against new code and reports where they would diverge.
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.

@@ -189,5 +189,7 @@ class TickOutcome:
     new_children: list[ChildSpec] = field(default_factory=list)
     outbox: list[OutboxMessage] = field(default_factory=list)
     close: CloseOutcome | None = None
+    code_version: str = ""
+    """Fingerprint of the workflow code that executed the tick."""
     continuation: ChildSpec | None = None
     """With a ``CONTINUED_AS_NEW`` close: the run to start in the same transaction."""

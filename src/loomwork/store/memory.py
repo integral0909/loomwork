@@ -313,6 +313,7 @@ class MemoryStore(Store):
                 consumed_through=max(outcome.consumed_through, record.consumed_through),
                 time=outcome.time,
                 worker_id=worker_id,
+                code_version=outcome.code_version,
             )
             appended.append(self._append(run, tick, now))
             appended.extend(self._append(run, decision, now) for decision in outcome.decisions)

@@ -51,6 +51,7 @@ from loomwork.runtime.commands import (
     CompleteWorkflow,
     ContinueAsNewCommand,
     FailWorkflow,
+    RecordPatch,
     RequestCancelStep,
     ScheduleChild,
     ScheduleStep,
@@ -143,6 +144,9 @@ class WorkflowInstance:
         self._child_seq = 0
         self._children: dict[int, _PendingStep] = {}
         self._external_seq = 0
+        #: Patch ids recorded anywhere in the history fed so far (set by the replayer).
+        self.recorded_patches: set[str] = set()
+        self._patch_results: dict[str, bool] = {}
 
     # ------------------------------------------------------------------ activation
 
@@ -293,6 +297,31 @@ class WorkflowInstance:
         # arrived: tell the engine it may stop the step.
         if future.cancelled() and self._steps.pop(seq, None) is not None:
             self._emit(RequestCancelStep(seq=seq))
+
+    # ------------------------------------------------------------------ versioning
+
+    def patched(self, patch_id: str) -> bool:
+        """See :func:`loomwork.patched`."""
+        cached = self._patch_results.get(patch_id)
+        if cached is not None:
+            return cached
+        if self.replaying and patch_id not in self.recorded_patches:
+            # History written before the patch existed: keep taking the old branch.
+            result = False
+        else:
+            result = True
+            self._emit(RecordPatch(patch_id=patch_id))
+        self._patch_results[patch_id] = result
+        return result
+
+    def deprecate_patch(self, patch_id: str) -> None:
+        """See :func:`loomwork.deprecate_patch`."""
+        if patch_id in self._patch_results:
+            return
+        self._patch_results[patch_id] = True
+        if patch_id in self.recorded_patches:
+            # Consume the marker recorded by the (now removed) patched() call.
+            self._emit(RecordPatch(patch_id=patch_id))
 
     # ------------------------------------------------------------------ signals
 
