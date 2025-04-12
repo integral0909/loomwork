@@ -306,12 +306,54 @@ _0004_POSTGRES = (
 
 _0005 = ("ALTER TABLE lw_executions ADD COLUMN continued_run_id TEXT",)
 
+# ---------------------------------------------------------------------------------------
+# 0006: search attributes (the shape loomwork.visibility.sql compiles queries against)
+
+_0006_SQLITE: tuple[str, ...] = (
+    """
+    CREATE TABLE lw_search_attributes (
+        run_id     TEXT    NOT NULL REFERENCES lw_executions (run_id),
+        name       TEXT    NOT NULL,
+        value_type TEXT    NOT NULL,
+        str_value  TEXT,
+        int_value  INTEGER,
+        float_value REAL,
+        bool_value INTEGER,
+        time_value INTEGER
+    )
+    """,
+    "CREATE INDEX lw_search_attributes_run_id ON lw_search_attributes (run_id)",
+    "CREATE INDEX lw_search_attributes_lookup ON lw_search_attributes (name, run_id)",
+    "CREATE UNIQUE INDEX lw_search_attributes_scalar_unique "
+    "ON lw_search_attributes (run_id, name) WHERE value_type <> 'keyword'",
+)
+
+_0006_POSTGRES: tuple[str, ...] = (
+    """
+    CREATE TABLE lw_search_attributes (
+        run_id      TEXT        NOT NULL REFERENCES lw_executions (run_id),
+        name        TEXT        NOT NULL,
+        value_type  TEXT        NOT NULL,
+        str_value   TEXT,
+        int_value   BIGINT,
+        float_value DOUBLE PRECISION,
+        bool_value  BOOLEAN,
+        time_value  TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX lw_search_attributes_run_id ON lw_search_attributes (run_id)",
+    "CREATE INDEX lw_search_attributes_lookup ON lw_search_attributes (name, run_id)",
+    "CREATE UNIQUE INDEX lw_search_attributes_scalar_unique "
+    "ON lw_search_attributes (run_id, name) WHERE value_type <> 'keyword'",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
     Migration(3, "child workflows and outbox", _0003_SQLITE, _0003_POSTGRES),
     Migration(4, "schedules", _0004_SQLITE, _0004_POSTGRES),
     Migration(5, "continue as new", _0005, _0005),
+    Migration(6, "search attributes", _0006_SQLITE, _0006_POSTGRES),
 )
 
 

@@ -69,6 +69,9 @@ class WorkflowHandle(Generic[R]):
     async def pending_steps(self) -> list[StepJob]:
         return await self._engine.pending_steps(await self._run_id())
 
+    async def search_attributes(self) -> dict[str, object]:
+        return await self._engine.search_attributes(await self._run_id())
+
     async def children(self) -> list[ExecutionRecord]:
         return await self._engine.children(await self._run_id())
 

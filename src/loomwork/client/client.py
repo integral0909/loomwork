@@ -44,12 +44,20 @@ class Client:
 
     @overload
     async def start(
-        self, workflow: WorkflowDefinition[..., R], *args: Any, id: str | None = None
+        self,
+        workflow: WorkflowDefinition[..., R],
+        *args: Any,
+        id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> WorkflowHandle[R]: ...
 
     @overload
     async def start(
-        self, workflow: str, *args: Any, id: str | None = None
+        self,
+        workflow: str,
+        *args: Any,
+        id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> WorkflowHandle[Any]: ...
 
     async def start(
@@ -57,6 +65,7 @@ class Client:
         workflow: WorkflowDefinition[..., Any] | str,
         *args: Any,
         id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> WorkflowHandle[Any]:
         """Start a run and return a handle to it without waiting."""
         if isinstance(workflow, WorkflowDefinition):
@@ -68,7 +77,10 @@ class Client:
             positional = list(args)
             hint = _NO_HINT
         record = await self.engine.start_workflow(
-            name, await self.converter.encode_args_async(positional), workflow_id=id
+            name,
+            await self.converter.encode_args_async(positional),
+            workflow_id=id,
+            search_attributes=search_attributes,
         )
         return WorkflowHandle(
             self.engine,
@@ -155,6 +167,12 @@ class Client:
             result_hint=hint,
             queries=self.queries,
         )
+
+    async def query_runs(self, query: str, limit: int = 100) -> list[ExecutionRecord]:
+        """Find runs with a visibility query, for example
+        ``"status = 'failed' AND attr.customer_tier = 'gold' ORDER BY created_at DESC"``.
+        See ``docs/visibility-queries.md``."""
+        return await self.engine.query_executions(query, limit)
 
     async def list(
         self,

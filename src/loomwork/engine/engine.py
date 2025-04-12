@@ -8,8 +8,10 @@ same API can back an HTTP server that never imports user code.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import secrets
 from collections.abc import Sequence
+from typing import Any
 
 from loomwork.clock import Clock, SystemClock
 from loomwork.codec.payload import Payload
@@ -52,6 +54,7 @@ class Engine:
         args: Sequence[Payload] = (),
         *,
         workflow_id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> ExecutionRecord:
         """Create a new run of ``workflow_name``.
 
@@ -62,6 +65,15 @@ class Engine:
             WorkflowAlreadyStartedError: a run with this workflow id is running.
         """
         record, started = self._new_run(workflow_name, args, workflow_id)
+        if search_attributes:
+            from loomwork.visibility.attributes import encode_attributes
+
+            started = dataclasses.replace(
+                started,
+                search_attributes=encode_attributes(
+                    search_attributes, self.config.search_attributes
+                ),
+            )
         created, _ = await self.store.create_execution(record, started, self.clock.now())
         return created
 
@@ -207,6 +219,15 @@ class Engine:
 
     async def children(self, run_id: str) -> list[ExecutionRecord]:
         return await self.store.list_children(run_id)
+
+    async def query_executions(self, query: str, limit: int = 100) -> list[ExecutionRecord]:
+        """Runs matching a visibility query, evaluated at the engine's current time."""
+        return await self.store.query_executions(
+            query, self.config.search_attributes, self.clock.now(), limit
+        )
+
+    async def search_attributes(self, run_id: str) -> dict[str, object]:
+        return await self.store.get_search_attributes(run_id)
 
     async def list_executions(
         self,

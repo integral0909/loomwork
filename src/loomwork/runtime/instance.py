@@ -57,6 +57,7 @@ from loomwork.runtime.commands import (
     ScheduleStep,
     SignalExternal,
     StartTimer,
+    UpsertSearchAttributes,
 )
 from loomwork.runtime.loop import DeterministicEventLoop
 
@@ -147,6 +148,7 @@ class WorkflowInstance:
         #: Patch ids recorded anywhere in the history fed so far (set by the replayer).
         self.recorded_patches: set[str] = set()
         self._patch_results: dict[str, bool] = {}
+        self._search_attributes: dict[str, Any] = dict(started.search_attributes)
 
     # ------------------------------------------------------------------ activation
 
@@ -297,6 +299,20 @@ class WorkflowInstance:
         # arrived: tell the engine it may stop the step.
         if future.cancelled() and self._steps.pop(seq, None) is not None:
             self._emit(RequestCancelStep(seq=seq))
+
+    # ------------------------------------------------------------------ search attributes
+
+    def upsert_search_attributes(self, values: dict[str, Any]) -> None:
+        from loomwork.visibility.attributes import encode_attributes, merge
+
+        encoded = encode_attributes(values)
+        self._search_attributes = merge(self._search_attributes, encoded)
+        self._emit(UpsertSearchAttributes(attributes=encoded))
+
+    def search_attributes(self) -> dict[str, Any]:
+        from loomwork.visibility.attributes import decode_attributes
+
+        return decode_attributes(self._search_attributes)
 
     # ------------------------------------------------------------------ versioning
 

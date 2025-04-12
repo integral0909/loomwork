@@ -29,6 +29,7 @@ from loomwork.history import (
     ExternalSignalScheduled,
     HistoryFormatError,
     PatchRecorded,
+    SearchAttributesUpserted,
     SignalReceived,
     StepCancelRequested,
     StepCompleted,
@@ -230,6 +231,7 @@ SAMPLE_EVENTS = [
     ExternalSignalScheduled(seq=1, workflow_id="other", channel="c", payload=P, message_id="x"),
     WorkflowContinuedAsNew(new_run_id="r2", workflow_name="wf", args=[P]),
     PatchRecorded(patch_id="sms-receipts"),
+    SearchAttributesUpserted(attributes={"tier": {"type": "string", "value": "gold"}}),
 ]
 
 

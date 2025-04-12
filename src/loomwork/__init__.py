@@ -35,8 +35,6 @@ from loomwork.info import StepInfo, WorkflowInfo
 from loomwork.options import ParentClosePolicy, StepOptions
 from loomwork.retry import RetryPolicy
 from loomwork.sdk import (
-    deprecate_patch,
-    patched,
     Channel,
     ChannelEmpty,
     ChildHandle,
@@ -46,6 +44,7 @@ from loomwork.sdk import (
     WorkflowDefinition,
     continue_as_new,
     continue_as_new_suggested,
+    deprecate_patch,
     heartbeat,
     heartbeat_details,
     history_length,
@@ -54,8 +53,10 @@ from loomwork.sdk import (
     is_replaying,
     logger,
     now,
+    patched,
     query,
     random,
+    search_attributes,
     signal_external,
     sleep,
     sleep_until,
@@ -63,6 +64,7 @@ from loomwork.sdk import (
     step,
     step_info,
     update,
+    upsert_search_attributes,
     uuid4,
     workflow,
 )
@@ -121,6 +123,8 @@ __all__ = [
     "WorkflowInfo",
     "WorkflowTerminatedError",
     "__version__",
+    "search_attributes",
+    "upsert_search_attributes",
     "deprecate_patch",
     "patched",
     "continue_as_new",

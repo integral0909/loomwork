@@ -18,7 +18,7 @@ import dataclasses
 from collections.abc import Collection, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta
-from typing import Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from loomwork.codec.payload import Payload
 from loomwork.errors import (
@@ -41,6 +41,10 @@ from loomwork.history.events import (
 )
 from loomwork.history.serde import event_from_dict
 from loomwork.schedules.model import ScheduleState
+from loomwork.visibility.attributes import attribute_rows, decode_attributes
+
+if TYPE_CHECKING:
+    from loomwork.visibility.schema import SearchAttributes
 from loomwork.store.base import Store
 from loomwork.store.closing import child_start_failed_event, closing_messages, drop_unstarted
 from loomwork.store.notify import (
@@ -275,6 +279,9 @@ class SQLStore(Store, abc.ABC):
                 rec.parent_close_policy,
             ),
         )
+        initial = getattr(started, "search_attributes", None)
+        if initial:
+            await self._write_attributes(tx, rec.run_id, initial)
         event = await self._append(tx, rec, started, now)
         for extra in extra_inputs:
             if not extra.is_input:
@@ -481,17 +488,20 @@ class SQLStore(Store, abc.ABC):
             for child in outcome.new_children:
                 await self._start_child(tx, rec, child.record, child.started, now)
 
+            if outcome.search_attributes:
+                await self._write_attributes(tx, run_id, outcome.search_attributes)
             if outcome.close is not None:
                 await self._close(tx, rec, outcome.close, now)
                 # Write the closed status first: the successor reuses the workflow id,
                 # which the partial unique index only allows once this run is closed.
                 await self._write(tx, rec)
                 if outcome.continuation is not None:
+                    successor = outcome.continuation
                     await self._insert_run(
-                        tx,
-                        dataclasses.replace(outcome.continuation.record),
-                        outcome.continuation.started,
-                        now,
+                        tx, dataclasses.replace(successor.record), successor.started, now
+                    )
+                    await self._inherit_attributes(
+                        tx, run_id, successor.record.run_id, successor.started
                     )
                 return appended
 
@@ -846,6 +856,96 @@ class SQLStore(Store, abc.ABC):
                 fired += 1
         return fired
 
+    # ------------------------------------------------------------------ visibility
+
+    async def _write_attributes(
+        self, tx: SqlTransaction, run_id: str, encoded: dict[str, Any]
+    ) -> None:
+        for name, item in encoded.items():
+            await tx.execute(
+                "DELETE FROM lw_search_attributes WHERE run_id = ? AND name = ?", (run_id, name)
+            )
+            for value_type, column, value in attribute_rows(item):
+                stored = self.ts_in(value) if isinstance(value, datetime) else value
+                await tx.execute(
+                    f"INSERT INTO lw_search_attributes (run_id, name, value_type, {column}) "
+                    "VALUES (?, ?, ?, ?)",
+                    (run_id, name, value_type, stored),
+                )
+
+    async def _inherit_attributes(
+        self, tx: SqlTransaction, from_run: str, to_run: str, started: Event
+    ) -> None:
+        own = set(getattr(started, "search_attributes", {}) or {})
+        rows = await tx.fetchall(
+            "SELECT name, value_type, str_value, int_value, float_value, bool_value, time_value "
+            "FROM lw_search_attributes WHERE run_id = ?",
+            (from_run,),
+        )
+        for row in rows:
+            if row["name"] in own:
+                continue
+            await tx.execute(
+                "INSERT INTO lw_search_attributes (run_id, name, value_type, str_value, "
+                "int_value, float_value, bool_value, time_value) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    to_run,
+                    row["name"],
+                    row["value_type"],
+                    row["str_value"],
+                    row["int_value"],
+                    row["float_value"],
+                    row["bool_value"],
+                    row["time_value"],
+                ),
+            )
+
+    async def query_executions(
+        self, query: str, schema: SearchAttributes, now: datetime, limit: int = 100
+    ) -> list[ExecutionRecord]:
+        from loomwork.visibility import compile_sql, parse_query
+
+        parsed = parse_query(query)
+        compiled = compile_sql(
+            parsed,
+            schema,
+            dialect=self.dialect,
+            now=now,
+            ts_in=self.ts_in,
+            source=query,
+        )
+        order = compiled.order_by_sql or "seq DESC"
+        effective = min(limit, parsed.limit) if parsed.limit is not None else limit
+        sql = f"SELECT * FROM lw_executions WHERE {compiled.where_sql} " f"ORDER BY {order} LIMIT ?"
+        async with self.transaction() as tx:
+            rows = await tx.fetchall(sql, [*compiled.params, effective])
+        return [self._record(row) for row in rows]
+
+    async def get_search_attributes(self, run_id: str) -> dict[str, object]:
+        async with self.transaction() as tx:
+            await self._load(tx, run_id, lock=False)
+            rows = await tx.fetchall(
+                "SELECT * FROM lw_search_attributes WHERE run_id = ? ORDER BY name", (run_id,)
+            )
+        encoded: dict[str, Any] = {}
+        for row in rows:
+            value_type = row["value_type"]
+            if value_type == "keyword":
+                entry = encoded.setdefault(row["name"], {"type": "keyword_list", "value": []})
+                entry["value"].append(row["str_value"])
+                continue
+            if value_type == "datetime":
+                moment = self.ts_out(row["time_value"])
+                value: Any = moment.isoformat() if moment is not None else None
+            elif value_type == "bool":
+                value = bool(row["bool_value"])
+            else:
+                value = row[
+                    {"string": "str_value", "int": "int_value", "float": "float_value"}[value_type]
+                ]
+            encoded[row["name"]] = {"type": value_type, "value": value}
+        return decode_attributes(encoded)
+
     # ------------------------------------------------------------------ outbox
 
     def _outbox_message(self, row: Row) -> OutboxMessage:
@@ -1077,6 +1177,9 @@ class SQLStore(Store, abc.ABC):
             )
             for row in rows:
                 await tx.execute("DELETE FROM lw_events WHERE run_id = ?", (row["run_id"],))
+                await tx.execute(
+                    "DELETE FROM lw_search_attributes WHERE run_id = ?", (row["run_id"],)
+                )
                 await tx.execute("DELETE FROM lw_executions WHERE run_id = ?", (row["run_id"],))
         return len(rows)
 

@@ -35,6 +35,7 @@ from loomwork.runtime.commands import (
     ScheduleStep,
     SignalExternal,
     StartTimer,
+    UpsertSearchAttributes,
 )
 from loomwork.runtime.instance import WorkflowInstance
 from loomwork.runtime.replayer import LiveTick, Replayer
@@ -207,6 +208,11 @@ class TickProcessor:
                     )
                 case CompleteUpdate() | RecordPatch():
                     pass  # recorded as a decision event only; no side effect
+                case UpsertSearchAttributes():
+                    outcome.search_attributes = {
+                        **(outcome.search_attributes or {}),
+                        **command.attributes,
+                    }
                 case ContinueAsNewCommand():
                     outcome.close = CloseOutcome(
                         ExecutionStatus.CONTINUED_AS_NEW, continued_run_id=command.new_run_id

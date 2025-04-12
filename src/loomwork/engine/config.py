@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from loomwork.options import StepOptions
 from loomwork.retry import RetryPolicy
+from loomwork.visibility.schema import SearchAttributes
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,8 @@ class EngineConfig:
         timer_batch_size: timers fired per store call.
         continue_as_new_after_events: history size at which
             :func:`loomwork.continue_as_new_suggested` starts returning ``True``.
+        search_attributes: declared search attribute types; queries may only reference
+            declared attributes, and values set by clients are validated against it.
     """
 
     tick_lease: timedelta = timedelta(seconds=30)
@@ -47,6 +50,7 @@ class EngineConfig:
     poll_interval: float = 1.0
     timer_batch_size: int = 100
     continue_as_new_after_events: int = 10_000
+    search_attributes: SearchAttributes = field(default_factory=lambda: SearchAttributes({}))
 
     def __post_init__(self) -> None:
         if self.tick_lease <= timedelta(0):

@@ -96,6 +96,7 @@ class WorkflowStarted(Event):
     schedule_id: str = ""
     scheduled_time: datetime | None = None
     continued_from: str = ""
+    search_attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -295,6 +296,16 @@ class ExternalSignalScheduled(Event):
     channel: str
     payload: Payload
     message_id: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SearchAttributesUpserted(Event):
+    """Workflow code changed its search attributes (encoded; see ``visibility.attributes``)."""
+
+    kind: ClassVar[str] = "search_attributes_upserted"
+    category: ClassVar[EventCategory] = EventCategory.DECISION
+
+    attributes: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

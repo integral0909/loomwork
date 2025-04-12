@@ -20,6 +20,8 @@ from loomwork.info import StepInfo, WorkflowInfo
 from loomwork.runtime.context import current_instance, current_instance_or_none, in_workflow
 
 __all__ = [
+    "search_attributes",
+    "upsert_search_attributes",
     "deprecate_patch",
     "patched",
     "continue_as_new",
@@ -112,6 +114,21 @@ def deprecate_patch(patch_id: str) -> None:
     branches.
     """
     current_instance().deprecate_patch(patch_id)
+
+
+def upsert_search_attributes(**values: Any) -> None:
+    """Set (or, with ``None``, remove) search attributes of this run. *Workflow-only.*
+
+    Search attributes make runs findable with visibility queries, e.g.
+    ``attr.customer_tier = 'gold' AND status = 'running'``. Values may be ``str``,
+    ``int``, ``float``, ``bool``, timezone-aware ``datetime`` or a list of ``str``.
+    """
+    current_instance().upsert_search_attributes(values)
+
+
+def search_attributes() -> dict[str, Any]:
+    """This run's current search attributes. *Workflow-only.*"""
+    return current_instance().search_attributes()
 
 
 def history_length() -> int:

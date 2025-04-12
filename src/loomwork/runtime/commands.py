@@ -24,6 +24,7 @@ from loomwork.history.events import (
     Event,
     ExternalSignalScheduled,
     PatchRecorded,
+    SearchAttributesUpserted,
     StepCancelRequested,
     StepScheduled,
     TimerCanceled,
@@ -169,6 +170,23 @@ class CancelWorkflow(Command):
     @property
     def closes_workflow(self) -> bool:
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class UpsertSearchAttributes(Command):
+    attributes: dict[str, object]
+
+    def to_event(self) -> Event:
+        return SearchAttributesUpserted(attributes=dict(self.attributes))
+
+    def matches(self, event: Event) -> bool:
+        # The attribute *names* identify the operation; values may change between deploys.
+        return isinstance(event, SearchAttributesUpserted) and set(event.attributes) == set(
+            self.attributes
+        )
+
+    def describe(self) -> str:
+        return f"UpsertSearchAttributes({sorted(self.attributes)})"
 
 
 @dataclass(frozen=True, slots=True)

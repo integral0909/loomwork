@@ -120,12 +120,20 @@ class Loomwork:
 
     @overload
     async def start_workflow(
-        self, workflow: WorkflowDefinition[..., R], *args: Any, id: str | None = None
+        self,
+        workflow: WorkflowDefinition[..., R],
+        *args: Any,
+        id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> WorkflowHandle[R]: ...
 
     @overload
     async def start_workflow(
-        self, workflow: str, *args: Any, id: str | None = None
+        self,
+        workflow: str,
+        *args: Any,
+        id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> WorkflowHandle[Any]: ...
 
     async def start_workflow(
@@ -133,9 +141,10 @@ class Loomwork:
         workflow: WorkflowDefinition[..., Any] | str,
         *args: Any,
         id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> WorkflowHandle[Any]:
         self._check_known(workflow)
-        return await self.client.start(workflow, *args, id=id)
+        return await self.client.start(workflow, *args, id=id, search_attributes=search_attributes)
 
     @overload
     async def execute(

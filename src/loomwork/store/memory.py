@@ -13,6 +13,7 @@ import heapq
 from collections import deque
 from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from loomwork.codec.payload import Payload
 from loomwork.errors import (
@@ -34,6 +35,10 @@ from loomwork.history.events import (
     WorkflowTerminated,
 )
 from loomwork.schedules.model import ScheduleState
+from loomwork.visibility.attributes import decode_attributes, merge
+
+if TYPE_CHECKING:
+    from loomwork.visibility.schema import SearchAttributes
 from loomwork.store.base import Store
 from loomwork.store.closing import child_start_failed_event, closing_messages, drop_unstarted
 from loomwork.store.notify import (
@@ -81,6 +86,7 @@ class MemoryStore(Store):
         self._timer_heap: list[tuple[datetime, str, int]] = []
         self._children: dict[str, list[str]] = {}
         self._schedules: dict[str, ScheduleState] = {}
+        self._attributes: dict[str, dict[str, Any]] = {}
         self._outbox: deque[OutboxMessage] = deque()
 
     # ------------------------------------------------------------------ helpers
@@ -178,6 +184,9 @@ class MemoryStore(Store):
         self._order.append(record.run_id)
         if record.parent_run_id is not None:
             self._children.setdefault(record.parent_run_id, []).append(record.run_id)
+        initial = getattr(started, "search_attributes", None)
+        if initial:
+            self._attributes[record.run_id] = merge({}, initial)
         event = self._append(run, started, now)
         for extra_event in extra:
             if not extra_event.is_input:
@@ -327,11 +336,22 @@ class MemoryStore(Store):
         for child in outcome.new_children:
             self._start_child(run, child.record, child.started, now)
 
+        if outcome.search_attributes:
+            self._attributes[run_id] = merge(
+                self._attributes.get(run_id, {}), outcome.search_attributes
+            )
         if outcome.close is not None:
             self._close(run, outcome.close, now)
             if outcome.continuation is not None:
                 # The closing run released its workflow id a moment ago.
-                self._insert_run(outcome.continuation.record, outcome.continuation.started, now)
+                successor = outcome.continuation
+                self._insert_run(successor.record, successor.started, now)
+                inherited = merge(
+                    self._attributes.get(run_id, {}),
+                    getattr(successor.started, "search_attributes", {}) or {},
+                )
+                if inherited:
+                    self._attributes[successor.record.run_id] = inherited
             return appended
 
         for seq in outcome.cancel_steps:
@@ -580,6 +600,33 @@ class MemoryStore(Store):
             fired += 1
         return fired
 
+    # ------------------------------------------------------------------ visibility
+
+    async def query_executions(
+        self, query: str, schema: SearchAttributes, now: datetime, limit: int = 100
+    ) -> list[ExecutionRecord]:
+        from loomwork.visibility import (
+            compile_predicate,
+            order_and_limit,
+            parse_query,
+        )
+
+        parsed = parse_query(query)
+        predicate = compile_predicate(parsed, schema, now)
+        matches = [
+            copy.copy(self._runs[run_id].record)
+            for run_id in reversed(self._order)
+            if predicate(
+                self._runs[run_id].record,
+                decode_attributes(self._attributes.get(run_id, {})),
+            )
+        ]
+        return order_and_limit(matches, parsed, schema, now)[:limit]
+
+    async def get_search_attributes(self, run_id: str) -> dict[str, object]:
+        self._run(run_id)
+        return decode_attributes(self._attributes.get(run_id, {}))
+
     # ------------------------------------------------------------------ outbox
 
     async def relay_outbox(self, now: datetime, limit: int = 100) -> int:
@@ -715,6 +762,7 @@ class MemoryStore(Store):
         for run in victims:
             run_id = run.record.run_id
             del self._runs[run_id]
+            self._attributes.pop(run_id, None)
             self._order.remove(run_id)
             siblings = self._by_workflow_id[run.record.workflow_id]
             siblings.remove(run_id)

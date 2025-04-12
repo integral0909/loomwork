@@ -76,6 +76,13 @@ All notable changes to this project are documented here. The format follows
   that executed it (`TickCompleted.code_version`); `loomwork.versioning` replays stored
   or exported histories against new code and reports where they would diverge.
 
+- Visibility queries: a small, safe query language (`status = 'failed' AND
+  attr.customer_tier = 'gold' ORDER BY created_at DESC`) with a type checker, an
+  in-memory evaluator and a SQL compiler proven equivalent by property tests.
+- Search attributes: `loomwork.upsert_search_attributes()` from workflow code and
+  `search_attributes=` when starting runs; typed, recorded in the history, carried over
+  on continue-as-new, and queryable with `client.query_runs()` (migration 0006).
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.

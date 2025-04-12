@@ -9,6 +9,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
@@ -191,5 +192,7 @@ class TickOutcome:
     close: CloseOutcome | None = None
     code_version: str = ""
     """Fingerprint of the workflow code that executed the tick."""
+    search_attributes: dict[str, Any] | None = None
+    """Encoded search attribute changes made during the tick (``None`` removes)."""
     continuation: ChildSpec | None = None
     """With a ``CONTINUED_AS_NEW`` close: the run to start in the same transaction."""

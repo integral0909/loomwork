@@ -13,11 +13,15 @@ from __future__ import annotations
 import abc
 from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event, StepCompleted, StepFailed, WorkflowStarted
 from loomwork.schedules.model import ScheduleState
+
+if TYPE_CHECKING:
+    from loomwork.visibility.schema import SearchAttributes
 from loomwork.store.notify import Notifier
 from loomwork.store.records import (
     ChildSpec,
@@ -242,6 +246,25 @@ class Store(abc.ABC):
     @abc.abstractmethod
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
         """Outstanding step jobs of a run, ordered by sequence number."""
+
+    # ------------------------------------------------------------------ visibility
+
+    @abc.abstractmethod
+    async def query_executions(
+        self, query: str, schema: SearchAttributes, now: datetime, limit: int = 100
+    ) -> list[ExecutionRecord]:
+        """Executions matching a visibility query (see ``docs/visibility-queries.md``).
+
+        Without an ``ORDER BY`` clause results are newest first. ``limit`` caps the result
+        size (a ``LIMIT`` in the query may lower it further).
+
+        Raises:
+            QuerySyntaxError, QueryTypeError: the query is invalid.
+        """
+
+    @abc.abstractmethod
+    async def get_search_attributes(self, run_id: str) -> dict[str, object]:
+        """Current search attributes of a run, decoded to Python values."""
 
     # ------------------------------------------------------------------ outbox
 

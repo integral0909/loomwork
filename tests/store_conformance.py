@@ -7,6 +7,7 @@ Every backend must pass every test here unchanged.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import timedelta
 
 import pytest
@@ -55,6 +56,8 @@ from loomwork.store.records import (
     TickOutcome,
     TimerRecord,
 )
+from loomwork.visibility import AttributeType, QuerySyntaxError, QueryTypeError, SearchAttributes
+from loomwork.visibility.attributes import encode_attributes
 from tests.helpers import T0
 
 LEASE = timedelta(seconds=30)
@@ -746,6 +749,92 @@ class StoreConformance:
         # The old run's child follows its parent-close policy.
         await store.relay_outbox(T0)
         assert (await store.get_execution("r1.c1")).status is ExecutionStatus.TERMINATED
+
+    # ------------------------------------------------------------------ visibility
+
+    SCHEMA = SearchAttributes.define(
+        tier=AttributeType.STRING,
+        amount=AttributeType.INT,
+        tags=AttributeType.KEYWORD_LIST,
+        due=AttributeType.DATETIME,
+    )
+
+    async def create_with(
+        self, store: Store, run_id: str, name: str = "wf", **attrs: object
+    ) -> None:
+        rec = record(run_id, name=name)
+        begin = dataclasses.replace(started(rec), search_attributes=encode_attributes(attrs))
+        await store.create_execution(rec, begin, T0)
+
+    async def test_search_attributes_from_start_and_ticks(self, store: Store) -> None:
+        await self.create_with(store, "r1", tier="gold", amount=5, tags=["a", "b"])
+        assert await store.get_search_attributes("r1") == {
+            "tier": "gold",
+            "amount": 5,
+            "tags": ["a", "b"],
+        }
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            search_attributes=encode_attributes({"tier": "silver", "amount": None, "due": T0}),
+        )
+        assert await store.get_search_attributes("r1") == {
+            "tier": "silver",
+            "tags": ["a", "b"],
+            "due": T0,
+        }
+
+    async def test_query_executions(self, store: Store) -> None:
+        await self.create_with(store, "g1", tier="gold", amount=100, tags=["vip"])
+        await self.create_with(store, "g2", name="other", tier="gold", amount=5)
+        await self.create_with(store, "s1", tier="silver", amount=50)
+        await self.create(store, "plain")
+        await store.terminate("s1", "ops", T0)
+
+        async def ids(query: str) -> list[str]:
+            found = await store.query_executions(query, self.SCHEMA, T0 + timedelta(hours=1))
+            return [r.run_id for r in found]
+
+        assert await ids("attr.tier = 'gold'") == ["g2", "g1"]
+        assert await ids("attr.tier = 'gold' AND attr.amount > 10") == ["g1"]
+        assert await ids("attr.tags CONTAINS 'vip'") == ["g1"]
+        assert await ids("attr.tier IS NULL") == ["plain"]
+        assert await ids("status = 'terminated'") == ["s1"]
+        assert await ids("workflow_name = 'other' OR attr.amount BETWEEN 40 AND 60") == ["s1", "g2"]
+        assert await ids("attr.tier IN ('gold', 'silver') ORDER BY run_id ASC LIMIT 2") == [
+            "g1",
+            "g2",
+        ]
+        assert await ids("created_at > now() - interval '2 hours'") == ["plain", "s1", "g2", "g1"]
+        assert await ids("") == ["plain", "s1", "g2", "g1"]
+        assert len(await store.query_executions("", self.SCHEMA, T0, limit=2)) == 2
+
+    async def test_query_errors(self, store: Store) -> None:
+        with pytest.raises(QuerySyntaxError):
+            await store.query_executions("status = ", self.SCHEMA, T0)
+        with pytest.raises(QueryTypeError):
+            await store.query_executions("attr.undeclared = 1", self.SCHEMA, T0)
+
+    async def test_attributes_follow_continue_as_new_and_retention(self, store: Store) -> None:
+        await self.create_with(store, "r1", tier="gold", amount=1)
+        await self.claim(store)
+        successor = record("r1-next", workflow_id="wid-r1")
+        next_start = dataclasses.replace(
+            started(successor), search_attributes=encode_attributes({"amount": 2})
+        )
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            close=CloseOutcome(ExecutionStatus.CONTINUED_AS_NEW, continued_run_id="r1-next"),
+            continuation=ChildSpec(successor, next_start),
+        )
+        assert await store.get_search_attributes("r1-next") == {"tier": "gold", "amount": 2}
+        assert await store.delete_closed_before(T0 + timedelta(days=1)) == 1
+        with pytest.raises(NotFoundError):
+            await store.get_search_attributes("r1")
 
     # ------------------------------------------------------------------ schedules
 

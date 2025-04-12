@@ -14,9 +14,11 @@ from loomwork.sdk.api import (
     now,
     patched,
     random,
+    search_attributes,
     sleep,
     sleep_until,
     step_info,
+    upsert_search_attributes,
     uuid4,
 )
 from loomwork.sdk.definitions import (
@@ -38,6 +40,8 @@ from loomwork.sdk.messaging import (
 )
 
 __all__ = [
+    "search_attributes",
+    "upsert_search_attributes",
     "deprecate_patch",
     "patched",
     "continue_as_new",
