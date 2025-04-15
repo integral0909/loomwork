@@ -29,6 +29,7 @@ from loomwork.engine.config import EngineConfig
 from loomwork.engine.steps import StepExecutor
 from loomwork.engine.ticks import TickProcessor
 from loomwork.ids import new_id
+from loomwork.observability.telemetry import NoopTelemetry, Telemetry
 from loomwork.options import validate_queue
 from loomwork.schedules.service import ScheduleService
 from loomwork.sdk.definitions import Registry
@@ -110,7 +111,9 @@ class Worker:
         config: EngineConfig | None = None,
         options: WorkerOptions | None = None,
         worker_id: str | None = None,
+        telemetry: Telemetry | None = None,
     ) -> None:
+        self.telemetry: Telemetry = telemetry or NoopTelemetry()
         self.store = store
         self.registry = registry
         self.clock = clock or SystemClock()
@@ -125,6 +128,7 @@ class Worker:
             converter=self.converter,
             config=self.config,
             worker_id=self.worker_id,
+            telemetry=self.telemetry,
         )
         self.steps = StepExecutor(
             store,
@@ -133,8 +137,9 @@ class Worker:
             converter=self.converter,
             config=self.config,
             worker_id=self.worker_id,
+            telemetry=self.telemetry,
         )
-        self.schedules = ScheduleService(store, self.clock)
+        self.schedules = ScheduleService(store, self.clock, self.telemetry)
         self._gate = QueueGate(self.options.task_queues, self.options.queue_limits)
         self._local = Notifier()
         self._tasks: list[asyncio.Task[None]] = []
@@ -215,6 +220,7 @@ class Worker:
                     self._busy -= 1
             except Exception:
                 logger.exception("error while polling for %s", topic)
+                self.telemetry.worker_error(topic)
                 await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
                 continue
             if not did_work:
@@ -251,6 +257,7 @@ class Worker:
                 next_at = await self.store.next_step_ready_at(self.registry.step_names, queues)
             except Exception:
                 logger.exception("error while executing steps")
+                self.telemetry.worker_error("steps")
                 await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
                 continue
             waits: list[Awaitable[object]] = [notifier.wait(TOPIC_STEPS, token, poll)]
@@ -272,6 +279,7 @@ class Worker:
                 next_at = await self.store.next_timer_at()
             except Exception:
                 logger.exception("error while firing timers")
+                self.telemetry.worker_error("timers")
                 await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
                 continue
             waits: list[Awaitable[object]] = [
@@ -288,8 +296,10 @@ class Worker:
             token = notifier.token(TOPIC_OUTBOX)
             try:
                 relayed = await self.store.relay_outbox(self.clock.now(), batch)
+                self.telemetry.outbox_relayed(relayed)
             except Exception:
                 logger.exception("error while relaying outbox messages")
+                self.telemetry.worker_error("outbox")
                 await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
                 continue
             if relayed >= batch:
@@ -305,6 +315,7 @@ class Worker:
                 next_at = await self.store.next_schedule_at()
             except Exception:
                 logger.exception("error while evaluating schedules")
+                self.telemetry.worker_error("schedules")
                 await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
                 continue
             waits: list[Awaitable[object]] = [

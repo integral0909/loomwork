@@ -34,6 +34,9 @@ dependencies = [
 sqlite = ["aiosqlite>=0.20,<0.21"]
 postgres = ["psycopg[binary]>=3.2,<3.3", "psycopg-pool>=3.2,<3.3"]
 crypto = ["cryptography>=43,<44"]
+server = ["starlette>=0.39,<0.40", "uvicorn>=0.30,<0.31", "httpx>=0.27,<0.28"]
+client = ["httpx>=0.27,<0.28"]
+otel = ["opentelemetry-api>=1.27,<1.28"]
 
 [project.urls]
 Homepage = "https://github.com/integral0909/loomwork"
@@ -46,13 +49,18 @@ Changelog = "https://github.com/integral0909/loomwork/blob/main/CHANGELOG.md"
 dev = [
     "aiosqlite>=0.20,<0.21",
     "cryptography>=43,<44",
+    "httpx>=0.27,<0.28",
     "psycopg[binary]>=3.2,<3.3",
     "psycopg-pool>=3.2,<3.3",
     "pytest>=8.3,<8.4",
     "pytest-asyncio>=0.24,<0.25",
+    "starlette>=0.39,<0.40",
+    "uvicorn>=0.30,<0.31",
     "hypothesis>=6.112,<6.123",
     "coverage[toml]>=7.6,<7.7",
     "mypy>=1.11,<1.12",
+    "opentelemetry-api>=1.27,<1.28",
+    "opentelemetry-sdk>=1.27,<1.28",
     "ruff>=0.6.9,<0.7",
 ]
 
@@ -95,6 +103,7 @@ ignore = [
 "src/loomwork/store/*.py" = ["ARG002"]       # uniform Store signatures
 # Queries are assembled from constant fragments only; every value is a bound parameter.
 "src/loomwork/store/sql/base.py" = ["S608"]
+"src/loomwork/observability/{telemetry,otel}.py" = ["ARG002"]  # hooks ignore some arguments
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"

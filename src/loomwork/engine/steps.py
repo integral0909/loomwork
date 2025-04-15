@@ -27,6 +27,7 @@ import enum
 import inspect
 import logging
 import random
+import time
 from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Any
@@ -38,6 +39,7 @@ from loomwork.engine.config import EngineConfig
 from loomwork.failure import FailureInfo
 from loomwork.history.events import StepCompleted, StepFailed
 from loomwork.info import StepInfo
+from loomwork.observability.telemetry import AttemptInfo, AttemptReport, NoopTelemetry, Telemetry
 from loomwork.retry import RetryPolicy
 from loomwork.sdk.api import _reset_attempt, _reset_step_info, _set_attempt, _set_step_info
 from loomwork.sdk.definitions import Registry
@@ -142,7 +144,9 @@ class StepExecutor:
         converter: DataConverter,
         config: EngineConfig,
         worker_id: str,
+        telemetry: Telemetry | None = None,
     ) -> None:
+        self.telemetry: Telemetry = telemetry or NoopTelemetry()
         self.store = store
         self.registry = registry
         self.clock = clock
@@ -198,19 +202,33 @@ class StepExecutor:
 
         self.attempts_started += 1
         attempt = _Attempt(self, job, lease)
+        info = AttemptInfo(
+            run_id=job.run_id,
+            workflow_name=job.workflow_name,
+            step_name=job.step_name,
+            queue=job.queue,
+            attempt=job.attempt,
+            seq=job.seq,
+            queue_delay=(now - job.ready_at).total_seconds(),
+        )
+        began = time.perf_counter()
         try:
-            outcome = await self._run_attempt(job, attempt, timeout)
+            with self.telemetry.step_attempt(info):
+                outcome = await self._run_attempt(job, attempt, timeout)
         except asyncio.CancelledError:
             # The worker is shutting down: hand the job back without counting the
             # attempt, so another worker can start it immediately.
             await self._release(job, consume_attempt=False)
+            self._report(info, began, "released")
             raise
         finished_at = self.clock.now()
 
         if attempt.interruption is _Interruption.CANCELLED_BY_WORKFLOW:
             await self._release(job, consume_attempt=True)
+            self._report(info, began, "cancelled")
             return
         if attempt.interruption is _Interruption.LEASE_LOST:
+            self._report(info, began, "lease_lost")
             logger.warning(
                 "step %s (run %s, seq %d) lost its lease mid-attempt; result discarded",
                 job.step_name,
@@ -222,6 +240,7 @@ class StepExecutor:
             outcome = await self.boundary.encode_one(outcome)
             if await self.store.finish_step(job.job_id, self.worker_id, outcome, finished_at):
                 self.steps_completed += 1
+            self._report(info, began, "completed")
             return
 
         failure = outcome
@@ -246,6 +265,7 @@ class StepExecutor:
                 await self.store.retry_step(
                     job.job_id, self.worker_id, ready_at, failure, finished_at
                 )
+                self._report(info, began, "retrying", failure.type)
                 return
             failure = FailureInfo(
                 message=(
@@ -256,6 +276,14 @@ class StepExecutor:
                 cause=failure,
             )
         await self._finish_failed(job, failure, finished_at)
+        self._report(info, began, "failed", failure.type)
+
+    def _report(
+        self, info: AttemptInfo, began: float, outcome: str, failure_type: str | None = None
+    ) -> None:
+        self.telemetry.step_attempt_finished(
+            AttemptReport(info, time.perf_counter() - began, outcome, failure_type)
+        )
 
     async def _release(self, job: StepJob, *, consume_attempt: bool) -> None:
         # Shielded: this must complete even while the worker is being cancelled.

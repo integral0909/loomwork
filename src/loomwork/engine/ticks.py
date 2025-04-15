@@ -11,6 +11,7 @@ import dataclasses
 import logging
 import random
 import secrets
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -22,6 +23,7 @@ from loomwork.engine.config import EngineConfig
 from loomwork.errors import LeaseLostError, NondeterminismError
 from loomwork.history.events import SignalReceived, TickCompleted, WorkflowStarted
 from loomwork.ids import new_id
+from loomwork.observability.telemetry import NoopTelemetry, Telemetry, TickReport
 from loomwork.runtime.commands import (
     CancelTimer,
     CancelWorkflow,
@@ -68,7 +70,9 @@ class TickProcessor:
         converter: DataConverter,
         config: EngineConfig,
         worker_id: str,
+        telemetry: Telemetry | None = None,
     ) -> None:
+        self.telemetry: Telemetry = telemetry or NoopTelemetry()
         self.store = store
         self.registry = registry
         self.clock = clock
@@ -102,8 +106,29 @@ class TickProcessor:
 
     async def process(self, record: ExecutionRecord) -> None:
         """Execute one tick of ``record``, which this worker must have leased."""
+        started = time.perf_counter()
+        cached = self.cache.take(record.run_id)
+        replayer = cached or Replayer(self._make_instance)
+        replayed_before = replayer.replayed_ticks
+        outcome_name, commands, error = await self._process(record, replayer)
+        self.telemetry.tick_finished(
+            TickReport(
+                run_id=record.run_id,
+                workflow_name=record.workflow_name,
+                duration=time.perf_counter() - started,
+                outcome=outcome_name,
+                commands=commands,
+                replayed_ticks=replayer.replayed_ticks - replayed_before,
+                cache_hit=cached is not None,
+                error=error,
+            )
+        )
+
+    async def _process(
+        self, record: ExecutionRecord, replayer: Replayer
+    ) -> tuple[str, int, str | None]:
+        """Run the tick; returns (outcome, number of commands, error message)."""
         run_id = record.run_id
-        replayer = self.cache.take(run_id) or Replayer(self._make_instance)
         try:
             events = await self.store.load_history(run_id, after_id=replayer.last_event_id)
             replayer.feed(await self.boundary.decode(events))
@@ -114,7 +139,7 @@ class TickProcessor:
                 await self._commit(
                     record, TickOutcome(self.worker_id, record.consumed_through, self.clock.now())
                 )
-                return
+                return "closed", 0, None
             live = replayer.live_tick(self.clock.now())
             if self.boundary.active:
                 live = dataclasses.replace(live, commands=await self.boundary.encode(live.commands))
@@ -123,11 +148,11 @@ class TickProcessor:
         except LeaseLostError as exc:
             replayer.close()
             logger.info("tick for run %s abandoned: %s", run_id, exc)
-            return
+            return "lease_lost", 0, str(exc)
         except Exception as exc:
             replayer.close()
             await self._fail(record, exc)
-            return
+            return "failed", 0, f"{type(exc).__name__}: {exc}"
 
         self.ticks_completed += 1
         for event in committed:
@@ -138,6 +163,13 @@ class TickProcessor:
             replayer.close()
         else:
             self.cache.put(run_id, replayer)
+        if not committed:
+            return "empty", 0, None
+        return (
+            ("completed" if outcome.close is not None else "progressed"),
+            len(live.commands),
+            None,
+        )
 
     async def _commit(self, record: ExecutionRecord, outcome: TickOutcome) -> list[object]:
         events = await self.store.complete_tick(

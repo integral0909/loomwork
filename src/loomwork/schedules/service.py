@@ -20,6 +20,7 @@ from loomwork.clock import Clock
 from loomwork.errors import NotFoundError, ScheduleConflictError
 from loomwork.history.events import WorkflowStarted
 from loomwork.ids import new_id
+from loomwork.observability.telemetry import NoopTelemetry, Telemetry
 from loomwork.schedules.model import ScheduledRun, ScheduleState
 from loomwork.schedules.planner import (
     SchedulePlan,
@@ -41,9 +42,10 @@ logger = logging.getLogger("loomwork.schedules")
 
 
 class ScheduleService:
-    def __init__(self, store: Store, clock: Clock) -> None:
+    def __init__(self, store: Store, clock: Clock, telemetry: Telemetry | None = None) -> None:
         self.store = store
         self.clock = clock
+        self.telemetry: Telemetry = telemetry or NoopTelemetry()
         self.evaluations = 0
         self.runs_started = 0
 
@@ -86,7 +88,12 @@ class ScheduleService:
             logger.warning("schedule %s paused after a run failed", state.schedule_id)
         if result.skipped:
             logger.info("schedule %s skipped %d fire time(s)", state.schedule_id, result.skipped)
-        return await self.apply(result, state.version, now)
+        before = self.runs_started
+        saved = await self.apply(result, state.version, now)
+        self.telemetry.schedule_evaluated(
+            state.schedule_id, self.runs_started - before, result.skipped
+        )
+        return saved
 
     async def apply(
         self, result: SchedulePlan, expected_version: int, now: datetime

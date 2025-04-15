@@ -19,6 +19,7 @@ from loomwork.codec.converter import DataConverter, default_converter
 from loomwork.engine.config import EngineConfig
 from loomwork.engine.engine import Engine
 from loomwork.errors import NotFoundError
+from loomwork.observability.telemetry import Telemetry
 from loomwork.sdk.definitions import Registry, StepDefinition, WorkflowDefinition
 from loomwork.store.base import Store
 from loomwork.store.memory import MemoryStore
@@ -37,6 +38,7 @@ class Loomwork:
         workflows, steps: definitions this process can execute.
         clock: time source (use :class:`~loomwork.clock.ManualClock` in tests).
         run_worker: set to ``False`` to use this object purely as a client.
+        telemetry: receives metrics and trace hooks (see :mod:`loomwork.observability`).
     """
 
     def __init__(
@@ -51,6 +53,7 @@ class Loomwork:
         worker_options: WorkerOptions | None = None,
         worker_id: str | None = None,
         run_worker: bool = True,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self._owns_store = store is None
         self.store = store or MemoryStore()
@@ -68,6 +71,7 @@ class Loomwork:
             config=self.config,
             options=worker_options,
             worker_id=worker_id,
+            telemetry=telemetry,
         )
         self._run_worker = run_worker
         self._open = False

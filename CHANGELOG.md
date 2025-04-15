@@ -83,6 +83,12 @@ All notable changes to this project are documented here. The format follows
   `search_attributes=` when starting runs; typed, recorded in the history, carried over
   on continue-as-new, and queryable with `client.query_runs()` (migration 0006).
 
+- Observability: `Telemetry` hooks reported by workers for ticks, step attempts, schedule
+  evaluations, outbox relays and loop errors; a dependency-free metrics registry with
+  Prometheus exposition (`MetricsTelemetry`), structured logging (`LoggingTelemetry`),
+  and OpenTelemetry spans and metrics (`OpenTelemetryTelemetry`, `loomwork[otel]`), with
+  step spans current while user code runs.
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.
