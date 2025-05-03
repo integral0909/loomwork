@@ -189,6 +189,36 @@ class SQLStore(Store, abc.ABC):
         tx.notify(run_topic(rec.run_id))
         return stored
 
+    async def _append_many(
+        self, tx: SqlTransaction, rec: ExecutionRecord, events: Sequence[Event], now: datetime
+    ) -> list[Event]:
+        """Append several events with one multi-row INSERT."""
+        stored: list[Event] = []
+        params: list[Any] = []
+        for event in events:
+            item = dataclasses.replace(event, event_id=rec.last_event_id + 1, timestamp=now)
+            rec.last_event_id = item.event_id
+            if item.is_input:
+                rec.last_input_id = item.event_id
+            stored.append(item)
+            params.extend(
+                (
+                    rec.run_id,
+                    item.event_id,
+                    item.kind,
+                    self.ts_in(now),
+                    codec.event_body_to_json(item),
+                )
+            )
+        if stored:
+            rows = ", ".join("(?, ?, ?, ?, ?)" for _ in stored)
+            await tx.execute(
+                f"INSERT INTO lw_events (run_id, event_id, kind, created_at, body) VALUES {rows}",
+                params,
+            )
+            tx.notify(run_topic(rec.run_id))
+        return stored
+
     @staticmethod
     def _refresh_tick_pending(tx: SqlTransaction, rec: ExecutionRecord, now: datetime) -> None:
         if rec.is_closed:
@@ -445,18 +475,15 @@ class SQLStore(Store, abc.ABC):
             sql += f" AND {clause}"
             params.extend(names)
         sql += f" ORDER BY tick_ready_at, run_id LIMIT 1{self.SKIP_LOCKED}"
+        # One statement: pick the candidate (skipping rows other workers are claiming)
+        # and lease it.
+        claim = (
+            "UPDATE lw_executions SET lease_owner = ?, lease_expires_at = ? "
+            f"WHERE run_id = ({sql.replace('SELECT *', 'SELECT run_id', 1)}) RETURNING *"
+        )
         async with self.transaction() as tx:
-            row = await tx.fetchone(sql, params)
-            if row is None:
-                return None
-            rec = self._record(row)
-            rec.lease_owner = worker_id
-            rec.lease_expires_at = now + lease
-            await tx.execute(
-                "UPDATE lw_executions SET lease_owner = ?, lease_expires_at = ? WHERE run_id = ?",
-                (worker_id, self.ts_in(rec.lease_expires_at), rec.run_id),
-            )
-            return rec
+            row = await tx.fetchone(claim, [worker_id, self.ts_in(now + lease), *params])
+        return None if row is None else self._record(row)
 
     async def complete_tick(
         self, run_id: str, worker_id: str, outcome: TickOutcome, now: datetime
@@ -476,8 +503,7 @@ class SQLStore(Store, abc.ABC):
                     worker_id=worker_id,
                     code_version=outcome.code_version,
                 )
-                for event in (tick, *outcome.decisions):
-                    appended.append(await self._append(tx, rec, event, now))  # noqa: PERF401
+                appended.extend(await self._append_many(tx, rec, [tick, *outcome.decisions], now))
             rec.consumed_through = max(rec.consumed_through, outcome.consumed_through)
             rec.lease_owner = None
             rec.lease_expires_at = None
@@ -643,12 +669,6 @@ class SQLStore(Store, abc.ABC):
             return None
         now_db = self.ts_in(now)
         async with self.transaction() as tx:
-            # Jobs cancelled while an attempt ran whose worker never reported back.
-            await tx.execute(
-                "DELETE FROM lw_step_jobs WHERE cancel_requested = ? "
-                "AND (lease_owner IS NULL OR lease_expires_at <= ?)",
-                (True, now_db),
-            )
             sql = (
                 "SELECT * FROM lw_step_jobs WHERE ready_at <= ? AND cancel_requested = ? "
                 "AND (lease_owner IS NULL OR lease_expires_at <= ?)"
@@ -656,19 +676,22 @@ class SQLStore(Store, abc.ABC):
             params: list[Any] = [now_db, False, now_db]
             sql, params = self._job_filters(sql, params, step_names, queues)
             sql += f" ORDER BY priority DESC, ready_at, job_id LIMIT 1{self.SKIP_LOCKED}"
-            row = await tx.fetchone(sql, params)
-            if row is None:
-                return None
-            job = self._job(row)
-            job.attempt += 1
-            job.lease_owner = worker_id
-            job.lease_expires_at = now + lease
-            await tx.execute(
-                "UPDATE lw_step_jobs SET attempt = ?, lease_owner = ?, lease_expires_at = ? "
-                "WHERE job_id = ?",
-                (job.attempt, worker_id, self.ts_in(job.lease_expires_at), job.job_id),
+            candidate = sql.replace("SELECT *", "SELECT job_id", 1)
+            claim = (
+                "UPDATE lw_step_jobs SET attempt = attempt + 1, lease_owner = ?, "
+                f"lease_expires_at = ? WHERE job_id = ({candidate}) RETURNING *"
             )
-            return job
+            row = await tx.fetchone(claim, [worker_id, self.ts_in(now + lease), *params])
+            if row is None:
+                # Idle: a good moment to drop jobs whose workflow cancelled them while an
+                # attempt was running and whose worker never reported back.
+                await tx.execute(
+                    "DELETE FROM lw_step_jobs WHERE cancel_requested = ? "
+                    "AND (lease_owner IS NULL OR lease_expires_at <= ?)",
+                    (True, now_db),
+                )
+                return None
+            return self._job(row)
 
     async def _owned_job(self, tx: SqlTransaction, job_id: str, worker_id: str) -> StepJob | None:
         row = await tx.fetchone(
@@ -690,12 +713,14 @@ class SQLStore(Store, abc.ABC):
             peek = await tx.fetchone("SELECT run_id FROM lw_step_jobs WHERE job_id = ?", (job_id,))
             if peek is None:
                 return False
-            # Lock order: execution row, then the job row.
+            # Lock order: execution row, then the job row (locked by the DELETE).
             rec = await self._load(tx, peek["run_id"], lock=True)
-            job = await self._owned_job(tx, job_id, worker_id)
-            if job is None:
+            deleted = await tx.execute(
+                "DELETE FROM lw_step_jobs WHERE job_id = ? AND lease_owner = ?",
+                (job_id, worker_id),
+            )
+            if not deleted:
                 return False
-            await tx.execute("DELETE FROM lw_step_jobs WHERE job_id = ?", (job_id,))
             if not rec.is_closed:
                 await self._append(tx, rec, event, now)
                 self._refresh_tick_pending(tx, rec, now)
@@ -727,14 +752,11 @@ class SQLStore(Store, abc.ABC):
 
     async def renew_step_lease(self, job_id: str, worker_id: str, expires_at: datetime) -> bool:
         async with self.transaction() as tx:
-            job = await self._owned_job(tx, job_id, worker_id)
-            if job is None:
-                return False
-            await tx.execute(
-                "UPDATE lw_step_jobs SET lease_expires_at = ? WHERE job_id = ?",
-                (self.ts_in(expires_at), job_id),
+            updated = await tx.execute(
+                "UPDATE lw_step_jobs SET lease_expires_at = ? WHERE job_id = ? AND lease_owner = ?",
+                (self.ts_in(expires_at), job_id, worker_id),
             )
-            return True
+        return updated > 0
 
     @staticmethod
     def _job_filters(

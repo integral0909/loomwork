@@ -30,6 +30,23 @@ from loomwork.store.notify import closed_topic, run_topic
 from loomwork.store.records import ExecutionRecord, ExecutionStatus, StepJob
 
 _MAX_ID_LENGTH = 256
+#: Waiting callers rely on store notifications; polling is only a fallback (for example
+#: when another process closes a run on a store without cross-process notifications),
+#: so its interval grows up to this bound to keep idle waiters cheap.
+_MAX_WAIT_POLL_SECONDS = 5.0
+
+
+class _Backoff:
+    """Fallback polling intervals: start at ``initial``, double up to a cap."""
+
+    def __init__(self, initial: float, cap: float = _MAX_WAIT_POLL_SECONDS) -> None:
+        self._current = max(initial, 0.001)
+        self._cap = max(cap, initial)
+
+    def next(self) -> float:
+        value = self._current
+        self._current = min(self._current * 2, self._cap)
+        return value
 
 
 class Engine:
@@ -170,6 +187,7 @@ class Engine:
         notifier = self.store.notifier
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
+        backoff = _Backoff(self.config.poll_interval)
         seen = 0
         try:
             while True:
@@ -183,7 +201,7 @@ class Engine:
                     raise WorkflowClosedError(
                         f"run {run_id} closed without completing update {update_id}"
                     )
-                wait_for = self.config.poll_interval
+                wait_for = backoff.next()
                 if deadline is not None:
                     remaining = deadline - loop.time()
                     if remaining <= 0:
@@ -266,13 +284,14 @@ class Engine:
         notifier = self.store.notifier
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
+        backoff = _Backoff(self.config.poll_interval)
         try:
             while True:
                 token = notifier.token(topic)
                 record = await self.store.get_execution(run_id)
                 if record.is_closed:
                     return record
-                wait_for = self.config.poll_interval
+                wait_for = backoff.next()
                 if deadline is not None:
                     remaining = deadline - loop.time()
                     if remaining <= 0:

@@ -89,6 +89,19 @@ All notable changes to this project are documented here. The format follows
   and OpenTelemetry spans and metrics (`OpenTelemetryTelemetry`, `loomwork[otel]`), with
   step spans current while user code runs.
 
+- Benchmarks (`python -m benchmarks.bench`) for throughput, step fan-out, replay cost and
+  tick latency on every store.
+
+### Changed
+
+- Workers claim work with one dispatcher per kind of work feeding a bounded pool of
+  tasks, instead of one polling loop per concurrency slot; idle workers now issue one
+  claim per poll interval per kind of work.
+- Claims, lease renewals and step completions use single conditional statements, and a
+  tick's events are inserted with one statement (about 23% fewer statements per
+  workflow); PostgreSQL notifications of a transaction are sent in one round trip.
+- Callers waiting for results or update outcomes back off their fallback polling.
+
 ### Fixed
 
 - SQLite transactions could be left open when the calling task was cancelled.

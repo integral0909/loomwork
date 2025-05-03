@@ -99,6 +99,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "PLR", "ARG", "N", "PT011", "PT017", "PT018", "T20", "E501"]
 "examples/**" = ["T20"]
+"benchmarks/**" = ["T20"]
 "src/loomwork/runtime/loop.py" = ["ARG002"]  # overrides of the AbstractEventLoop API
 "src/loomwork/store/*.py" = ["ARG002"]       # uniform Store signatures
 # Queries are assembled from constant fragments only; every value is a bound parameter.

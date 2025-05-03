@@ -85,14 +85,18 @@ class TickProcessor:
         self.ticks_completed = 0
         self.ticks_failed = 0
 
-    async def run_once(self) -> bool:
-        """Process at most one tick. Returns whether a tick was claimed."""
+    async def claim(self) -> ExecutionRecord | None:
+        """Lease a run with a pending tick of a registered workflow, if there is one."""
         names = self.registry.workflow_names
         if not names:
-            return False
-        record = await self.store.claim_tick(
+            return None
+        return await self.store.claim_tick(
             self.worker_id, self.clock.now(), self.config.tick_lease, names
         )
+
+    async def run_once(self) -> bool:
+        """Process at most one tick. Returns whether a tick was claimed."""
+        record = await self.claim()
         if record is None:
             return False
         await self.process(record)

@@ -170,8 +170,11 @@ class PostgresStore(SQLStore):
         async with self._pool.connection() as conn, conn.transaction():
             tx = _PgTransaction(conn)
             yield tx
-            for topic in tx.topics:
-                await conn.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, topic))
+            if tx.topics:
+                # One round trip for all notifications of the transaction.
+                calls = ", ".join("pg_notify(%s, %s)" for _ in tx.topics)
+                params = [value for topic in tx.topics for value in (NOTIFY_CHANNEL, topic)]
+                await conn.execute(f"SELECT {calls}", params)
         # Local waiters learn immediately; remote ones through LISTEN.
         for topic in tx.topics:
             self.notifier.publish(topic)

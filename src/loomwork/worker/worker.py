@@ -2,16 +2,16 @@
 
 A :class:`Worker` runs three kinds of loops against one store:
 
-* ``workflow_concurrency`` tick loops, each executing one workflow tick at a time,
-* ``step_concurrency`` step loops, each executing one step attempt at a time, taking
+* a tick dispatcher running up to ``workflow_concurrency`` workflow ticks at once,
+* a step dispatcher running up to ``step_concurrency`` step attempts at once, taking
   work only from the worker's ``task_queues`` and within its per-queue limits,
 * one timer loop that fires due timers, and
 * one outbox relay loop that delivers cross-run messages (child results, parent-close
   policies, signals between workflows). Both are optional per worker; one of each is
   needed per deployment, and running several is safe because both are atomic.
 
-Idle loops sleep until the store publishes a notification for their topic or the poll
-interval elapses, whichever comes first.
+Idle dispatchers sleep until the store publishes a notification for their topic or the
+poll interval elapses, whichever comes first.
 """
 
 from __future__ import annotations
@@ -143,6 +143,7 @@ class Worker:
         self._gate = QueueGate(self.options.task_queues, self.options.queue_limits)
         self._local = Notifier()
         self._tasks: list[asyncio.Task[None]] = []
+        self._inflight: set[asyncio.Task[object]] = set()
         self._stopping = asyncio.Event()
         self._busy = 0
 
@@ -156,10 +157,10 @@ class Worker:
         if self._tasks:
             raise RuntimeError("worker already started")
         self._stopping.clear()
-        for index in range(self.options.workflow_concurrency):
-            self._spawn(f"ticks-{index}", self._poll_loop(TOPIC_TICKS, self.ticks.run_once))
-        for index in range(self.options.step_concurrency):
-            self._spawn(f"steps-{index}", self._step_loop())
+        if self.options.workflow_concurrency:
+            self._spawn("ticks", self._tick_dispatcher())
+        if self.options.step_concurrency:
+            self._spawn("steps", self._step_dispatcher())
         if self.options.run_timers:
             self._spawn("timers", self._timer_loop())
         if self.options.run_outbox:
@@ -179,22 +180,25 @@ class Worker:
         self._tasks.append(task)
 
     async def stop(self, grace: float | None = None) -> None:
-        """Stop polling, give in-flight work ``grace`` seconds, then cancel it.
+        """Stop claiming work, give in-flight work ``grace`` seconds, then cancel it.
 
-        Cancelled step attempts are retried elsewhere once their lease expires; a
+        Cancelled step attempts are handed back for another worker to run at once; a
         cancelled tick leaves no trace and is retried as well.
         """
         if not self._tasks:
             return
         self._stopping.set()
         grace = self.options.shutdown_grace if grace is None else grace
-        _, pending = await asyncio.wait(self._tasks, timeout=grace)
-        for task in pending:
-            task.cancel()
-        results = await asyncio.gather(*self._tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error("worker loop crashed", exc_info=result)
+        # Dispatchers and service loops notice the stop flag immediately.
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._inflight:
+            _, pending = await asyncio.wait(set(self._inflight), timeout=grace)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in self._tasks:
+            if not task.cancelled() and task.exception() is not None:
+                logger.error("worker loop crashed", exc_info=task.exception())
         self._tasks.clear()
         self.ticks.close()
         logger.info("worker %s stopped", self.worker_id)
@@ -206,60 +210,111 @@ class Worker:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.stop()
 
-    # ------------------------------------------------------------------ loops
+    # ------------------------------------------------------------------ dispatch
+    #
+    # One dispatcher per kind of work claims jobs and runs each in its own task, bounded
+    # by a semaphore. Idle workers therefore poll the store once per poll interval per
+    # kind of work, rather than once per concurrency slot.
 
-    async def _poll_loop(self, topic: str, run_once: Callable[[], Awaitable[bool]]) -> None:
+    async def _acquire(self, slots: asyncio.Semaphore) -> bool:
+        """Wait for a free slot; ``False`` if the worker is stopping instead."""
+        if self._stopping.is_set():
+            return False
+        acquire = asyncio.ensure_future(slots.acquire())
+        stop = asyncio.ensure_future(self._stopping.wait())
+        await asyncio.wait({acquire, stop}, return_when=asyncio.FIRST_COMPLETED)
+        stop.cancel()
+        if not acquire.done():
+            acquire.cancel()
+        results = await asyncio.gather(acquire, stop, return_exceptions=True)
+        got_slot = results[0] is True
+        if got_slot and self._stopping.is_set():
+            slots.release()
+            return False
+        return got_slot
+
+    def _launch(
+        self,
+        work: Awaitable[object],
+        slots: asyncio.Semaphore,
+        name: str,
+        on_done: Callable[[], None] | None = None,
+    ) -> None:
+        task = asyncio.ensure_future(work)
+        task.set_name(f"loomwork-{name}")
+        self._inflight.add(task)
+        self._busy += 1
+
+        def finished(done: asyncio.Future[object]) -> None:
+            self._inflight.discard(task)
+            self._busy -= 1
+            slots.release()
+            if on_done is not None:
+                on_done()
+            if not done.cancelled() and done.exception() is not None:
+                self.telemetry.worker_error(name)
+                logger.error("error in %s", name, exc_info=done.exception())
+
+        task.add_done_callback(finished)
+
+    async def _tick_dispatcher(self) -> None:
+        slots = asyncio.Semaphore(self.options.workflow_concurrency)
         notifier = self.store.notifier
-        while not self._stopping.is_set():
-            token = notifier.token(topic)
+        while await self._acquire(slots):
+            token = notifier.token(TOPIC_TICKS)
             try:
-                self._busy += 1
-                try:
-                    did_work = await run_once()
-                finally:
-                    self._busy -= 1
+                record = await self.ticks.claim()
             except Exception:
-                logger.exception("error while polling for %s", topic)
-                self.telemetry.worker_error(topic)
+                slots.release()
+                logger.exception("error while claiming workflow ticks")
+                self.telemetry.worker_error(TOPIC_TICKS)
                 await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
                 continue
-            if not did_work:
-                await self._idle(notifier.wait(topic, token, self.config.poll_interval))
+            if record is None:
+                slots.release()
+                await self._idle(notifier.wait(TOPIC_TICKS, token, self.config.poll_interval))
+                continue
+            self._launch(self.ticks.process(record), slots, "tick")
 
-    async def _step_loop(self) -> None:
+    async def _step_dispatcher(self) -> None:
+        slots = asyncio.Semaphore(self.options.step_concurrency)
         notifier = self.store.notifier
         poll = self.config.poll_interval
-        while not self._stopping.is_set():
+        while await self._acquire(slots):
             token = notifier.token(TOPIC_STEPS)
             capacity = self._local.token(_CAPACITY)
             queues = self._gate.open_queues()
             if queues is not None and not queues:
                 # Every queue is at its rate or concurrency limit.
+                slots.release()
                 wait = self._gate.seconds_until_open()
                 timeout = poll if wait is None else min(wait, poll)
                 await self._idle(self._local.wait(_CAPACITY, capacity, timeout))
                 continue
             try:
-                self._busy += 1
-                try:
-                    job = await self.steps.claim(queues)
-                    if job is not None:
-                        self._gate.acquire(job.queue)
-                        try:
-                            await self.steps.execute(job)
-                        finally:
-                            self._gate.release(job.queue)
-                            self._local.publish(_CAPACITY)
-                finally:
-                    self._busy -= 1
-                if job is not None:
-                    continue
-                next_at = await self.store.next_step_ready_at(self.registry.step_names, queues)
+                job = await self.steps.claim(queues)
+                next_at = (
+                    None
+                    if job is not None
+                    else await self.store.next_step_ready_at(self.registry.step_names, queues)
+                )
             except Exception:
-                logger.exception("error while executing steps")
+                slots.release()
+                logger.exception("error while claiming steps")
                 self.telemetry.worker_error("steps")
                 await self._idle(self._sleep(_ERROR_BACKOFF_SECONDS))
                 continue
+            if job is not None:
+                queue = job.queue
+                self._gate.acquire(queue)
+
+                def done(queue: str = queue) -> None:
+                    self._gate.release(queue)
+                    self._local.publish(_CAPACITY)
+
+                self._launch(self.steps.execute(job), slots, "step", done)
+                continue
+            slots.release()
             waits: list[Awaitable[object]] = [notifier.wait(TOPIC_STEPS, token, poll)]
             if next_at is not None:
                 # A retry backoff or delayed job becomes ready: wake exactly then.

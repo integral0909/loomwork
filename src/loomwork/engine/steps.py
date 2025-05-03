@@ -187,7 +187,12 @@ class StepExecutor:
         now = self.clock.now()
         policy = job.options.retry or self.config.default_step_retry
         lease = self.config.step_lease(job.options)
-        if not await self.store.renew_step_lease(job.job_id, self.worker_id, now + lease):
+        claimed_with = self.config.step_lease(self.config.default_step_options)
+        # The claim used the default lease; only steps with their own timeout or
+        # heartbeat window need it adjusted.
+        if lease != claimed_with and not await self.store.renew_step_lease(
+            job.job_id, self.worker_id, now + lease
+        ):
             logger.info("lost lease on step job %s before starting", job.job_id)
             return
 
