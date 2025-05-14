@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import timedelta
 from typing import Any, TypeVar, overload
 
 from loomwork.client.client import Client
@@ -20,6 +21,7 @@ from loomwork.engine.config import EngineConfig
 from loomwork.engine.engine import Engine
 from loomwork.errors import NotFoundError
 from loomwork.observability.telemetry import Telemetry
+from loomwork.retry import RetryPolicy
 from loomwork.sdk.definitions import Registry, StepDefinition, WorkflowDefinition
 from loomwork.store.base import Store
 from loomwork.store.memory import MemoryStore
@@ -129,6 +131,9 @@ class Loomwork:
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> WorkflowHandle[R]: ...
 
     @overload
@@ -138,6 +143,9 @@ class Loomwork:
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> WorkflowHandle[Any]: ...
 
     async def start_workflow(
@@ -146,9 +154,20 @@ class Loomwork:
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> WorkflowHandle[Any]:
         self._check_known(workflow)
-        return await self.client.start(workflow, *args, id=id, search_attributes=search_attributes)
+        return await self.client.start(
+            workflow,
+            *args,
+            id=id,
+            search_attributes=search_attributes,
+            run_timeout=run_timeout,
+            execution_timeout=execution_timeout,
+            retry_policy=retry_policy,
+        )
 
     @overload
     async def execute(

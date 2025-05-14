@@ -47,6 +47,7 @@ from loomwork.history import (
     WorkflowFailed,
     WorkflowStarted,
     WorkflowTerminated,
+    WorkflowTimedOut,
     event_from_dict,
     event_from_json,
     event_to_dict,
@@ -232,6 +233,7 @@ SAMPLE_EVENTS = [
     WorkflowContinuedAsNew(new_run_id="r2", workflow_name="wf", args=[P]),
     PatchRecorded(patch_id="sms-receipts"),
     SearchAttributesUpserted(attributes={"tier": {"type": "string", "value": "gold"}}),
+    WorkflowTimedOut(reason="run exceeded its timeout"),
 ]
 
 
@@ -262,6 +264,7 @@ class TestEvents:
             "workflow_canceled",
             "workflow_terminated",
             "workflow_continued_as_new",
+            "workflow_timed_out",
         }
 
     def test_unknown_kind(self) -> None:

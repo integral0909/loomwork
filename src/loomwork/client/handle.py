@@ -15,6 +15,7 @@ from loomwork.errors import (
     WorkflowCanceledError,
     WorkflowFailedError,
     WorkflowTerminatedError,
+    WorkflowTimedOutError,
 )
 from loomwork.history.events import Event
 from loomwork.sdk.messaging import Channel
@@ -149,8 +150,9 @@ class WorkflowHandle(Generic[R]):
         while True:
             remaining = None if deadline is None else max(deadline - loop.time(), 0.0)
             record = await self._engine.wait_closed(run_id, remaining)
-            if record.status is ExecutionStatus.CONTINUED_AS_NEW and record.continued_run_id:
-                # The workflow handed over to a new run; its result is the chain's result.
+            if record.continued_run_id:
+                # The workflow continued as new, or failed and was retried: the chain's
+                # result is the result of its last run.
                 run_id = record.continued_run_id
                 continue
             return await self._outcome(record)
@@ -169,5 +171,7 @@ class WorkflowHandle(Generic[R]):
                 raise WorkflowCanceledError(record.run_id)
             case ExecutionStatus.TERMINATED:
                 raise WorkflowTerminatedError(record.run_id, record.close_reason)
+            case ExecutionStatus.TIMED_OUT:
+                raise WorkflowTimedOutError(record.run_id, record.close_reason)
             case _:
                 raise RuntimeError(f"run {record.run_id} is still {record.status}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from datetime import timedelta
 from typing import Any, TypeVar, overload
 
 from loomwork.client.handle import WorkflowHandle
@@ -10,6 +11,7 @@ from loomwork.client.schedules import ScheduleClient
 from loomwork.codec.converter import DataConverter, default_converter, return_hint
 from loomwork.engine.engine import Engine
 from loomwork.engine.queries import QueryRunner
+from loomwork.retry import RetryPolicy
 from loomwork.schedules.service import ScheduleService
 from loomwork.sdk.definitions import Registry, WorkflowDefinition
 from loomwork.sdk.messaging import Channel
@@ -49,6 +51,9 @@ class Client:
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> WorkflowHandle[R]: ...
 
     @overload
@@ -58,6 +63,9 @@ class Client:
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> WorkflowHandle[Any]: ...
 
     async def start(
@@ -66,6 +74,9 @@ class Client:
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> WorkflowHandle[Any]:
         """Start a run and return a handle to it without waiting."""
         if isinstance(workflow, WorkflowDefinition):
@@ -81,6 +92,9 @@ class Client:
             await self.converter.encode_args_async(positional),
             workflow_id=id,
             search_attributes=search_attributes,
+            run_timeout=run_timeout,
+            execution_timeout=execution_timeout,
+            retry_policy=retry_policy,
         )
         return WorkflowHandle(
             self.engine,

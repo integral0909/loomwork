@@ -12,7 +12,7 @@ import logging
 import random
 import secrets
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from loomwork.clock import Clock
@@ -24,6 +24,7 @@ from loomwork.errors import LeaseLostError, NondeterminismError
 from loomwork.history.events import SignalReceived, TickCompleted, WorkflowStarted
 from loomwork.ids import new_id
 from loomwork.observability.telemetry import NoopTelemetry, Telemetry, TickReport
+from loomwork.retry import RetryPolicy
 from loomwork.runtime.commands import (
     CancelTimer,
     CancelWorkflow,
@@ -147,7 +148,7 @@ class TickProcessor:
             live = replayer.live_tick(self.clock.now())
             if self.boundary.active:
                 live = dataclasses.replace(live, commands=await self.boundary.encode(live.commands))
-            outcome = self._build_outcome(record, live)
+            outcome = self._build_outcome(record, live, replayer.instance)
             committed = await self._commit(record, outcome)
         except LeaseLostError as exc:
             replayer.close()
@@ -181,7 +182,9 @@ class TickProcessor:
         )
         return list(events)
 
-    def _build_outcome(self, record: ExecutionRecord, live: LiveTick) -> TickOutcome:
+    def _build_outcome(
+        self, record: ExecutionRecord, live: LiveTick, instance: WorkflowInstance | None
+    ) -> TickOutcome:
         now = self.clock.now()
         outcome = TickOutcome(
             worker_id=self.worker_id,
@@ -253,11 +256,15 @@ class TickProcessor:
                     outcome.close = CloseOutcome(
                         ExecutionStatus.CONTINUED_AS_NEW, continued_run_id=command.new_run_id
                     )
-                    outcome.continuation = self._continuation(record, command, now)
+                    outcome.continuation = self._continuation(
+                        record, command, now, instance.started if instance else None
+                    )
                 case CompleteWorkflow():
                     outcome.close = CloseOutcome(ExecutionStatus.COMPLETED, result=command.result)
                 case FailWorkflow():
                     outcome.close = CloseOutcome(ExecutionStatus.FAILED, failure=command.failure)
+                    if instance is not None:
+                        self._maybe_retry(record, command, instance.started, outcome, now)
                 case CancelWorkflow():
                     outcome.close = CloseOutcome(ExecutionStatus.CANCELED, reason=command.reason)
                 case _:
@@ -295,11 +302,63 @@ class TickProcessor:
         )
         return ChildSpec(record=child, started=started)
 
+    def _maybe_retry(
+        self,
+        record: ExecutionRecord,
+        command: FailWorkflow,
+        started: WorkflowStarted,
+        outcome: TickOutcome,
+        now: datetime,
+    ) -> None:
+        """Turn a failed run into a retry if its workflow retry policy allows one."""
+        if started.retry_policy is None:
+            return
+        policy = RetryPolicy.from_dict(started.retry_policy)
+        if not policy.should_retry(started.attempt, command.failure):
+            return
+        ready_at = now + policy.delay_for(started.attempt, self._rng)
+        if started.execution_deadline is not None and ready_at >= started.execution_deadline:
+            return
+        new_run_id = new_id()
+        successor = self._continuation(
+            record,
+            ContinueAsNewCommand(
+                workflow_name=record.workflow_name, args=list(started.args), new_run_id=new_run_id
+            ),
+            now,
+            started,
+        )
+        assert isinstance(successor.started, WorkflowStarted)
+        retried_start = dataclasses.replace(
+            successor.started,
+            attempt=started.attempt + 1,
+            search_attributes=dict(started.search_attributes),
+        )
+        outcome.close = CloseOutcome(
+            ExecutionStatus.FAILED, failure=command.failure, continued_run_id=new_run_id
+        )
+        outcome.continuation = ChildSpec(record=successor.record, started=retried_start)
+        outcome.continuation_ready_at = ready_at
+        logger.info(
+            "run %s of %s failed (attempt %d); retrying as %s at %s",
+            record.run_id,
+            record.workflow_name,
+            started.attempt,
+            new_run_id,
+            ready_at.isoformat(),
+        )
+
     @staticmethod
     def _continuation(
-        record: ExecutionRecord, command: ContinueAsNewCommand, now: Any
+        record: ExecutionRecord,
+        command: ContinueAsNewCommand,
+        now: Any,
+        previous: WorkflowStarted | None = None,
     ) -> ChildSpec:
-        """The successor run: same workflow id and parent, fresh history."""
+        """The successor run: same workflow id and parent, fresh history.
+
+        Timeouts and the retry policy carry over, so they bound the whole chain.
+        """
         successor = ExecutionRecord(
             run_id=command.new_run_id,
             workflow_id=record.workflow_id,
@@ -317,6 +376,9 @@ class TickProcessor:
             args=list(command.args),
             random_seed=secrets.randbits(63),
             continued_from=record.run_id,
+            run_timeout=previous.run_timeout if previous else None,
+            execution_deadline=previous.execution_deadline if previous else None,
+            retry_policy=previous.retry_policy if previous else None,
         )
         return ChildSpec(record=successor, started=started)
 

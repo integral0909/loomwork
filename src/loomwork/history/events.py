@@ -97,6 +97,12 @@ class WorkflowStarted(Event):
     scheduled_time: datetime | None = None
     continued_from: str = ""
     search_attributes: dict[str, Any] = field(default_factory=dict)
+    run_timeout: float | None = None
+    """Seconds this run may take before it is closed as timed out."""
+    execution_deadline: datetime | None = None
+    """When the whole workflow id (across retries and continue-as-new) times out."""
+    retry_policy: dict[str, Any] | None = None
+    """``RetryPolicy.to_dict()`` for restarting the workflow when a run fails."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -341,12 +347,23 @@ class WorkflowTerminated(Event):
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WorkflowTimedOut(Event):
+    """The run exceeded its run timeout or the workflow's execution timeout."""
+
+    kind: ClassVar[str] = "workflow_timed_out"
+    category: ClassVar[EventCategory] = EventCategory.SYSTEM
+
+    reason: str = ""
+
+
 CLOSING_EVENTS: tuple[type[Event], ...] = (
     WorkflowCompleted,
     WorkflowContinuedAsNew,
     WorkflowFailed,
     WorkflowCanceled,
     WorkflowTerminated,
+    WorkflowTimedOut,
 )
 
 

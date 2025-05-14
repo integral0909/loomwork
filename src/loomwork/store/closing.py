@@ -12,6 +12,7 @@ so the closing transaction only ever locks the closing run.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from loomwork.failure import FailureInfo
@@ -39,6 +40,7 @@ def child_outcome_event(child: ExecutionRecord) -> Event:
         ExecutionStatus.FAILED: ("failed", "ChildWorkflowError", "child"),
         ExecutionStatus.CANCELED: ("was cancelled", "ChildWorkflowCanceled", "child"),
         ExecutionStatus.TERMINATED: ("was terminated", "ChildWorkflowTerminated", "child"),
+        ExecutionStatus.TIMED_OUT: ("timed out", "ChildWorkflowTimedOut", "child"),
     }
     verb, failure_type, kind = descriptions.get(
         child.status, ("closed without a result", "ChildWorkflowError", "child")
@@ -82,9 +84,9 @@ def closing_messages(
 ) -> list[OutboxMessage]:
     """Outbox messages to enqueue in the transaction that closed ``closed``."""
     messages: list[OutboxMessage] = []
-    continued = closed.status is ExecutionStatus.CONTINUED_AS_NEW
-    # A run that continued as new hands its place in the parent to its successor, which
-    # reports when it truly closes.
+    continued = closed.continued_run_id is not None
+    # A run that continued as new, or failed and was retried, hands its place in the
+    # parent to its successor, which reports when the chain truly closes.
     if closed.parent_run_id is not None and closed.parent_seq is not None and not continued:
         messages.append(
             OutboxMessage(
@@ -127,3 +129,19 @@ def drop_unstarted(state: ScheduleState, conflicts: set[str]) -> ScheduleState:
         recent=recent,
         total_started=state.total_started - len(conflicts),
     )
+
+
+#: Reserved timer sequence number for a run's deadline (workflow timers start at 1).
+DEADLINE_TIMER_SEQ = 0
+
+
+def run_deadline(started: Event, created_at: datetime) -> datetime | None:
+    """When the run started by ``started`` times out, if it has a timeout."""
+    from datetime import timedelta
+
+    run_timeout = getattr(started, "run_timeout", None)
+    execution_deadline = getattr(started, "execution_deadline", None)
+    candidates = [d for d in (execution_deadline,) if d is not None]
+    if run_timeout is not None:
+        candidates.append(created_at + timedelta(seconds=run_timeout))
+    return min(candidates) if candidates else None

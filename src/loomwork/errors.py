@@ -135,6 +135,15 @@ class WorkflowCanceledError(LoomworkError):
         self.run_id = run_id
 
 
+class WorkflowTimedOutError(LoomworkError):
+    """Raised by :meth:`WorkflowHandle.result` when the run exceeded its timeout."""
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        super().__init__(f"workflow run {run_id} timed out: {reason}")
+        self.run_id = run_id
+        self.reason = reason
+
+
 class WorkflowTerminatedError(LoomworkError):
     """Raised by :meth:`WorkflowHandle.result` when the run was terminated."""
 
@@ -154,7 +163,8 @@ class ContinueAsNew(BaseException):
     def __init__(self, workflow_name: str | None, args: list[object]) -> None:
         super().__init__("continue as new")
         self.workflow_name = workflow_name
-        self.args = args
+        # Not ``args``: that attribute belongs to BaseException.
+        self.workflow_args = args
 
 
 # --------------------------------------------------------------------------- engine / API

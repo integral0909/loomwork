@@ -29,6 +29,7 @@ from loomwork.errors import (
     WorkflowClosedError,
     WorkflowFailedError,
     WorkflowTerminatedError,
+    WorkflowTimedOutError,
 )
 from loomwork.failure import FailureInfo
 from loomwork.info import StepInfo, WorkflowInfo
@@ -122,6 +123,7 @@ __all__ = [
     "WorkflowHandle",
     "WorkflowInfo",
     "WorkflowTerminatedError",
+    "WorkflowTimedOutError",
     "__version__",
     "search_attributes",
     "upsert_search_attributes",

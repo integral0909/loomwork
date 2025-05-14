@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import secrets
 from collections.abc import Sequence
+from datetime import timedelta
 from typing import Any
 
 from loomwork.clock import Clock, SystemClock
@@ -25,6 +26,8 @@ from loomwork.history.events import (
     WorkflowStarted,
 )
 from loomwork.ids import new_id
+from loomwork.options import as_timedelta
+from loomwork.retry import RetryPolicy
 from loomwork.store.base import Store
 from loomwork.store.notify import closed_topic, run_topic
 from loomwork.store.records import ExecutionRecord, ExecutionStatus, StepJob
@@ -72,8 +75,15 @@ class Engine:
         *,
         workflow_id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> ExecutionRecord:
         """Create a new run of ``workflow_name``.
+
+        ``run_timeout`` bounds one run, ``execution_timeout`` the whole workflow id
+        across retries and continue-as-new; exceeding either closes the run as
+        ``timed_out``. ``retry_policy`` starts a fresh attempt when a run fails.
 
         ``workflow_id`` identifies the business entity the workflow is about (an order
         id, for example). Only one run per workflow id can be running at a time.
@@ -82,6 +92,17 @@ class Engine:
             WorkflowAlreadyStartedError: a run with this workflow id is running.
         """
         record, started = self._new_run(workflow_name, args, workflow_id)
+        run_td = as_timedelta(run_timeout)
+        execution_td = as_timedelta(execution_timeout)
+        for name, value in (("run_timeout", run_td), ("execution_timeout", execution_td)):
+            if value is not None and value <= timedelta(0):
+                raise ValueError(f"{name} must be positive")
+        started = dataclasses.replace(
+            started,
+            run_timeout=run_td.total_seconds() if run_td else None,
+            execution_deadline=self.clock.now() + execution_td if execution_td else None,
+            retry_policy=retry_policy.to_dict() if retry_policy else None,
+        )
         if search_attributes:
             from loomwork.visibility.attributes import encode_attributes
 

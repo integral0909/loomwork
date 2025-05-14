@@ -102,6 +102,7 @@ class WorkflowInstance:
     ) -> None:
         self.definition = definition
         self.converter = converter
+        self.started = started
         self.info = WorkflowInfo(
             workflow_id=started.workflow_id,
             run_id=started.run_id,
@@ -241,7 +242,7 @@ class WorkflowInstance:
     def _continue_as_new(self, request: ContinueAsNew) -> Command:
         name = request.workflow_name or self.info.workflow_name
         return ContinueAsNewCommand(
-            workflow_name=name, args=self.converter.encode_args(list(request.args))
+            workflow_name=name, args=self.converter.encode_args(list(request.workflow_args))
         )
 
     def _resolve_child(self, seq: int) -> _PendingStep | None:

@@ -24,6 +24,7 @@ class ExecutionStatus(enum.StrEnum):
     CANCELED = "canceled"
     TERMINATED = "terminated"
     CONTINUED_AS_NEW = "continued_as_new"
+    TIMED_OUT = "timed_out"
 
     @property
     def is_closed(self) -> bool:
@@ -195,4 +196,7 @@ class TickOutcome:
     search_attributes: dict[str, Any] | None = None
     """Encoded search attribute changes made during the tick (``None`` removes)."""
     continuation: ChildSpec | None = None
-    """With a ``CONTINUED_AS_NEW`` close: the run to start in the same transaction."""
+    """With a ``CONTINUED_AS_NEW`` close, or a ``FAILED`` close that the workflow's retry
+    policy retries: the run to start in the same transaction."""
+    continuation_ready_at: datetime | None = None
+    """When the continuation may start (a retry's backoff); ``None`` means at once."""

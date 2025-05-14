@@ -89,6 +89,10 @@ All notable changes to this project are documented here. The format follows
   and OpenTelemetry spans and metrics (`OpenTelemetryTelemetry`, `loomwork[otel]`), with
   step spans current while user code runs.
 
+- Workflow timeouts and retries: `run_timeout` closes a run as `timed_out`,
+  `execution_timeout` bounds the whole workflow id across retries and continue-as-new,
+  and `retry_policy` starts a fresh attempt (with backoff) when a run fails. Handles,
+  parents and schedules follow the chain of attempts.
 - Benchmarks (`python -m benchmarks.bench`) for throughput, step fan-out, replay cost and
   tick latency on every store.
 

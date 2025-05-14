@@ -75,7 +75,7 @@ class ScheduleService:
                     record = await self.store.get_execution(run_id)  # type: ignore[arg-type]
                 except NotFoundError:
                     break
-                if record.status is ExecutionStatus.CONTINUED_AS_NEW and record.continued_run_id:
+                if record.continued_run_id:
                     run_id = record.continued_run_id
                     continue
                 statuses[run.run_id] = record.status

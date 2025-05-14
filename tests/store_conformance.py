@@ -836,6 +836,66 @@ class StoreConformance:
         with pytest.raises(NotFoundError):
             await store.get_search_attributes("r1")
 
+    # ------------------------------------------------------------------ timeouts and retries
+
+    async def test_run_deadline_times_out(self, store: Store) -> None:
+        rec = record("r1")
+        begin = dataclasses.replace(started(rec), run_timeout=60.0)
+        await store.create_execution(rec, begin, T0)
+        assert await store.next_timer_at() == T0 + timedelta(seconds=60)
+        assert await store.fire_due_timers(T0 + timedelta(seconds=59)) == 0
+        assert await store.fire_due_timers(T0 + timedelta(seconds=60)) == 1
+        closed = await store.get_execution("r1")
+        assert closed.status is ExecutionStatus.TIMED_OUT
+        assert closed.close_reason == "run exceeded its timeout"
+        assert (await store.load_history("r1"))[-1].kind == "workflow_timed_out"
+        assert await store.next_timer_at() is None
+
+    async def test_execution_deadline_wins_when_earlier(self, store: Store) -> None:
+        rec = record("r1")
+        begin = dataclasses.replace(
+            started(rec), run_timeout=3600.0, execution_deadline=T0 + timedelta(minutes=5)
+        )
+        await store.create_execution(rec, begin, T0)
+        assert await store.next_timer_at() == T0 + timedelta(minutes=5)
+
+    async def test_closing_normally_removes_the_deadline(self, store: Store) -> None:
+        rec = record("r1")
+        await store.create_execution(rec, dataclasses.replace(started(rec), run_timeout=60.0), T0)
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            decisions=[WorkflowCompleted(result=PAYLOAD)],
+            close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD),
+        )
+        assert await store.next_timer_at() is None
+
+    async def test_retry_continuation_waits_for_backoff(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        successor = record("r1-retry", workflow_id="wid-r1")
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            close=CloseOutcome(
+                ExecutionStatus.FAILED,
+                failure=FailureInfo(message="boom", type="Boom"),
+                continued_run_id="r1-retry",
+            ),
+            continuation=ChildSpec(successor, started(successor)),
+            continuation_ready_at=T0 + timedelta(seconds=30),
+        )
+        failed = await store.get_execution("r1")
+        assert (failed.status, failed.continued_run_id) == (ExecutionStatus.FAILED, "r1-retry")
+        assert await store.claim_tick("w1", T0 + timedelta(seconds=29), LEASE) is None
+        claimed = await store.claim_tick("w1", T0 + timedelta(seconds=30), LEASE)
+        assert claimed is not None and claimed.run_id == "r1-retry"
+        # A retried run does not report to a parent: its successor will.
+        assert await store.outbox_size() == 0
+
     # ------------------------------------------------------------------ schedules
 
     def schedule(self, schedule_id: str = "s1", **changes: object) -> ScheduleState:

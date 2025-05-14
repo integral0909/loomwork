@@ -33,6 +33,7 @@ from loomwork.history.events import (
     TimerFired,
     WorkflowStarted,
     WorkflowTerminated,
+    WorkflowTimedOut,
 )
 from loomwork.schedules.model import ScheduleState
 from loomwork.visibility.attributes import decode_attributes, merge
@@ -40,7 +41,13 @@ from loomwork.visibility.attributes import decode_attributes, merge
 if TYPE_CHECKING:
     from loomwork.visibility.schema import SearchAttributes
 from loomwork.store.base import Store
-from loomwork.store.closing import child_start_failed_event, closing_messages, drop_unstarted
+from loomwork.store.closing import (
+    DEADLINE_TIMER_SEQ,
+    child_start_failed_event,
+    closing_messages,
+    drop_unstarted,
+    run_deadline,
+)
 from loomwork.store.notify import (
     TOPIC_OUTBOX,
     TOPIC_SCHEDULES,
@@ -176,7 +183,12 @@ class MemoryStore(Store):
         return None
 
     def _insert_run(
-        self, record: ExecutionRecord, started: Event, now: datetime, extra: Sequence[Event] = ()
+        self,
+        record: ExecutionRecord,
+        started: Event,
+        now: datetime,
+        extra: Sequence[Event] = (),
+        ready_at: datetime | None = None,
     ) -> tuple[_Run, Event]:
         run = _Run(record=copy.copy(record))
         self._runs[record.run_id] = run
@@ -193,6 +205,11 @@ class MemoryStore(Store):
                 raise ValueError(f"{type(extra_event).__name__} is not an input event")
             self._append(run, extra_event, now)
         self._mark_tick_pending(run, now)
+        if ready_at is not None and ready_at > now:
+            run.record.tick_ready_at = ready_at  # a retried run waits out its backoff
+        deadline = run_deadline(started, now)
+        if deadline is not None:
+            self._add_timer(run, TimerRecord(record.run_id, DEADLINE_TIMER_SEQ, deadline))
         return run, event
 
     async def create_execution(
@@ -345,7 +362,12 @@ class MemoryStore(Store):
             if outcome.continuation is not None:
                 # The closing run released its workflow id a moment ago.
                 successor = outcome.continuation
-                self._insert_run(successor.record, successor.started, now)
+                self._insert_run(
+                    successor.record,
+                    successor.started,
+                    now,
+                    ready_at=outcome.continuation_ready_at,
+                )
                 inherited = merge(
                     self._attributes.get(run_id, {}),
                     getattr(successor.started, "search_attributes", {}) or {},
@@ -421,6 +443,27 @@ class MemoryStore(Store):
             record.tick_ready_at = retry_at
             self._tick_candidates.add(run_id)
             self.notifier.publish(TOPIC_TICKS)
+
+    async def next_tick_ready_at(
+        self, workflow_names: Collection[str] | None = None
+    ) -> datetime | None:
+        """Earliest ``tick_ready_at`` among unleased pending ticks.
+
+        Not part of the :class:`~loomwork.store.base.Store` contract: it exists for
+        ``loomwork.testing``, which needs to tell "every run is blocked purely on a
+        future timer or backoff" apart from "a tick is ready right now" in order to
+        skip a :class:`~loomwork.clock.ManualClock` forward without ever skipping past
+        runnable work. Mirrors the eligibility filter in :meth:`claim_tick` (excluding
+        the ``now`` cutoff, since callers compare the result against their own clock).
+        """
+        candidates = [
+            record.tick_ready_at
+            for run_id in self._tick_candidates
+            if (record := self._runs[run_id].record).tick_ready_at is not None
+            and record.lease_owner is None
+            and (workflow_names is None or record.workflow_name in workflow_names)
+        ]
+        return min(candidates, default=None)
 
     # ------------------------------------------------------------------ steps
 
@@ -594,7 +637,13 @@ class MemoryStore(Store):
             _, run_id, seq = heapq.heappop(self._timer_heap)
             run = self._runs[run_id]
             self._remove_timer(run, seq)
-            if not run.record.is_closed:
+            if run.record.is_closed:
+                pass
+            elif seq == DEADLINE_TIMER_SEQ:
+                reason = "run exceeded its timeout"
+                self._append(run, WorkflowTimedOut(reason=reason), now)
+                self._close(run, CloseOutcome(ExecutionStatus.TIMED_OUT, reason=reason), now)
+            else:
                 self._append(run, TimerFired(seq=seq), now)
                 self._mark_tick_pending(run, now)
             fired += 1

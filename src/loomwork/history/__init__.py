@@ -30,6 +30,7 @@ from loomwork.history.events import (
     WorkflowFailed,
     WorkflowStarted,
     WorkflowTerminated,
+    WorkflowTimedOut,
     is_closing,
 )
 from loomwork.history.serde import (
@@ -73,6 +74,7 @@ __all__ = [
     "WorkflowFailed",
     "WorkflowStarted",
     "WorkflowTerminated",
+    "WorkflowTimedOut",
     "event_from_dict",
     "event_from_json",
     "event_to_dict",

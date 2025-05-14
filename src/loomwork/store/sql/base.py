@@ -38,6 +38,7 @@ from loomwork.history.events import (
     TimerFired,
     WorkflowStarted,
     WorkflowTerminated,
+    WorkflowTimedOut,
 )
 from loomwork.history.serde import event_from_dict
 from loomwork.schedules.model import ScheduleState
@@ -46,7 +47,13 @@ from loomwork.visibility.attributes import attribute_rows, decode_attributes
 if TYPE_CHECKING:
     from loomwork.visibility.schema import SearchAttributes
 from loomwork.store.base import Store
-from loomwork.store.closing import child_start_failed_event, closing_messages, drop_unstarted
+from loomwork.store.closing import (
+    DEADLINE_TIMER_SEQ,
+    child_start_failed_event,
+    closing_messages,
+    drop_unstarted,
+    run_deadline,
+)
 from loomwork.store.notify import (
     TOPIC_OUTBOX,
     TOPIC_SCHEDULES,
@@ -290,6 +297,7 @@ class SQLStore(Store, abc.ABC):
         started: Event,
         now: datetime,
         extra_inputs: Sequence[Event] = (),
+        ready_at: datetime | None = None,
     ) -> Event:
         await tx.execute(
             """
@@ -318,7 +326,16 @@ class SQLStore(Store, abc.ABC):
                 raise ValueError(f"{type(extra).__name__} is not an input event")
             await self._append(tx, rec, extra, now)
         self._refresh_tick_pending(tx, rec, now)
+        if ready_at is not None and ready_at > now:
+            rec.tick_ready_at = ready_at  # a retried run waits out its backoff
         await self._write(tx, rec)
+        deadline = run_deadline(started, now)
+        if deadline is not None:
+            await tx.execute(
+                "INSERT INTO lw_timers (run_id, seq, fire_at) VALUES (?, ?, ?)",
+                (rec.run_id, DEADLINE_TIMER_SEQ, self.ts_in(deadline)),
+            )
+            tx.notify(TOPIC_TIMERS)
         return event
 
     async def create_execution(
@@ -524,7 +541,11 @@ class SQLStore(Store, abc.ABC):
                 if outcome.continuation is not None:
                     successor = outcome.continuation
                     await self._insert_run(
-                        tx, dataclasses.replace(successor.record), successor.started, now
+                        tx,
+                        dataclasses.replace(successor.record),
+                        successor.started,
+                        now,
+                        ready_at=outcome.continuation_ready_at,
                     )
                     await self._inherit_attributes(
                         tx, run_id, successor.record.run_id, successor.started
@@ -871,8 +892,18 @@ class SQLStore(Store, abc.ABC):
                 )
                 if not deleted:
                     continue  # fired or cancelled concurrently
-                if not rec.is_closed:
-                    await self._append(tx, rec, TimerFired(seq=int(row["seq"])), now)
+                seq = int(row["seq"])
+                if rec.is_closed:
+                    pass
+                elif seq == DEADLINE_TIMER_SEQ:
+                    reason = "run exceeded its timeout"
+                    await self._append(tx, rec, WorkflowTimedOut(reason=reason), now)
+                    await self._close(
+                        tx, rec, CloseOutcome(ExecutionStatus.TIMED_OUT, reason=reason), now
+                    )
+                    await self._write(tx, rec)
+                else:
+                    await self._append(tx, rec, TimerFired(seq=seq), now)
                     self._refresh_tick_pending(tx, rec, now)
                     await self._write(tx, rec)
                 fired += 1
