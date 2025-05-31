@@ -95,6 +95,12 @@ All notable changes to this project are documented here. The format follows
   parents and schedules follow the chain of attempts.
 - Benchmarks (`python -m benchmarks.bench`) for throughput, step fan-out, replay cost and
   tick latency on every store.
+- Server mode (`loomwork.server`): a Starlette HTTP API in front of any store, with
+  bearer tokens scoped to namespaces and permissions, per-namespace system workers, and a
+  JSON API for starting, signalling, querying and cancelling workflows from any language.
+- `HttpStore` (`loomwork.remote`) implements the full store contract over HTTP, so workers
+  and clients run against a server without database credentials. Timestamps travel as
+  offsets from the request time, so client and server clocks need not agree.
 
 ### Changed
 
