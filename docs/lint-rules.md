@@ -5,12 +5,12 @@ functions before it is deployed. Workflow code is re-executed from the start on 
 replay (see [ADR-0001](adr/0001-architecture.md)), so anything that can return a
 different value or perform real I/O the second time around will eventually produce a
 `NondeterminismError` at runtime, or worse, silently diverge. This document lists every
-built-in rule; run `python -m loomwork.lint --help` for the command line interface.
+built-in rule; run `loomwork lint --help` (or `python -m loomwork.lint --help`) for the command line interface.
 
 ```
-python -m loomwork.lint src/                 # human-readable text report
-python -m loomwork.lint src/ --format json    # machine-readable
-python -m loomwork.lint src/ --format sarif   # for GitHub code scanning
+loomwork lint src/                 # human-readable text report
+loomwork lint src/ --format json    # machine-readable
+loomwork lint src/ --format sarif   # for GitHub code scanning
 ```
 
 Exit codes: `0` clean, `1` findings were reported, `2` the invocation itself was wrong

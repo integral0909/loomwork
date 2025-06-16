@@ -1,0 +1,247 @@
+# The `loomwork` command
+
+Installing Loomwork puts a `loomwork` command on your path (also available as
+`python -m loomwork.cli`). It runs workers and the server, starts and inspects workflow
+runs, manages schedules, tokens and stores, and checks new workflow code before a deploy.
+
+```
+loomwork [--json] [--log-level LEVEL] COMMAND ...
+```
+
+| Command | What it does |
+| ------- | ------------ |
+| [`workflow`](#loomwork-workflow) (`wf`) | start, list, describe, signal, query, update, cancel and terminate runs |
+| [`schedule`](#loomwork-schedule) (`sched`) | create, pause, trigger, backfill, update and delete schedules |
+| [`worker`](#loomwork-worker) | run a worker for your workflow code |
+| [`server`](#loomwork-server) | run the HTTP server |
+| [`store`](#loomwork-store) | migrate, inspect and prune a store |
+| [`compat`](#loomwork-compat) | replay recorded histories with new workflow code |
+| [`lint`](#loomwork-lint) | static determinism checks |
+| [`cron`](#loomwork-cron) | print the next fire times of a cron expression |
+| [`token`](#loomwork-token) | manage the server's bearer tokens |
+
+## Conventions
+
+**Output.** Tables and `key: value` blocks go to stdout; remarks such as "started ..." or
+"no runs found" go to stderr, so stdout stays clean for pipes. `--json` (accepted anywhere
+on the line) switches stdout to JSON with the full records instead of the table columns:
+
+```
+loomwork workflow list --status failed --json | jq -r '.[].workflow_id'
+```
+
+**Exit codes.**
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | success |
+| 1 | the command ran, and the answer is "no": a run failed, a compatibility check found broken runs, a lint found problems, a cancel found the run already closed |
+| 2 | the command line was wrong: unknown option, invalid JSON argument, invalid duration or query |
+| 3 | the workflow, run or schedule does not exist |
+| 4 | the store or server could not be reached |
+| 130 | interrupted |
+
+**Durations** are seconds (`90`) or units: `250ms`, `30s`, `5m`, `2h`, `7d`, `1w`, and
+combinations such as `1h30m`.
+
+**Times** are ISO 8601 (`2024-05-01T12:00:00Z`; a time without an offset is UTC), `now`,
+or relative to now: `-2h`, `+30m`.
+
+**Workflow arguments** are JSON values, one per argument. Quote them for the shell:
+`'"text"'`, `42`, `'{"id": 7}'`. `@file.json` reads a value from a file and `@-` from
+stdin. With `--raw`, arguments are passed as plain strings instead.
+
+## Connecting
+
+Commands that touch workflows need a store. Flags win over environment variables:
+
+| Flag | Environment | |
+| ---- | ----------- | - |
+| `--store URL` | `LOOMWORK_STORE_URL` | `sqlite:///path/to.db`, `postgresql://...`, `memory://` |
+| `--server URL` | `LOOMWORK_SERVER_URL` | a [Loomwork server](server.md) |
+| `--token-file PATH` | `LOOMWORK_TOKEN_FILE` | file holding the server bearer token |
+| | `LOOMWORK_TOKEN` | the token itself |
+| `--namespace NAME` | `LOOMWORK_NAMESPACE` | server namespace (default `default`) |
+| `--attr-type NAME=TYPE` | `LOOMWORK_SEARCH_ATTRIBUTES` | search attribute types for queries (`tier=string,amount=float`) |
+| `--timeout SECONDS` | | server request timeout (default 30) |
+
+There is deliberately no `--token` flag: command lines are visible in the process list and
+end up in shell history. Through a server the CLI uses the same API as remote workers, so
+its token needs the `worker` or `admin` role.
+
+Passwords in store URLs are never printed; error messages show the URL with the password
+replaced.
+
+## `loomwork workflow`
+
+```
+loomwork workflow start NAME [ARG ...] [--id ID] [--attr KEY=VALUE ...]
+                        [--run-timeout D] [--execution-timeout D] [--retry-attempts N]
+                        [--wait [--wait-timeout D]] [--raw]
+loomwork workflow list [--workflow NAME] [--status STATUS] [-q QUERY] [--limit N]
+loomwork workflow describe WORKFLOW_ID [--run RUN_ID]
+loomwork workflow history  WORKFLOW_ID [--run RUN_ID] [--kind KIND ...] [--export | -o FILE]
+loomwork workflow result   WORKFLOW_ID [--run RUN_ID] [--wait [--wait-timeout D]]
+loomwork workflow signal   WORKFLOW_ID CHANNEL VALUE [--message-id ID] [--raw]
+loomwork workflow query    WORKFLOW_ID NAME [ARG ...] --app REF
+loomwork workflow update   WORKFLOW_ID NAME [ARG ...] [--update-id ID] [--wait-timeout D]
+loomwork workflow cancel   WORKFLOW_ID [--reason TEXT]
+loomwork workflow terminate WORKFLOW_ID --reason TEXT
+loomwork workflow steps    WORKFLOW_ID          # pending step jobs, attempts, last failure
+loomwork workflow children WORKFLOW_ID
+```
+
+A workflow id refers to its latest run; `--run` picks a specific one (and can be used
+without the id).
+
+```
+$ loomwork workflow start orders.checkout '{"order_id": "A-17"}' --id order-A-17 --attr tier=gold
+started order-A-17 (run 01J1V6Y4ZK2Q8R0M3S7N5T9W1X)
+
+$ loomwork workflow describe order-A-17
+workflow id:    order-A-17
+run id:         01J1V6Y4ZK2Q8R0M3S7N5T9W1X
+workflow:       orders.checkout
+status:         running
+created:        2024-06-01T09:12:44Z
+closed:         -
+history length: 9
+tick pending:   no
+attr.tier:      gold
+
+$ loomwork workflow list -q "status = 'failed' AND attr.tier = 'gold'" --attr-type tier=string
+```
+
+`result` prints the result as JSON and exits 0, or prints the failure and exits 1. With
+`--wait` it waits for a running run to close; `start --wait` starts a run and waits in one
+step, which makes the CLI usable from scripts that need the outcome.
+
+`history --export` (or `-o FILE`) writes the portable JSON document that
+[`compat --history`](#loomwork-compat) and the [testkit](testing.md) read, which is the
+way to reproduce a production problem locally.
+
+`query` replays the run in the CLI process, so it needs the workflow code (`--app`).
+
+## `loomwork schedule`
+
+```
+loomwork schedule create ID WORKFLOW [ARG ...] (--cron EXPR [--tz ZONE] | --every D)
+                         [--start-at T] [--end-at T] [--jitter D] [--overlap POLICY]
+                         [--catchup-window D] [--pause-on-failure] [--paused] [--note TEXT]
+loomwork schedule list
+loomwork schedule describe ID
+loomwork schedule pause ID [--note TEXT] / unpause ID [--note TEXT]
+loomwork schedule trigger ID                     # start one run now
+loomwork schedule backfill ID --from T [--to T]  # start runs for past fire times
+loomwork schedule upcoming ID [-n COUNT]
+loomwork schedule update ID [--cron EXPR | --every D] [--tz ZONE] [--jitter D]
+                         [--overlap POLICY] [--catchup-window D]
+                         [--pause-on-failure | --no-pause-on-failure] [--note TEXT]
+loomwork schedule delete ID                      # runs it started keep running
+```
+
+Overlap policies: `skip`, `buffer_one`, `allow_all`, `cancel_other`, `terminate_other`
+(see [schedules](guides/schedules.md)).
+
+```
+$ loomwork schedule create nightly-report reports.nightly --cron "0 3 * * *" --tz Europe/Stockholm
+created schedule nightly-report; next fire 2024-06-02 01:00:00+00:00
+$ loomwork schedule backfill nightly-report --from -3d
+backfill started 3 run(s)
+```
+
+## `loomwork worker`
+
+```
+loomwork worker --app REF [--worker-id ID]
+                [--workflow-concurrency N] [--step-concurrency N]
+                [--queue NAME ...] [--queue-limit QUEUE:rate=R,burst=B,concurrency=C ...]
+                [--no-timers] [--no-outbox] [--no-schedules] [--shutdown-grace D]
+                [--metrics-port PORT [--metrics-host HOST]]
+```
+
+Runs until `SIGINT` or `SIGTERM`, then stops claiming work and gives in-flight ticks and
+step attempts `--shutdown-grace` (default 10s) to finish; attempts still running after
+that are handed back so another worker restarts them at once. A second signal exits
+immediately.
+
+`--app` names your workflow code:
+
+| Reference | Loads |
+| --------- | ----- |
+| `myapp.workflows` | every `@workflow` and `@step` at the top level of the module |
+| `myapp.workflows:app` | a `Loomwork` app (its registry *and* its converter, including payload codecs) |
+| `myapp.workflows:registry` | a `Registry`, or a list of definitions |
+| `myapp.workflows:build` | a function returning any of the above |
+| `path/to/file.py[:name]` | the same, for a file that is not on the import path |
+
+The current directory is importable, as with `python -m`. When payloads are encrypted,
+reference the `Loomwork` app so the worker uses the same codec chain.
+
+`--metrics-port` serves Prometheus metrics at `/metrics` and a readiness probe at
+`/healthz` (see [monitoring](operations/monitoring.md)). It binds to `127.0.0.1` unless
+`--metrics-host` says otherwise.
+
+## `loomwork server`
+
+```
+loomwork server --config server.toml [--host HOST] [--port PORT]
+```
+
+See [server mode](server.md) for the configuration file.
+
+## `loomwork store`
+
+```
+loomwork store migrate                     # apply pending migrations, print the schema version
+loomwork store info                        # schema version, running/failed runs, outbox backlog
+loomwork store prune --older-than 30d [--dry-run] [--batch N] [--once]
+```
+
+`prune` deletes closed runs (records, histories and search attributes) in batches, one
+transaction per batch, until none older than the cutoff remain.
+
+## `loomwork compat`
+
+```
+loomwork compat --app REF [--workflow NAME ...] [--running-limit N] [--closed-limit N] [--all]
+loomwork compat --app REF --history FILE [--history FILE ...]
+```
+
+Replays recent histories with the code in `--app`: every running run (up to
+`--running-limit`) and a sample of recently closed runs per workflow. Prints the runs that
+would fail with a nondeterminism error and exits 1 if there are any, so it can gate a
+deploy pipeline. Runs of workflows that `--app` does not define are counted and skipped.
+See [versioning](guides/versioning.md).
+
+## `loomwork lint`
+
+Everything after `lint` is passed to the linter unchanged; `loomwork lint --help` shows its
+options. See [lint rules](lint-rules.md).
+
+## `loomwork cron`
+
+```
+$ loomwork cron "30 2 * * *" --tz Europe/Berlin -n 3 --after 2024-03-30
+2024-03-30T02:30:00+01:00
+2024-03-31T03:30:00+02:00
+2024-04-01T02:30:00+02:00
+```
+
+Useful for checking an expression before putting it in a schedule, including what happens
+around daylight saving changes.
+
+## `loomwork token`
+
+```
+loomwork token create ID --role ROLE [--role ROLE ...] [--namespace NS ...]
+                      [--description TEXT] [--replace] [-o FILE] [-f TOKENS_FILE]
+loomwork token list   [-f TOKENS_FILE]
+loomwork token revoke ID [ID ...] [-f TOKENS_FILE]
+loomwork token verify [-f TOKENS_FILE] < token.txt
+```
+
+The tokens file defaults to `$LOOMWORK_TOKENS_FILE` or `./tokens.json`. `create` prints the
+token once (or writes it to `-o FILE` with owner-only permissions); only a salted hash is
+stored. `--replace` rotates an existing token. A running server picks up changes within a
+second. `verify` reads the token from stdin so it does not appear in the process list.

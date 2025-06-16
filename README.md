@@ -81,7 +81,7 @@ async def main() -> None:
 | Visibility      | Search attributes and a small, safe query language compiled to SQL |
 | Security        | AES-256-GCM payload encryption with key rotation; token auth and RBAC in server mode |
 | Observability   | Telemetry hooks, Prometheus exposition, OpenTelemetry spans and metrics |
-| Tooling         | Determinism linter (text, JSON, SARIF), testkit with time skipping, benchmarks |
+| Tooling         | `loomwork` CLI, determinism linter (text, JSON, SARIF), testkit with time skipping, benchmarks |
 
 ## Installation
 
@@ -96,6 +96,19 @@ pip install "loomwork[server]"       # HTTP server and remote workers
 pip install "loomwork[otel]"         # OpenTelemetry integration
 ```
 
+## Command line
+
+```bash
+loomwork worker --app myapp.workflows --store sqlite:///loomwork.db
+loomwork workflow start orders.checkout '{"order_id": "A-17"}' --id order-A-17 --wait
+loomwork workflow list -q "status = 'failed'"
+loomwork workflow history order-A-17 -o order-A-17.json
+loomwork compat --app myapp.workflows        # will the new code replay recorded runs?
+loomwork schedule create nightly reports.nightly --cron "0 3 * * *" --tz Europe/Stockholm
+```
+
+See the [CLI reference](docs/cli.md).
+
 ## Documentation
 
 - [Concepts](docs/concepts.md): histories, ticks, replay and determinism
@@ -107,7 +120,7 @@ pip install "loomwork[otel]"         # OpenTelemetry integration
   [configuration](docs/operations/configuration.md),
   [monitoring](docs/operations/monitoring.md), [troubleshooting](docs/operations/troubleshooting.md),
   [server mode](docs/server.md)
-- Reference: [visibility queries](docs/visibility-queries.md),
+- Reference: [command line](docs/cli.md), [visibility queries](docs/visibility-queries.md),
   [payload encryption](docs/payload-encryption.md), [lint rules](docs/lint-rules.md),
   [architecture decisions](docs/adr/)
 - [Examples](examples/)

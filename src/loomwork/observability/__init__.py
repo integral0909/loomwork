@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from loomwork.observability.exporter import MetricsServer
 from loomwork.observability.metrics import (
     Counter,
     Gauge,
@@ -33,6 +34,7 @@ __all__ = [
     "LoggingTelemetry",
     "MetricsError",
     "MetricsRegistry",
+    "MetricsServer",
     "MetricsTelemetry",
     "NoopTelemetry",
     "OpenTelemetryTelemetry",

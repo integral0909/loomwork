@@ -43,7 +43,7 @@ print(check_history_file("broken.json", Registry([order])))
 
 Common causes: reading the clock or randomness directly, iterating a `set`, calling
 `os.environ`, conditional logic on data fetched outside a step, or reordering steps.
-Run `python -m loomwork.lint` on the workflow module.
+Run `loomwork lint` on the workflow module.
 
 ## `DeterminismViolation`
 

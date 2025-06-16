@@ -6,8 +6,7 @@ clean), and ``2`` when the invocation itself was wrong (bad arguments, a path th
 not exist, invalid configuration) - a distinction CI pipelines rely on to tell "your code
 has a problem" apart from "your command was wrong".
 
-A future top-level ``loomwork`` CLI will shell out to :func:`main`; this module does not
-build that CLI itself.
+``loomwork lint ...`` passes its arguments straight to :func:`main`.
 """
 
 from __future__ import annotations

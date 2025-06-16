@@ -38,6 +38,9 @@ server = ["starlette>=0.39,<0.40", "uvicorn>=0.30,<0.31", "httpx>=0.27,<0.28"]
 client = ["httpx>=0.27,<0.28"]
 otel = ["opentelemetry-api>=1.27,<1.28"]
 
+[project.scripts]
+loomwork = "loomwork.cli.main:run"
+
 [project.urls]
 Homepage = "https://github.com/integral0909/loomwork"
 Documentation = "https://github.com/integral0909/loomwork/tree/main/docs"
@@ -105,6 +108,9 @@ ignore = [
 # Queries are assembled from constant fragments only; every value is a bound parameter.
 "src/loomwork/store/sql/base.py" = ["S608"]
 "src/loomwork/observability/{telemetry,otel}.py" = ["ARG002"]  # hooks ignore some arguments
+# Subcommand registration is one long, flat list of argparse calls; splitting it up
+# would only scatter each command's options.
+"src/loomwork/cli/commands/*.py" = ["PLR0915"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"

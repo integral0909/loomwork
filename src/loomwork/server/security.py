@@ -30,9 +30,8 @@ async def authenticate(request: Request, *, namespace: str, capability: str) -> 
     if not header.lower().startswith("bearer "):
         raise unauthorized("missing bearer token")
     token = header[len("bearer ") :].strip()
-    assert server.tokens is not None
     try:
-        record = server.tokens.authenticate(token)
+        record = server.current_tokens().authenticate(token)
     except InvalidTokenError as exc:
         raise unauthorized(str(exc)) from exc
     try:

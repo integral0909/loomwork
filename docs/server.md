@@ -81,11 +81,10 @@ enabled = false
 ```
 
 ```
-python -m loomwork.server --config server.toml
+loomwork server --config server.toml            # or: python -m loomwork.server --config ...
 ```
 
-(A top-level `loomwork` CLI is expected to grow a `loomwork server` subcommand that wraps
-this, plus token-management commands built on `loomwork.server.auth.generate_token`.)
+`--host` and `--port` override the file; see the [CLI reference](cli.md).
 
 Programmatically:
 
@@ -101,7 +100,7 @@ await serve(config)                # or run it with uvicorn directly
 
 | Field | Default | Description |
 | ----- | ------- | ----------- |
-| `host` | `127.0.0.1` | Bind address for `python -m loomwork.server`. |
+| `host` | `127.0.0.1` | Bind address for `loomwork server`. |
 | `port` | `8080` | Bind port. |
 | `namespaces` | `{}` | Namespace name → store URL (`loomwork.store.store_from_url`). |
 | `auth.tokens_file` | none | Path to the JSON tokens file. Required unless `auth.disabled`. |
@@ -145,6 +144,20 @@ ever stored (a fresh random salt per token). The secret is 256 random bits, so i
 guessed, and a deliberately slow password hash would only add latency to every API call.
 The plaintext token is shown once, when it is generated. Token ids may contain letters,
 digits and `-` (not `_`, which separates the parts of a token).
+
+```
+loomwork token create ci-worker --role worker --namespace default -f tokens.json
+loomwork token list -f tokens.json
+loomwork token revoke ci-worker -f tokens.json
+```
+
+The server re-reads the tokens file when it changes (checked at most once a second), so
+creating, rotating (`token create --replace`) and revoking tokens take effect without a
+restart. A file that fails to parse, for example one caught half-written by an editor, is
+ignored with an error in the log and the previous tokens stay in force. The CLI writes the
+file atomically with owner-only permissions.
+
+Or from Python:
 
 ```python
 from loomwork.server.auth import Role, TokenFile, generate_token

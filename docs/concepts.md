@@ -84,7 +84,7 @@ runtime, even if the code catches the error. The [determinism linter](lint-rules
 finds the rest statically:
 
 ```bash
-python -m loomwork.lint src/
+loomwork lint src/
 ```
 
 ## Time

@@ -26,6 +26,7 @@
 
 ## Reference
 
+- [Command line](cli.md): the `loomwork` command
 - [Visibility queries](visibility-queries.md)
 - [Payload encryption](payload-encryption.md)
 - [Determinism lint rules](lint-rules.md)

@@ -8,7 +8,9 @@ once at startup and shared by every request for that namespace.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from loomwork.clock import Clock, SystemClock
 from loomwork.engine.engine import Engine
@@ -66,13 +68,18 @@ class ServerState:
         self.clock = clock or SystemClock()
         self.run_system_workers = run_system_workers
         self.tokens: TokenFile | None = None
+        self._tokens_path: Path | None = None
+        self._tokens_signature: tuple[int, int] | None = None
+        self._tokens_checked = 0.0
         self.namespaces: dict[str, NamespaceState] = {}
         if not config.auth.disabled:
             if config.auth.tokens_file is None:
                 raise ValueError(
                     "server.auth.tokens_file is required unless server.auth.disabled = true"
                 )
-            self.tokens = TokenFile.load(config.auth.tokens_file)
+            self._tokens_path = Path(config.auth.tokens_file)
+            self._tokens_signature = _signature(self._tokens_path)
+            self.tokens = TokenFile.load(self._tokens_path)
         else:
             logger.warning(
                 "loomwork server starting with auth.disabled = true: every request is "
@@ -100,6 +107,36 @@ class ServerState:
             self.namespaces[name] = NamespaceState(name, store, engine, worker)
             logger.info("namespace %r backed by %s", name, redact_url(url))
 
+    #: How often (seconds) a request may trigger a check of the token file for changes.
+    TOKENS_RECHECK_INTERVAL = 1.0
+
+    def current_tokens(self) -> TokenFile:
+        """The token file, reloaded when it changed on disk.
+
+        Revoking or rotating a token (``loomwork token revoke``) therefore takes effect
+        within about a second, without restarting the server. A file that fails to parse
+        (for example one caught half-written by an editor) is ignored and the previous
+        tokens stay in force; the problem is logged.
+        """
+        assert self.tokens is not None
+        assert self._tokens_path is not None
+        now = time.monotonic()
+        if now - self._tokens_checked < self.TOKENS_RECHECK_INTERVAL:
+            return self.tokens
+        self._tokens_checked = now
+        signature = _signature(self._tokens_path)
+        if signature is None or signature == self._tokens_signature:
+            return self.tokens
+        try:
+            reloaded = TokenFile.load(self._tokens_path)
+        except (OSError, ValueError, KeyError) as exc:
+            logger.error("ignoring unreadable tokens file %s: %s", self._tokens_path, exc)
+            return self.tokens
+        self._tokens_signature = signature
+        self.tokens = reloaded
+        logger.info("reloaded %d token(s) from %s", len(reloaded.tokens), self._tokens_path)
+        return reloaded
+
     def namespace(self, name: str) -> NamespaceState:
         try:
             return self.namespaces[name]
@@ -113,3 +150,11 @@ class ServerState:
     async def close(self) -> None:
         for ns in self.namespaces.values():
             await ns.close()
+
+
+def _signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)

@@ -1,8 +1,7 @@
 """``python -m loomwork.server --config path.toml``
 
-A minimal CLI entry point; a full ``loomwork`` command-line tool (with subcommands for
-generating tokens, running migrations, and so on) is expected to wrap :func:`serve` and
-:func:`~loomwork.server.auth.generate_token` directly rather than shelling out to this.
+Equivalent to ``loomwork server --config path.toml``, kept for environments that run
+modules rather than console scripts.
 """
 
 from __future__ import annotations

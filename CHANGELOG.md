@@ -101,6 +101,14 @@ All notable changes to this project are documented here. The format follows
 - `HttpStore` (`loomwork.remote`) implements the full store contract over HTTP, so workers
   and clients run against a server without database credentials. Timestamps travel as
   offsets from the request time, so client and server clocks need not agree.
+- The `loomwork` command: `workflow` (start, list, describe, history export, result,
+  signal, query, update, cancel, terminate), `schedule`, `worker` (graceful shutdown on
+  SIGTERM, queue limits, metrics port), `server`, `store` (migrate, info, prune),
+  `compat`, `lint`, `cron` and `token`. JSON output everywhere, documented exit codes.
+- `MetricsServer`: a dependency-free `/metrics` and `/healthz` endpoint for worker
+  processes.
+- The server reloads its tokens file when it changes, so revoking a token no longer needs
+  a restart.
 
 ### Changed
 

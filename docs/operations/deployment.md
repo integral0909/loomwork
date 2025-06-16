@@ -37,8 +37,20 @@ async with worker:
     await stop_signal.wait()
 ```
 
+Or, without writing a worker entry point at all, point the `loomwork worker` command at
+the module that defines your workflows and steps:
+
+```
+loomwork worker --app myapp.workflows --store "$LOOMWORK_STORE_URL" \
+    --step-concurrency 64 --metrics-port 9464
+```
+
+It shuts down gracefully on `SIGTERM` and serves Prometheus metrics and a `/healthz` probe
+on the metrics port ([CLI reference](../cli.md#loomwork-worker)).
+
 Split further with task queues: general workers for workflows and default steps,
-specialised workers for `gpu` or `payments` queues ([task queues](../guides/task-queues.md)).
+specialised workers for `gpu` or `payments` queues ([task queues](../guides/task-queues.md)):
+`loomwork worker --app myapp.workflows --queue gpu --queue-limit gpu:concurrency=2`.
 
 ## Server mode
 
@@ -50,8 +62,9 @@ services can start workflows and send signals with plain JSON. See
 ## Rolling deploys
 
 1. **Check compatibility** of the new workflow code against recorded histories
-   ([versioning](../guides/versioning.md)); fail the pipeline if runs would break.
-2. **Lint** workflow code for non-determinism (`python -m loomwork.lint`).
+   ([versioning](../guides/versioning.md)); fail the pipeline if runs would break:
+   `loomwork compat --app myapp.workflows` exits 1 when any run would.
+2. **Lint** workflow code for non-determinism (`loomwork lint src/`).
 3. Roll workers gradually. Old and new workers can run side by side. If an old worker
    picks up a run whose history was extended by new code, its replay fails with a
    nondeterminism error, which fails only that tick; the tick is retried and soon lands
@@ -66,7 +79,8 @@ hands back any attempt that is still running so another worker starts it immedia
 
 ## Database migrations
 
-Stores apply their schema migrations when opened. Migrations are append-only and
+Stores apply their schema migrations when opened; `loomwork store migrate` does just that
+as an explicit deploy step and prints the resulting schema version. Migrations are append-only and
 checksummed; PostgreSQL runs them under an advisory lock, so many processes can start at
 once. A database whose schema is newer than the installed Loomwork, or whose recorded
 migrations differ from the known ones, is refused with `MigrationError` instead of being
@@ -80,5 +94,6 @@ Closed runs keep their histories until you delete them:
 deleted = await store.delete_closed_before(now - timedelta(days=30))
 ```
 
-Run this periodically (a schedule is a good place). Deleting a run also deletes its
-search attributes. Running executions are never touched.
+Run this periodically (a schedule is a good place), or from cron with
+`loomwork store prune --older-than 30d` (add `--dry-run` to see what would go). Deleting
+a run also deletes its search attributes. Running executions are never touched.

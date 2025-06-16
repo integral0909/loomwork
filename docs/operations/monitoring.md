@@ -19,7 +19,20 @@ renders the Prometheus text format:
 | `loomwork_outbox_messages_total` | counter | | cross-run traffic |
 | `loomwork_worker_errors_total` | counter | `loop` | any value: check logs |
 
-Expose them from your application's HTTP server:
+`loomwork worker --metrics-port 9464` serves them at `http://127.0.0.1:9464/metrics`, with
+a `/healthz` readiness probe next to it. In your own process, `MetricsServer` does the same
+without a web framework:
+
+```python
+from loomwork.observability import MetricsServer, MetricsTelemetry
+
+metrics = MetricsTelemetry()
+app = Loomwork(..., telemetry=metrics)
+async with MetricsServer(metrics.registry, host="0.0.0.0", port=9464), app:
+    ...
+```
+
+Or expose them from your application's existing HTTP server:
 
 ```python
 metrics = MetricsTelemetry()
@@ -34,7 +47,8 @@ async def metrics_endpoint(request):
 Some signals live in the store rather than in one worker:
 
 - **Outbox backlog**: `await store.outbox_size()` should stay near zero; a growing
-  outbox means no worker has `run_outbox=True`.
+  outbox means no worker has `run_outbox=True`. `loomwork store info` prints it along with
+  the number of running and failed runs.
 - **Stuck runs**: `await client.query_runs("status = 'running' AND tick_failures > 5")`
   finds runs whose ticks keep failing; `last_tick_error` explains why.
 - **Old running runs**: `created_at < now() - interval '30 days' AND status = 'running'`.
