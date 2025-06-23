@@ -105,6 +105,12 @@ All notable changes to this project are documented here. The format follows
   signal, query, update, cancel, terminate), `schedule`, `worker` (graceful shutdown on
   SIGTERM, queue limits, metrics port), `server`, `store` (migrate, info, prune),
   `compat`, `lint`, `cron` and `token`. JSON output everywhere, documented exit codes.
+- Testkit (`loomwork.testing`): `WorkflowEnvironment` runs workflows in memory and skips
+  idle time automatically, so a thirty-day sleep finishes in milliseconds without ever
+  cutting a running step short; step mocks with call assertions; history assertions;
+  golden-history recording and replay checks; a pytest plugin with a `loomwork_env`
+  fixture.
+- `Registry.replace_step()` swaps a registered step's implementation deliberately.
 - `MetricsServer`: a dependency-free `/metrics` and `/healthz` endpoint for worker
   processes.
 - The server reloads its tokens file when it changes, so revoking a token no longer needs

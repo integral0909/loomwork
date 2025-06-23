@@ -348,6 +348,25 @@ class Registry:
             raise RegistrationError(f"step name {definition.name!r} is registered twice")
         self._steps[definition.name] = definition
 
+    def replace_step(self, definition: StepDefinition[Any, Any]) -> StepDefinition[Any, Any]:
+        """Swap the implementation registered under ``definition.name``.
+
+        :meth:`add_step` refuses a second definition for a name, to catch accidental
+        collisions; this is the deliberate counterpart, used by the testkit to mock steps.
+        Returns the definition that was replaced.
+
+        Raises:
+            NotFoundError: no step with that name is registered.
+            RegistrationError: ``definition`` is not a step.
+        """
+        if not isinstance(definition, StepDefinition):
+            raise RegistrationError(
+                f"{definition!r} is not a step; decorate it with @loomwork.step"
+            )
+        previous = self.step(definition.name)
+        self._steps[definition.name] = definition
+        return previous
+
     def workflow(self, name: str) -> WorkflowDefinition[Any, Any]:
         try:
             return self._workflows[name]
