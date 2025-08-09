@@ -111,6 +111,9 @@ All notable changes to this project are documented here. The format follows
   golden-history recording and replay checks; a pytest plugin with a `loomwork_env`
   fixture.
 - `Registry.replace_step()` swaps a registered step's implementation deliberately.
+- Seven example applications (order fulfilment saga, expense approval, bulk import,
+  scheduled reports, task queues, encrypted payments, versioned workflow), each tested
+  and lint-clean, and checked by CI.
 - `MetricsServer`: a dependency-free `/metrics` and `/healthz` endpoint for worker
   processes.
 - The server reloads its tokens file when it changes, so revoking a token no longer needs

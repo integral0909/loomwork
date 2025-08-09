@@ -93,6 +93,24 @@ def _split_global_flags(argv: list[str]) -> tuple[list[str], bool]:
     return result, json_output
 
 
+def _passthrough(arguments: list[str]) -> tuple[str, list[str]] | None:
+    """``(command, rest)`` when the command hands its arguments to another parser.
+
+    argparse cannot forward arguments that start with ``-`` (``loomwork lint --help``) to a
+    ``REMAINDER`` positional, so these commands are split off before it runs.
+    """
+    index = 0
+    while index < len(arguments):
+        arg = arguments[index]
+        if arg == "--log-level":
+            index += 2
+            continue
+        if arg.startswith("-"):
+            return None
+        return (arg, arguments[index + 1 :]) if arg in _PASSTHROUGH else None
+    return None
+
+
 def _configure_logging(level: str, command: str) -> None:
     if command in {"worker", "server"} and level == "warning":
         level = "info"
@@ -150,6 +168,11 @@ def main(
     """Run the CLI and return its exit code; never calls ``sys.exit``."""
     arguments, json_output = _split_global_flags(list(argv) if argv is not None else sys.argv[1:])
     console = Console(stdout, stderr, stdin=stdin)
+    forwarded = _passthrough(arguments)
+    if forwarded is not None:
+        from loomwork.lint.cli import main as lint_main
+
+        return lint_main(forwarded[1], prog="loomwork lint")
     parser = build_parser()
     try:
         args = parser.parse_args(arguments)

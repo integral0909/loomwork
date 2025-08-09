@@ -124,7 +124,7 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
-files = ["src/loomwork", "tests"]
+files = ["src/loomwork", "tests", "examples", "benchmarks"]
 
 [[tool.mypy.overrides]]
 module = "tests.*"

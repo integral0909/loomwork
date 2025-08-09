@@ -32,9 +32,9 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise LintUsageError(message)
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser(prog: str = "python -m loomwork.lint") -> argparse.ArgumentParser:
     parser = _ArgumentParser(
-        prog="python -m loomwork.lint",
+        prog=prog,
         description="Static determinism checks for Loomwork workflow functions.",
     )
     parser.add_argument("paths", nargs="+", help="files or directories to scan")
@@ -102,9 +102,9 @@ def _load_config(args: argparse.Namespace) -> LintConfig:
     return config
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, prog: str = "python -m loomwork.lint") -> int:
     """Run the linter. Returns the process exit code; never calls ``sys.exit``."""
-    parser = _build_parser()
+    parser = _build_parser(prog)
     stream = sys.stdout
     try:
         args = parser.parse_args(list(argv) if argv is not None else None)
@@ -113,6 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (LintUsageError, ConfigError) as exc:
         sys.stderr.write(f"loomwork.lint: error: {exc}\n")
         return 2
+    except SystemExit as exc:  # --help
+        return int(exc.code or 0)
 
     report = REPORTERS[args.format](result)
     if args.output is not None:

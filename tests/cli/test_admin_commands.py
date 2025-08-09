@@ -190,3 +190,14 @@ def test_cron_invalid(cli: Cli) -> None:
     result = cli("cron", "* * *")
     assert result.code == 2
     assert "invalid cron expression" in result.err
+
+
+def test_lint_help_reaches_the_linter(cli: Cli, capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli("lint", "--help").code == 0
+    assert capsys.readouterr().out.startswith("usage: loomwork lint")
+
+
+def test_lint_after_global_log_level(cli: Cli, tmp_path: Path) -> None:
+    clean = tmp_path / "clean.py"
+    clean.write_text("x = 1\n")
+    assert cli("--log-level", "debug", "lint", str(clean)).code == 0

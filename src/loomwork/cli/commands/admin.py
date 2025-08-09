@@ -169,7 +169,7 @@ async def compat(args: argparse.Namespace, console: Console) -> int:
 async def lint(args: argparse.Namespace, _console: Console) -> int:
     from loomwork.lint.cli import main as lint_main
 
-    return lint_main(args.lint_args)
+    return lint_main(args.lint_args, prog="loomwork lint")
 
 
 # --------------------------------------------------------------------------- cron
@@ -231,6 +231,8 @@ def register(subparsers: Any) -> None:
     p.add_argument("--all", action="store_true", help="list passing runs too")
     connected(p, compat)
 
+    # Listed for --help; main() forwards "lint ..." to the linter's own parser before
+    # this one ever sees it.
     p = subparsers.add_parser(
         "lint",
         help="check workflow code for non-determinism",
