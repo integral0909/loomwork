@@ -129,3 +129,14 @@ def test_tokens_file_from_environment(cli: Cli, tmp_path: Path, monkeypatch) -> 
     monkeypatch.setenv("LOOMWORK_TOKENS_FILE", str(path))
     cli.ok("token", "create", "e", "--role", "worker")
     assert path.exists()
+
+
+def test_if_missing_is_idempotent(cli: Cli, tmp_path: Path) -> None:
+    path, output = str(tmp_path / "tokens.json"), tmp_path / "worker.token"
+    args = ("token", "create", "w", "--role", "worker", "-f", path, "-o", str(output))
+    cli.ok(*args, "--if-missing")
+    first = output.read_text()
+    again = cli.ok(*args, "--if-missing")
+    assert "already exists" in again.err
+    assert output.read_text() == first
+    assert cli("token", "create", "w", "--role", "worker", "--replace", "--if-missing").code == 2

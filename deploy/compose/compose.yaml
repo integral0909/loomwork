@@ -1,0 +1,137 @@
+# A complete local deployment: PostgreSQL, a Loomwork server in front of it, and a worker
+# that runs the example order-fulfilment workflows over HTTP.
+#
+#   export POSTGRES_PASSWORD=$(openssl rand -hex 16)
+#   docker compose -f deploy/compose/compose.yaml up --build
+#
+# Then, from another shell (the admin token is written to the `secrets` volume):
+#
+#   docker compose -f deploy/compose/compose.yaml exec server \
+#       sh -c 'LOOMWORK_TOKEN_FILE=/var/lib/loomwork/secrets/admin.token \
+#              loomwork --json workflow list --server http://127.0.0.1:8080'
+#
+# Nothing here is suitable for production as is; see deploy/kubernetes/ for that.
+
+name: loomwork
+
+x-image: &image
+  image: loomwork-demo:0.1.0
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+    target: demo
+
+x-hardening: &hardening
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    image: postgres:16.4-bookworm
+    environment:
+      POSTGRES_USER: loomwork
+      POSTGRES_DB: loomwork
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD, e.g. to $(openssl rand -hex 16)}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "loomwork", "-d", "loomwork"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Applies schema migrations once, before the server starts.
+  migrate:
+    <<: [*image, *hardening]
+    command: ["store", "migrate"]
+    environment:
+      LOOMWORK_STORE_URL: postgresql://loomwork:${POSTGRES_PASSWORD}@postgres:5432/loomwork
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Creates the server's tokens file and one token each for the worker and an operator,
+  # unless they already exist. Tokens live only in the `secrets` volume.
+  tokens:
+    <<: [*image, *hardening]
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        loomwork token create worker --role worker --if-missing
+        -f /var/lib/loomwork/secrets/tokens.json -o /var/lib/loomwork/secrets/worker.token
+        && loomwork token create admin --role admin --namespace '*' --if-missing
+        -f /var/lib/loomwork/secrets/tokens.json -o /var/lib/loomwork/secrets/admin.token
+    user: "10001:10001"
+    volumes:
+      - secrets:/var/lib/loomwork/secrets
+    restart: "no"
+
+  server:
+    <<: [*image, *hardening]
+    command: ["server", "--config", "/etc/loomwork/server.toml"]
+    environment:
+      LOOMWORK_SERVER__NAMESPACES__DEFAULT: postgresql://loomwork:${POSTGRES_PASSWORD}@postgres:5432/loomwork
+    volumes:
+      - ./server.toml:/etc/loomwork/server.toml:ro
+      - secrets:/var/lib/loomwork/secrets:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      tokens:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=2).status != 200)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    <<: [*image, *hardening]
+    command:
+      - worker
+      - --app
+      - examples.order_fulfillment.workflows
+      - --server
+      - http://server:8080
+      - --step-concurrency
+      - "32"
+      - --shutdown-grace
+      - 30s
+      - --metrics-port
+      - "9464"
+      - --metrics-host
+      - 0.0.0.0
+    environment:
+      LOOMWORK_TOKEN_FILE: /var/lib/loomwork/secrets/worker.token
+    volumes:
+      - secrets:/var/lib/loomwork/secrets:ro
+    ports:
+      - "127.0.0.1:9464:9464"
+    stop_grace_period: 40s
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(urllib.request.urlopen('http://127.0.0.1:9464/healthz', timeout=2).status != 200)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  secrets:

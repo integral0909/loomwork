@@ -1,0 +1,106 @@
+# Operational jobs that talk to the database directly.
+#
+# The migration Job runs before a rollout (for example as an Argo CD PreSync hook or a
+# Helm pre-upgrade hook); stores also migrate on open, but doing it explicitly makes a
+# failed migration stop the deploy instead of crash-looping every server replica.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loomwork-migrate
+  labels:
+    app.kubernetes.io/name: loomwork
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loomwork
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/integral0909/loomwork:0.1.0
+          args: ["store", "migrate"]
+          env:
+            - name: LOOMWORK_STORE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loomwork-database
+                  key: store-url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+# Retention: delete runs that closed more than 30 days ago, every night.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: loomwork-retention
+  labels:
+    app.kubernetes.io/name: loomwork
+    app.kubernetes.io/component: retention
+spec:
+  schedule: "17 3 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: loomwork
+            app.kubernetes.io/component: retention
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: prune
+              image: ghcr.io/integral0909/loomwork:0.1.0
+              args: ["store", "prune", "--older-than", "30d", "--batch", "500"]
+              env:
+                - name: LOOMWORK_STORE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: loomwork-database
+                      key: store-url
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]

@@ -111,6 +111,10 @@ All notable changes to this project are documented here. The format follows
   golden-history recording and replay checks; a pytest plugin with a `loomwork_env`
   fixture.
 - `Registry.replace_step()` swaps a registered step's implementation deliberately.
+- Deployment kit (`deploy/`): a multi-stage container image running as an unprivileged
+  user, a Compose stack, and Kubernetes manifests (server, workers, migration Job,
+  retention CronJob, PodDisruptionBudgets, NetworkPolicies), all validated by tests.
+- `loomwork token create --if-missing` for idempotent bootstrap.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

@@ -65,6 +65,8 @@ dev = [
     "opentelemetry-api>=1.27,<1.28",
     "opentelemetry-sdk>=1.27,<1.28",
     "ruff>=0.6.9,<0.7",
+    "pyyaml>=6.0.2,<6.0.3",
+    "types-pyyaml>=6.0.12.20240917,<6.0.12.20241231",
 ]
 
 [tool.hatch.version]

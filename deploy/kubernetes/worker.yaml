@@ -1,0 +1,117 @@
+# Workers run your workflow code. They talk to the server over HTTP with a `worker`
+# token and hold no database credentials. Replace the image with one built FROM the
+# Loomwork image plus your code, and point --app at your module (see deploy/README.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loomwork-worker
+  labels:
+    app.kubernetes.io/name: loomwork
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loomwork
+      app.kubernetes.io/component: worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loomwork
+        app.kubernetes.io/component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Longer than --shutdown-grace, so in-flight steps finish (or are handed back)
+      # before the kubelet sends SIGKILL.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: worker
+          image: ghcr.io/integral0909/loomwork-demo:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - worker
+            - --app
+            - examples.order_fulfillment.workflows
+            - --server
+            - http://loomwork-server:8080
+            - --workflow-concurrency
+            - "8"
+            - --step-concurrency
+            - "32"
+            - --shutdown-grace
+            - 30s
+            - --metrics-port
+            - "9464"
+            - --metrics-host
+            - 0.0.0.0
+          env:
+            - name: LOOMWORK_TOKEN_FILE
+              value: /etc/loomwork/worker/token
+          ports:
+            - name: metrics
+              containerPort: 9464
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: worker-token
+              mountPath: /etc/loomwork/worker
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: worker-token
+          secret:
+            secretName: loomwork-worker-token
+            defaultMode: 0400
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loomwork-worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loomwork
+      app.kubernetes.io/component: worker

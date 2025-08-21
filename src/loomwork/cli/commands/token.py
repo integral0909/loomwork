@@ -42,8 +42,12 @@ def _save(tokens: TokenFile, path: Path) -> None:
 async def create(args: argparse.Namespace, console: Console) -> int:
     path = Path(args.file)
     tokens = _load(path, create=True)
-    if args.id in tokens.tokens and not args.replace:
-        raise UsageError(f"token {args.id!r} exists; pass --replace to rotate it")
+    if args.id in tokens.tokens:
+        if args.if_missing:
+            console.note(f"token {args.id} already exists; left unchanged")
+            return ExitCode.OK
+        if not args.replace:
+            raise UsageError(f"token {args.id!r} exists; pass --replace to rotate it")
     try:
         plaintext, record = generate_token(
             args.id, args.role, args.namespace or ["default"], description=args.description
@@ -151,7 +155,13 @@ def register(subparsers: Any) -> None:
         help="namespace the token may use (repeatable; '*' for all; default: default)",
     )
     p.add_argument("--description", default="")
-    p.add_argument("--replace", action="store_true", help="rotate an existing token")
+    existing = p.add_mutually_exclusive_group()
+    existing.add_argument("--replace", action="store_true", help="rotate an existing token")
+    existing.add_argument(
+        "--if-missing",
+        action="store_true",
+        help="do nothing if the token exists (for idempotent bootstrap scripts)",
+    )
     p.add_argument("--output", "-o", metavar="PATH", help="write the token here instead of stdout")
     file_argument(p)
     p.set_defaults(handler=create)

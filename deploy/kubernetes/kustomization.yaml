@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: loomwork
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - server.yaml
+  - worker.yaml
+  - jobs.yaml
+
+# Pin the image in one place; overlays override `newTag` per environment.
+images:
+  - name: ghcr.io/integral0909/loomwork
+    newTag: 0.1.0
+  - name: ghcr.io/integral0909/loomwork-demo
+    newTag: 0.1.0

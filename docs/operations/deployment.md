@@ -59,6 +59,14 @@ over HTTP with bearer tokens instead of holding database credentials, and non-Py
 services can start workflows and send signals with plain JSON. See
 [server mode](../server.md).
 
+## Containers and Kubernetes
+
+[`deploy/`](../../deploy/README.md) contains a hardened container image, a Compose stack
+(PostgreSQL, migrations, token bootstrap, server and worker) and a Kustomize base for
+Kubernetes with a migration Job, a retention CronJob, PodDisruptionBudgets,
+NetworkPolicies and the restricted Pod Security Standard. Tests check the manifests
+against the CLI and the configuration loader, so they stay valid as Loomwork changes.
+
 ## Rolling deploys
 
 1. **Check compatibility** of the new workflow code against recorded histories

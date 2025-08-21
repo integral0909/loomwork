@@ -1,0 +1,14 @@
+# Server configuration for the Compose stack. The namespace's store URL, which contains
+# the database password, is not in this file: Compose passes it in the
+# LOOMWORK_SERVER__NAMESPACES__DEFAULT environment variable.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[server.auth]
+tokens_file = "/var/lib/loomwork/secrets/tokens.json"
+
+[server.limits]
+long_poll_max_seconds = 20
+max_request_body_bytes = 10485760
