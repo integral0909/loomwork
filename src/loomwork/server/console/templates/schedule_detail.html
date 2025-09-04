@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ state.schedule_id }} -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>{{ state.schedule_id }}</h1>
+<p class="muted">{{ state.action.workflow_name }} &middot; {{ state.spec.describe() }}</p>
+
+<div class="card">
+  <div class="grid">
+    <div><span class="field-label">State</span><br>{{ "paused" if state.paused else "active" }}</div>
+    <div><span class="field-label">Overlap policy</span><br>{{ state.policy.overlap.value }}</div>
+    <div><span class="field-label">Catch-up window</span><br>{{ state.policy.catchup_window }}</div>
+    <div><span class="field-label">Pause on failure</span><br>{{ state.policy.pause_on_failure }}</div>
+    <div><span class="field-label">Next fire</span><br>{{ state.next_fire_at.isoformat() if state.next_fire_at else "-" }}</div>
+    <div><span class="field-label">Last evaluated</span><br>{{ state.last_evaluated.isoformat() if state.last_evaluated else "-" }}</div>
+    <div><span class="field-label">Started / skipped</span><br>{{ state.total_started }} / {{ state.total_skipped }}</div>
+    <div><span class="field-label">Created</span><br>{{ state.created_at.isoformat() }}</div>
+    <div><span class="field-label">Updated</span><br>{{ state.updated_at.isoformat() }}</div>
+  </div>
+  {% if state.note %}<p><span class="field-label">Note</span><br>{{ state.note }}</p>{% endif %}
+  {% if state.action.args %}
+  <p><span class="field-label">Arguments</span><br>
+    {% for arg in state.action.args %}{{ arg | describe_payload }}{% if not loop.last %}, {% endif %}{% endfor %}
+  </p>
+  {% endif %}
+</div>
+
+{% if upcoming %}
+<div class="card">
+  <h2>Upcoming fire times</h2>
+  <ul>{% for t in upcoming %}<li>{{ t.isoformat() }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Running</h2>
+  {% if state.running %}
+  <table>
+    <thead><tr><th>Nominal time</th><th>Workflow id</th><th>Run</th></tr></thead>
+    <tbody>
+      {% for run in state.running %}
+      <tr>
+        <td>{{ run.nominal_time.isoformat() }}</td>
+        <td>{{ run.workflow_id }}</td>
+        <td><a href="/console/{{ namespace }}/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Nothing running.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Recent runs</h2>
+  {% if state.recent %}
+  <table>
+    <thead><tr><th>Nominal time</th><th>Workflow id</th><th>Run</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for run in state.recent | reverse %}
+      <tr>
+        <td>{{ run.nominal_time.isoformat() }}</td>
+        <td>{{ run.workflow_id }}</td>
+        <td><a href="/console/{{ namespace }}/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
+        <td>{{ run.status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No runs yet.</p>
+  {% endif %}
+</div>
+
+{% if can_write %}
+<div class="card actions">
+  <form method="post" action="/console/{{ namespace }}/schedules/{{ state.schedule_id }}/{{ 'unpause' if state.paused else 'pause' }}">
+    <h3>{{ "Unpause" if state.paused else "Pause" }}</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><span class="field-label">Note</span><input type="text" name="note"></label>
+    <button type="submit" class="secondary">{{ "Unpause" if state.paused else "Pause" }}</button>
+  </form>
+
+  <form method="post" action="/console/{{ namespace }}/schedules/{{ state.schedule_id }}/trigger">
+    <h3>Trigger now</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted">Starts one run immediately, ignoring the overlap policy.</p>
+    <button type="submit">Trigger</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

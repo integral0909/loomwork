@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Runs -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>Runs -- {{ namespace }}</h1>
+
+<form class="filters" method="get" action="/console/{{ namespace }}/runs">
+  <label>
+    <span>Workflow name</span>
+    <input type="text" name="workflow_name" value="{{ workflow_name }}">
+  </label>
+  <label>
+    <span>Status</span>
+    <select name="status">
+      <option value="">any</option>
+      {% for s in statuses %}
+      <option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="query-field">
+    <span>Visibility query (overrides workflow name / status above)</span>
+    <input type="text" name="q" value="{{ query_text }}"
+           placeholder="status = 'failed' AND created_at >= now() - interval '1 day'">
+  </label>
+  <label>
+    <span>Limit</span>
+    <input type="number" name="limit" value="{{ limit }}" min="1" max="500">
+  </label>
+  <button type="submit">Search</button>
+</form>
+
+{% if search_attributes %}
+<p class="muted">Known search attributes:
+  {% for name, type in search_attributes.items() %}{{ name }} ({{ type }}){% if not loop.last %}, {% endif %}{% endfor %}
+</p>
+{% endif %}
+
+{% if query_error %}
+<div class="banner banner-error"><pre>{{ query_error }}</pre></div>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>Workflow id</th>
+      <th>Workflow name</th>
+      <th>Status</th>
+      <th>Created</th>
+      <th>Closed</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for record in records %}
+    <tr>
+      <td><a href="/console/{{ namespace }}/runs/{{ record.run_id }}">{{ record.workflow_id }}</a></td>
+      <td>{{ record.workflow_name }}</td>
+      <td><span class="status-pill status-{{ record.status.value }}">{{ record.status.value }}</span></td>
+      <td>{{ record.created_at.isoformat() }}</td>
+      <td>{{ record.closed_at.isoformat() if record.closed_at else "-" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No runs match.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

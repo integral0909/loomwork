@@ -34,6 +34,11 @@ either one an `HttpStore` and it drives the server instead of a local store, unc
 A Python caller almost always wants the worker API (i.e. `HttpStore`); reach for the
 control API only when there is no Loomwork Python process on that side of the connection.
 
+A third surface, the [operator web console](console.md), is mounted at `/console` for
+humans: browsing and filtering runs, inspecting a run's history, signalling/cancelling/
+terminating it, and viewing and controlling schedules, all server-rendered with no
+JavaScript.
+
 ## Namespaces
 
 Each namespace is an independent store, addressed by `/v1/namespaces/{namespace}/...`.

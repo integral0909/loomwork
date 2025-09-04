@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}{{ record.workflow_id }} -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>{{ record.workflow_id }}</h1>
+<p class="muted">run {{ record.run_id }} &middot; {{ record.workflow_name }}</p>
+
+<div class="card">
+  <div class="grid">
+    <div><span class="field-label">Status</span><br>
+      <span class="status-pill status-{{ record.status.value }}">{{ record.status.value }}</span>
+    </div>
+    <div><span class="field-label">Created</span><br>{{ record.created_at.isoformat() }}</div>
+    <div><span class="field-label">Closed</span><br>{{ record.closed_at.isoformat() if record.closed_at else "-" }}</div>
+    <div><span class="field-label">Cancel requested</span><br>{{ record.cancel_requested }}</div>
+    <div><span class="field-label">Close reason</span><br>{{ record.close_reason or "-" }}</div>
+    <div><span class="field-label">Tick failures</span><br>{{ record.tick_failures }}</div>
+    {% if record.last_tick_error %}
+    <div><span class="field-label">Last tick error</span><br>{{ record.last_tick_error }}</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Result</h2>
+  <p>{{ result_display }}</p>
+  {% if failures %}
+  <h2>Failure</h2>
+  {% for f in failures %}
+  <div class="grid">
+    <div><span class="field-label">{{ "Caused by" if not loop.first else "Message" }}</span><br>{{ f.message }}</div>
+    <div><span class="field-label">Type</span><br>{{ f.type }}</div>
+    <div><span class="field-label">Kind</span><br>{{ f.kind }}</div>
+    <div><span class="field-label">Non-retryable</span><br>{{ f.non_retryable }}</div>
+    {% if f.details is not none %}
+    <div><span class="field-label">Details</span><br>{{ f.details | describe_value }}</div>
+    {% endif %}
+    {% if f.attributes %}
+    <div><span class="field-label">Attributes</span><br>{{ f.attributes | describe_value }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Relationships</h2>
+  <ul>
+    {% if record.parent_run_id %}
+    <li>Parent: <a href="/console/{{ namespace }}/runs/{{ record.parent_run_id }}">{{ record.parent_run_id }}</a> (seq {{ record.parent_seq }})</li>
+    {% endif %}
+    {% if continued_from %}
+    <li>Continued from: <a href="/console/{{ namespace }}/runs/{{ continued_from }}">{{ continued_from }}</a></li>
+    {% endif %}
+    {% if record.continued_run_id %}
+    <li>Continued as: <a href="/console/{{ namespace }}/runs/{{ record.continued_run_id }}">{{ record.continued_run_id }}</a></li>
+    {% endif %}
+    {% for child in children %}
+    <li>Child: <a href="/console/{{ namespace }}/runs/{{ child.run_id }}">{{ child.workflow_id }}</a>
+      (<span class="status-pill status-{{ child.status.value }}">{{ child.status.value }}</span>)</li>
+    {% endfor %}
+    {% if not record.parent_run_id and not continued_from and not record.continued_run_id and not children %}
+    <li class="muted">No parent, continuation or children.</li>
+    {% endif %}
+  </ul>
+</div>
+
+{% if attributes %}
+<div class="card">
+  <h2>Search attributes</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Value</th></tr></thead>
+    <tbody>
+      {% for name, value in attributes.items() %}
+      <tr><td>{{ name }}</td><td>{{ value | describe_value }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if steps %}
+<div class="card">
+  <h2>Pending step jobs</h2>
+  <table>
+    <thead>
+      <tr><th>Step</th><th>Seq</th><th>Attempt</th><th>Lease</th><th>Last failure</th></tr>
+    </thead>
+    <tbody>
+      {% for step in steps %}
+      <tr>
+        <td>{{ step.step_name }}</td>
+        <td>{{ step.seq }}</td>
+        <td>{{ step.attempt }}</td>
+        <td>
+          {% if step.lease_owner %}{{ step.lease_owner }} until {{ step.lease_expires_at.isoformat() }}{% else %}-{% endif %}
+        </td>
+        <td>{{ step.last_failure.message if step.last_failure else "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>History</h2>
+  <table>
+    <thead><tr><th>#</th><th>Time</th><th>Kind</th><th>Details</th></tr></thead>
+    <tbody>
+      {% for ev in events %}
+      <tr>
+        <td>{{ ev.id }}</td>
+        <td>{{ ev.ts }}</td>
+        <td>{{ ev.kind }}</td>
+        <td>
+          {% for key, value in ev.items() %}
+          {% if key not in ("id", "ts", "kind") %}
+          <div><span class="field-label">{{ key }}</span> {{ value | describe_value }}</div>
+          {% endif %}
+          {% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if can_write %}
+<div class="card actions">
+  <form method="post" action="/console/{{ namespace }}/runs/{{ record.run_id }}/signal">
+    <h3>Send signal</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><span class="field-label">Channel</span><input type="text" name="channel" required></label>
+    <label><span class="field-label">Value (JSON, optional)</span>
+      <textarea name="value" placeholder="&quot;hello&quot; or {&quot;a&quot;: 1}"></textarea>
+    </label>
+    <button type="submit">Send signal</button>
+  </form>
+
+  <form method="post" action="/console/{{ namespace }}/runs/{{ record.run_id }}/cancel">
+    <h3>Request cancellation</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><span class="field-label">Reason</span><input type="text" name="reason"></label>
+    <button type="submit" class="secondary">Request cancel</button>
+  </form>
+
+  <form method="post" action="/console/{{ namespace }}/runs/{{ record.run_id }}/terminate">
+    <h3>Terminate</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><span class="field-label">Reason</span><input type="text" name="reason"></label>
+    <label>
+      <input type="checkbox" name="confirm" value="yes" required>
+      I understand this stops the run immediately without running any more workflow code.
+    </label>
+    <button type="submit" class="danger">Terminate</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

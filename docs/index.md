@@ -21,8 +21,11 @@
   rolling deploys, migrations, retention
 - [Configuration reference](operations/configuration.md)
 - [Monitoring](operations/monitoring.md): metrics, tracing, logs, store health
+- [Recovery and fleet operations](operations/recovery.md): resetting a run, batch
+  signal/cancel/terminate, history size limits
 - [Troubleshooting](operations/troubleshooting.md)
 - [Server mode](server.md)
+- [Operator web console](console.md)
 
 ## Reference
 

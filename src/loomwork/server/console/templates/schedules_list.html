@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Schedules -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>Schedules -- {{ namespace }}</h1>
+
+<table>
+  <thead>
+    <tr>
+      <th>Schedule</th>
+      <th>Workflow</th>
+      <th>When</th>
+      <th>State</th>
+      <th>Next fire</th>
+      <th>Running</th>
+      <th>Started</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for state in states %}
+    <tr>
+      <td><a href="/console/{{ namespace }}/schedules/{{ state.schedule_id }}">{{ state.schedule_id }}</a></td>
+      <td>{{ state.action.workflow_name }}</td>
+      <td>{{ state.spec.describe() }}</td>
+      <td>{{ "paused" if state.paused else "active" }}</td>
+      <td>{{ state.next_fire_at.isoformat() if state.next_fire_at else "-" }}</td>
+      <td>{{ state.running | length }}</td>
+      <td>{{ state.total_started }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">No schedules.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

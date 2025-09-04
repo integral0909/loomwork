@@ -115,6 +115,10 @@ All notable changes to this project are documented here. The format follows
   user, a Compose stack, and Kubernetes manifests (server, workers, migration Job,
   retention CronJob, PodDisruptionBudgets, NetworkPolicies), all validated by tests.
 - `loomwork token create --if-missing` for idempotent bootstrap.
+- Operator web console at `/console` in server mode: runs with visibility queries, run
+  detail with history timeline and pending steps, schedules, and signal, cancel,
+  terminate, pause and trigger actions. Token login with signed session cookies, CSRF
+  protection, role checks, a strict Content-Security-Policy and no JavaScript.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

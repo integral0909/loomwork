@@ -21,6 +21,9 @@
     [server.cors]
     enabled = false
 
+    [server.console]
+    enabled = true               # operator web console at /console; see docs/console.md
+
 Any field can be overridden by an environment variable named
 ``LOOMWORK_SERVER__<SECTION>__<FIELD>`` (double underscores separate nesting levels,
 matching the TOML table structure), for example ``LOOMWORK_SERVER__HOST=0.0.0.0`` or
@@ -96,6 +99,35 @@ class CorsConfig(BaseModel):
     allow_origins: list[str] = Field(default_factory=list)
 
 
+class ConsoleConfig(BaseModel):
+    """The operator web console mounted at ``/console`` (see ``docs/console.md``).
+
+    ``session_secret`` signs the console's session cookie with HMAC; leave it unset to
+    generate a random per-process key (sessions do not survive a restart). Set it
+    explicitly to keep operators logged in across restarts or when running several
+    server processes behind a load balancer.
+
+    ``search_attributes`` is a display hint only: it names and types search attributes
+    for the runs-list query box so operators do not have to guess them. It does not
+    change which attributes a query may actually reference -- that is controlled by the
+    engine's own :class:`~loomwork.engine.config.EngineConfig.search_attributes`.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = True
+    session_secret: str | None = None
+    session_ttl_seconds: float = 8 * 3600
+    search_attributes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("session_ttl_seconds")
+    @classmethod
+    def _positive_ttl(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("session_ttl_seconds must be positive")
+        return value
+
+
 class ServerConfig(BaseModel):
     """Top-level server configuration."""
 
@@ -108,6 +140,7 @@ class ServerConfig(BaseModel):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     cors: CorsConfig = Field(default_factory=CorsConfig)
+    console: ConsoleConfig = Field(default_factory=ConsoleConfig)
 
     @field_validator("namespaces")
     @classmethod

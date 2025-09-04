@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Loomwork console{% endblock %}</title>
+  <link rel="stylesheet" href="/console/static/console.css">
+</head>
+<body>
+  <header class="console-nav">
+    <span class="brand">Loomwork console</span>
+    {% if namespaces is defined and namespaces %}
+    <nav>
+      {% for ns in namespaces %}
+        <a href="/console/{{ ns }}/runs">{{ ns }}</a>
+      {% endfor %}
+    </nav>
+    {% endif %}
+    {% if namespace is defined %}
+    <nav>
+      <a href="/console/{{ namespace }}/runs">Runs</a>
+      <a href="/console/{{ namespace }}/schedules">Schedules</a>
+    </nav>
+    {% endif %}
+    {% if not auth_disabled and csrf_token is defined %}
+    <form method="post" action="/console/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="secondary">Sign out</button>
+    </form>
+    {% endif %}
+  </header>
+  <main>
+    {% if auth_disabled %}
+    <div class="banner banner-warning">
+      auth.disabled is set: every request is treated as an administrator in every
+      namespace. This is for local development only -- never run a server this way in
+      production.
+    </div>
+    {% endif %}
+    {% if flash %}
+    <div class="banner banner-{{ flash[0] }}">{{ flash[1] }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="console-footer">
+    Loomwork operator console -- see <code>docs/console.md</code> in the server's
+    documentation for what this page can and cannot do.
+  </footer>
+</body>
+</html>

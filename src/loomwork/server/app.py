@@ -26,6 +26,7 @@ from starlette.routing import Mount, Route
 from loomwork.clock import Clock
 from loomwork.server import control_api, worker_api
 from loomwork.server.config import ServerConfig
+from loomwork.server.console import build_console_app
 from loomwork.server.errors import install as install_error_handlers
 from loomwork.server.middleware import RequestContextMiddleware
 from loomwork.server.schemas import HealthResponse, ReadyResponse
@@ -100,6 +101,8 @@ def create_app(
         Mount("/v1/namespaces/{namespace}/control", routes=control_api.routes),
         Mount("/v1/namespaces/{namespace}", routes=worker_api.routes),
     ]
+    if config.console.enabled:
+        routes.append(Mount("/console", app=build_console_app(state)))
 
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.server = state
