@@ -119,6 +119,14 @@ All notable changes to this project are documented here. The format follows
   detail with history timeline and pending steps, schedules, and signal, cancel,
   terminate, pause and trigger actions. Token login with signed session cookies, CSRF
   protection, role checks, a strict Content-Security-Policy and no JavaScript.
+- History archives (`loomwork.archive`, `loomwork archive create|verify|list|show`):
+  closed runs written to checksummed, gzip-compressed JSON Lines segments with a
+  manifest, readable without decryption keys, and an archive-then-prune operation that
+  deletes nothing until the archive is verified on disk.
+- Replay debugger (`loomwork replay`): steps through a history tick by tick against
+  workflow code and explains the first divergence; can stop at a tick and run queries.
+- History graphs (`loomwork workflow graph`): steps, timers, children and waits as
+  Mermaid, Graphviz or a terminal timeline.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

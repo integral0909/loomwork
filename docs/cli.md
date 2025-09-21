@@ -15,6 +15,8 @@ loomwork [--json] [--log-level LEVEL] COMMAND ...
 | [`worker`](#loomwork-worker) | run a worker for your workflow code |
 | [`server`](#loomwork-server) | run the HTTP server |
 | [`store`](#loomwork-store) | migrate, inspect and prune a store |
+| [`archive`](#loomwork-archive) | write closed runs to long-term storage, and read them back |
+| [`replay`](#loomwork-replay) | step through a history tick by tick against workflow code |
 | [`compat`](#loomwork-compat) | replay recorded histories with new workflow code |
 | [`lint`](#loomwork-lint) | static determinism checks |
 | [`cron`](#loomwork-cron) | print the next fire times of a cron expression |
@@ -89,6 +91,7 @@ loomwork workflow cancel   WORKFLOW_ID [--reason TEXT]
 loomwork workflow terminate WORKFLOW_ID --reason TEXT
 loomwork workflow steps    WORKFLOW_ID          # pending step jobs, attempts, last failure
 loomwork workflow children WORKFLOW_ID
+loomwork workflow graph    WORKFLOW_ID [--run RUN_ID] --format mermaid|dot|text
 ```
 
 A workflow id refers to its latest run; `--run` picks a specific one (and can be used
@@ -121,6 +124,9 @@ step, which makes the CLI usable from scripts that need the outcome.
 way to reproduce a production problem locally.
 
 `query` replays the run in the CLI process, so it needs the workflow code (`--app`).
+
+`graph` renders the run's steps, timers, children and waits as a diagram; see
+[debugging](debugging.md#history-graphs).
 
 ## `loomwork schedule`
 
@@ -200,6 +206,40 @@ loomwork store prune --older-than 30d [--dry-run] [--batch N] [--once]
 
 `prune` deletes closed runs (records, histories and search attributes) in batches, one
 transaction per batch, until none older than the cutoff remain.
+
+## `loomwork archive`
+
+```
+loomwork archive create --older-than 30d --out DIR [--query Q] [--prune] [--segment-size SIZE]
+loomwork archive verify DIR
+loomwork archive list DIR [--workflow NAME]
+loomwork archive show DIR WORKFLOW_ID|--run RUN_ID [--export FILE]
+```
+
+Writes closed runs older than a cutoff to a directory of gzip-compressed JSON Lines
+segments plus a manifest, and reads them back streaming, without a store. `--query`
+narrows the selection with a [visibility query](visibility-queries.md) filter (no
+`ORDER BY` or `LIMIT`); `--prune` deletes the archived runs from the store once the
+archive is written, fsynced and independently re-verified, and cannot be combined with
+`--query` (it would delete runs the filtered archive never wrote). `--segment-size`
+(default `64MB`) controls when a segment rotates. `verify` recomputes every segment's
+checksum and reports the precise location of any corruption or truncation; `list` and
+`show` stream the archive. See [archiving](operations/archiving.md) for the format and
+its crash-safety guarantees.
+
+## `loomwork replay`
+
+```
+loomwork replay (--history FILE | --archive DIR --run RUN_ID | WORKFLOW_ID [--run RUN_ID])
+                --app REF [--until-tick N] [--query NAME]
+```
+
+Replays a history (from a run, an exported history file, or an [archive](operations/archiving.md))
+tick by tick against the code in `--app`, printing what each tick consumed and produced.
+Exits 1 if the code diverges from the recorded decisions, with a precise explanation of
+where and why. `--until-tick N` stops early; `--query NAME` then prints that
+zero-argument query's result at the stopping point. See
+[debugging](debugging.md#the-replay-debugger).
 
 ## `loomwork compat`
 

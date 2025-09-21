@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+from loomwork.cli.commands import tools
 from loomwork.cli.commands.common import (
     EXECUTION_HEADERS,
     add_app_argument,
@@ -405,6 +406,8 @@ def register(subparsers: Any) -> None:
     p.add_argument("--update-id", help="makes the request idempotent")
     p.add_argument("--wait-timeout", metavar="DURATION", help="give up waiting after this long")
     connected(p, update)
+
+    tools.register_graph(commands)
 
 
 __all__ = ["register"]
