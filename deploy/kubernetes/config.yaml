@@ -1,6 +1,6 @@
 # Non-secret configuration. The store URL (with the database password) comes from the
 # `loomwork-database` Secret through LOOMWORK_SERVER__NAMESPACES__DEFAULT; see
-# secrets.example.yaml.
+# credentials.example.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:

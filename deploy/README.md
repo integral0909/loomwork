@@ -53,7 +53,7 @@ the worker connects to it over HTTP with its token. The server listens on
 
 ```bash
 kubectl apply -f deploy/kubernetes/namespace.yaml
-# create the three Secrets (see kubernetes/secrets.example.yaml)
+# create the three Secrets (see kubernetes/credentials.example.yaml)
 kubectl apply -k deploy/kubernetes
 ```
 

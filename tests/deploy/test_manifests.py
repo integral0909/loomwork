@@ -75,7 +75,7 @@ def compose_services() -> dict[str, dict[str, Any]]:
 def test_kustomization_lists_every_manifest_except_the_secret_template() -> None:
     listed = set(yaml.safe_load((KUBERNETES / "kustomization.yaml").read_text())["resources"])
     on_disk = {p.name for p in KUBERNETES.glob("*.yaml")} - {"kustomization.yaml"}
-    assert on_disk - listed == {"secrets.example.yaml"}
+    assert on_disk - listed == {"credentials.example.yaml"}
 
 
 def test_expected_objects() -> None:
@@ -160,7 +160,7 @@ def test_container_commands_are_valid_cli_invocations(
 def test_secret_references_match_the_template() -> None:
     template = {
         doc["metadata"]["name"]: set(doc["stringData"])
-        for doc in documents(KUBERNETES / "secrets.example.yaml")
+        for doc in documents(KUBERNETES / "credentials.example.yaml")
     }
     for workload, spec, container in containers():
         for env in container.get("env", []):
@@ -191,7 +191,7 @@ def test_server_config_map_loads_and_points_at_the_mounted_tokens(tmp_path: Path
 def test_no_plaintext_credentials_outside_the_template() -> None:
     credential = re.compile(r"postgres(?:ql)?://[^:@/\s]+:(?!\$\{)[^@\s]+@")
     for path in [*KUBERNETES.glob("*.yaml"), COMPOSE, DEPLOY / "compose" / "server.toml"]:
-        if path.name == "secrets.example.yaml":
+        if path.name == "credentials.example.yaml":
             assert "REPLACE_ME" in path.read_text()
             continue
         assert not credential.search(path.read_text()), path
