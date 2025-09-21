@@ -187,7 +187,10 @@ def main(
     _configure_logging(args.log_level, args.command)
 
     try:
-        return int(asyncio.run(args.handler(args, console)))
+        # A private loop, not installed as the thread's current loop: calling main()
+        # from a program (or a test) must not replace, and so orphan, the caller's loop.
+        with asyncio.Runner(loop_factory=asyncio.new_event_loop) as runner:
+            return int(runner.run(args.handler(args, console)))
     except KeyboardInterrupt:
         console.note("interrupted")
         return ExitCode.INTERRUPTED

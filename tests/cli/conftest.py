@@ -91,7 +91,8 @@ def drive(
         finally:
             await store.close()
 
-    return asyncio.run(run())
+    with asyncio.Runner(loop_factory=asyncio.new_event_loop) as runner:
+        return runner.run(run())
 
 
 def finish(db_path: Path, workflow_id: str) -> Any:
