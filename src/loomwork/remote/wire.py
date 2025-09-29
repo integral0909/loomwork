@@ -35,7 +35,7 @@ from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event
 from loomwork.history.serde import HistoryFormatError, event_from_dict, event_to_dict
-from loomwork.options import StepOptions
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, StepOptions
 from loomwork.schedules.model import ScheduleState
 from loomwork.store.records import (
     ChildSpec,
@@ -230,6 +230,8 @@ def execution_record_to_wire(
         "parent_seq": record.parent_seq,
         "parent_close_policy": record.parent_close_policy,
         "continued_run_id": record.continued_run_id,
+        "reset_from_run_id": record.reset_from_run_id,
+        "history_bytes": record.history_bytes,
     }
 
 
@@ -268,6 +270,8 @@ def execution_record_from_wire(
             parent_seq=data.get("parent_seq"),
             parent_close_policy=str(data.get("parent_close_policy", "terminate")),
             continued_run_id=data.get("continued_run_id"),
+            reset_from_run_id=data.get("reset_from_run_id"),
+            history_bytes=int(data.get("history_bytes", 0)),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise WireFormatError(f"malformed execution record: {exc}") from exc
@@ -286,6 +290,44 @@ def execution_status_from_wire(value: str) -> ExecutionStatus:
         return ExecutionStatus(value)
     except ValueError as exc:
         raise WireFormatError(f"unknown execution status {value!r}") from exc
+
+
+def id_reuse_policy_from_wire(value: str) -> IdReusePolicy:
+    try:
+        return IdReusePolicy(value)
+    except ValueError as exc:
+        raise WireFormatError(f"unknown id reuse policy {value!r}") from exc
+
+
+def id_conflict_policy_from_wire(value: str) -> IdConflictPolicy:
+    try:
+        return IdConflictPolicy(value)
+    except ValueError as exc:
+        raise WireFormatError(f"unknown id conflict policy {value!r}") from exc
+
+
+# --------------------------------------------------------------------------- reset point
+
+_RESET_KIND = "kind"
+_RESET_TICK = "tick_count"
+
+
+def reset_point_to_wire(point: ResetPoint) -> dict[str, Any]:
+    return {_RESET_KIND: point.kind, _RESET_TICK: point.tick_count}
+
+
+def reset_point_from_wire(data: dict[str, Any]) -> ResetPoint:
+    try:
+        kind = str(_require(data, _RESET_KIND))
+        if kind == "first_tick":
+            return ResetPoint.first_tick()
+        if kind == "after_tick":
+            return ResetPoint.after_tick(int(_require(data, _RESET_TICK)))
+        if kind == "before_last_failure":
+            return ResetPoint.before_last_failure()
+        raise WireFormatError(f"unknown reset point kind {kind!r}")
+    except (KeyError, ValueError, TypeError) as exc:
+        raise WireFormatError(f"malformed reset point: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- step job

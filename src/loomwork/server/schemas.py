@@ -22,6 +22,18 @@ class StartWorkflowRequest(BaseModel):
     name: str
     args: list[Any] = Field(default_factory=list)
     workflow_id: str | None = None
+    id_reuse_policy: Literal[
+        "allow_duplicate", "allow_duplicate_failed_only", "reject_duplicate"
+    ] = "allow_duplicate"
+    id_conflict_policy: Literal["fail", "use_existing", "terminate_existing"] = "fail"
+
+
+class ResetWorkflowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    to: Literal["first_tick", "before_last_failure"] | None = None
+    after_tick: int | None = None
+    reason: str = ""
 
 
 class SignalRequest(BaseModel):
@@ -91,6 +103,8 @@ class ExecutionView(BaseModel):
     close_reason: str = ""
     parent_run_id: str | None = None
     parent_seq: int | None = None
+    continued_run_id: str | None = None
+    reset_from_run_id: str | None = None
 
 
 class ExecutionListResponse(BaseModel):

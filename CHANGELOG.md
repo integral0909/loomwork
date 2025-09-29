@@ -127,6 +127,15 @@ All notable changes to this project are documented here. The format follows
   workflow code and explains the first divergence; can stop at a tick and run queries.
 - History graphs (`loomwork workflow graph`): steps, timers, children and waits as
   Mermaid, Graphviz or a terminal timeline.
+- Workflow id policies: `IdReusePolicy` (allow, allow only after failure, reject) and
+  `IdConflictPolicy` (fail, use the running run, terminate it), enforced atomically by
+  every store.
+- Reset: `handle.reset(to=ResetPoint...)` restarts a run from a tick boundary, typically
+  just before the tick that failed, re-delivering signals and updates received since.
+- Batch operations: `Client.batch_signal`, `batch_cancel` and `batch_terminate` over a
+  visibility query, with bounded concurrency and a per-run outcome summary.
+- History limits: a warning (metric and log) and a hard limit on events and bytes per run
+  that fails the run cleanly with `HistoryLimitExceeded`.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

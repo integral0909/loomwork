@@ -14,11 +14,14 @@
 - [Task queues](guides/task-queues.md): routing, priorities, rate and concurrency limits
 - [Versioning](guides/versioning.md): safe changes, patches, compatibility checks
 - [Testing](testing.md): the testkit, time skipping and golden histories
+- [Debugging](debugging.md): the replay debugger and history graphs
 
 ## Operations
 
 - [Deployment](operations/deployment.md): embedded, dedicated workers, server mode,
   rolling deploys, migrations, retention
+- [Archiving](operations/archiving.md): writing closed runs to long-term storage and
+  reading them back, crash-safely
 - [Configuration reference](operations/configuration.md)
 - [Monitoring](operations/monitoring.md): metrics, tracing, logs, store health
 - [Recovery and fleet operations](operations/recovery.md): resetting a run, batch

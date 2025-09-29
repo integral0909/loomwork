@@ -21,6 +21,7 @@ from loomwork.engine.config import EngineConfig
 from loomwork.engine.engine import Engine
 from loomwork.errors import NotFoundError
 from loomwork.observability.telemetry import Telemetry
+from loomwork.options import IdConflictPolicy, IdReusePolicy
 from loomwork.retry import RetryPolicy
 from loomwork.sdk.definitions import Registry, StepDefinition, WorkflowDefinition
 from loomwork.store.base import Store
@@ -134,6 +135,8 @@ class Loomwork:
         run_timeout: timedelta | float | None = None,
         execution_timeout: timedelta | float | None = None,
         retry_policy: RetryPolicy | None = None,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> WorkflowHandle[R]: ...
 
     @overload
@@ -146,6 +149,8 @@ class Loomwork:
         run_timeout: timedelta | float | None = None,
         execution_timeout: timedelta | float | None = None,
         retry_policy: RetryPolicy | None = None,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> WorkflowHandle[Any]: ...
 
     async def start_workflow(
@@ -157,6 +162,8 @@ class Loomwork:
         run_timeout: timedelta | float | None = None,
         execution_timeout: timedelta | float | None = None,
         retry_policy: RetryPolicy | None = None,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> WorkflowHandle[Any]:
         self._check_known(workflow)
         return await self.client.start(
@@ -167,6 +174,8 @@ class Loomwork:
             run_timeout=run_timeout,
             execution_timeout=execution_timeout,
             retry_policy=retry_policy,
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
         )
 
     @overload

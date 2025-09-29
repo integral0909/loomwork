@@ -31,6 +31,17 @@ class EngineConfig:
             :func:`loomwork.continue_as_new_suggested` starts returning ``True``.
         search_attributes: declared search attribute types; queries may only reference
             declared attributes, and values set by clients are validated against it.
+        history_warning_events: history size (event count) at which a run logs one
+            warning and reports it through :meth:`~loomwork.observability.telemetry.
+            Telemetry.history_size_warning`. Purely informational.
+        history_limit_events: history size (event count) at which a run is failed
+            cleanly with :class:`~loomwork.errors.HistoryLimitExceeded`, recommending
+            continue-as-new. Checked before a tick runs, so it is deterministic and
+            never leaves a half-written tick (see ``docs/operations/recovery.md``).
+        history_warning_bytes, history_limit_bytes: the same two checks, evaluated
+            against the store's running total of encoded event bytes rather than event
+            count. ``None`` (the default) disables the byte-size checks; the event-count
+            ones above are always active.
     """
 
     tick_lease: timedelta = timedelta(seconds=30)
@@ -51,6 +62,10 @@ class EngineConfig:
     timer_batch_size: int = 100
     continue_as_new_after_events: int = 10_000
     search_attributes: SearchAttributes = field(default_factory=lambda: SearchAttributes({}))
+    history_warning_events: int = 10_000
+    history_limit_events: int = 50_000
+    history_warning_bytes: int | None = None
+    history_limit_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if self.tick_lease <= timedelta(0):
@@ -63,6 +78,20 @@ class EngineConfig:
             raise ValueError("poll_interval must be positive")
         if self.timer_batch_size < 1:
             raise ValueError("timer_batch_size must be >= 1")
+        if self.history_warning_events < 1:
+            raise ValueError("history_warning_events must be >= 1")
+        if self.history_limit_events < self.history_warning_events:
+            raise ValueError("history_limit_events must be >= history_warning_events")
+        if self.history_warning_bytes is not None and self.history_warning_bytes < 1:
+            raise ValueError("history_warning_bytes must be >= 1")
+        if self.history_limit_bytes is not None and (
+            self.history_warning_bytes is None
+            or self.history_limit_bytes < self.history_warning_bytes
+        ):
+            raise ValueError(
+                "history_limit_bytes must be >= history_warning_bytes, and "
+                "history_warning_bytes must be set"
+            )
 
     @property
     def default_step_options(self) -> StepOptions:

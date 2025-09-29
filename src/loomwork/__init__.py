@@ -6,7 +6,7 @@ decision they make, so a run survives crashes and deploys by replaying its histo
 
 from loomwork._version import __version__
 from loomwork.app import Loomwork
-from loomwork.client import Client, WorkflowHandle
+from loomwork.client import BatchError, BatchResult, Client, WorkflowHandle
 from loomwork.clock import Clock, ManualClock, SystemClock
 from loomwork.codec import DataConverter, Payload
 from loomwork.engine.config import EngineConfig
@@ -17,6 +17,8 @@ from loomwork.errors import (
     ChildWorkflowError,
     DeterminismViolation,
     FailureError,
+    HistoryLimitExceeded,
+    InvalidResetPointError,
     LoomworkError,
     NondeterminismError,
     NotFoundError,
@@ -28,12 +30,19 @@ from loomwork.errors import (
     WorkflowCanceledError,
     WorkflowClosedError,
     WorkflowFailedError,
+    WorkflowIdReuseRejectedError,
     WorkflowTerminatedError,
     WorkflowTimedOutError,
 )
 from loomwork.failure import FailureInfo
 from loomwork.info import StepInfo, WorkflowInfo
-from loomwork.options import ParentClosePolicy, StepOptions
+from loomwork.options import (
+    IdConflictPolicy,
+    IdReusePolicy,
+    ParentClosePolicy,
+    ResetPoint,
+    StepOptions,
+)
 from loomwork.retry import RetryPolicy
 from loomwork.sdk import (
     Channel,
@@ -86,6 +95,8 @@ __all__ = [
     "start_child",
     "update",
     "ApplicationError",
+    "BatchError",
+    "BatchResult",
     "CanceledFailure",
     "Client",
     "Clock",
@@ -97,6 +108,10 @@ __all__ = [
     "ExecutionStatus",
     "FailureError",
     "FailureInfo",
+    "HistoryLimitExceeded",
+    "IdConflictPolicy",
+    "IdReusePolicy",
+    "InvalidResetPointError",
     "Loomwork",
     "LoomworkError",
     "ManualClock",
@@ -106,6 +121,7 @@ __all__ = [
     "NotInWorkflowError",
     "Payload",
     "Registry",
+    "ResetPoint",
     "RetryPolicy",
     "StepDefinition",
     "StepError",
@@ -121,6 +137,7 @@ __all__ = [
     "WorkflowDefinition",
     "WorkflowFailedError",
     "WorkflowHandle",
+    "WorkflowIdReuseRejectedError",
     "WorkflowInfo",
     "WorkflowTerminatedError",
     "WorkflowTimedOutError",

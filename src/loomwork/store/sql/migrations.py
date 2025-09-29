@@ -347,6 +347,15 @@ _0006_POSTGRES: tuple[str, ...] = (
     "ON lw_search_attributes (run_id, name) WHERE value_type <> 'keyword'",
 )
 
+
+# ---------------------------------------------------------------------------------------
+# 0007: reset lineage and running history size (for EngineConfig.history_limit_bytes)
+
+_0007 = (
+    "ALTER TABLE lw_executions ADD COLUMN reset_from_run_id TEXT",
+    "ALTER TABLE lw_executions ADD COLUMN history_bytes INTEGER NOT NULL DEFAULT 0",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
@@ -354,6 +363,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "schedules", _0004_SQLITE, _0004_POSTGRES),
     Migration(5, "continue as new", _0005, _0005),
     Migration(6, "search attributes", _0006_SQLITE, _0006_POSTGRES),
+    Migration(7, "reset lineage and history size", _0007, _0007),
 )
 
 

@@ -14,11 +14,13 @@ import pytest
 
 from loomwork.codec import default_converter
 from loomwork.errors import (
+    InvalidResetPointError,
     LeaseLostError,
     NotFoundError,
     ScheduleConflictError,
     ScheduleExistsError,
     WorkflowAlreadyStartedError,
+    WorkflowIdReuseRejectedError,
 )
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
@@ -36,7 +38,7 @@ from loomwork.history.events import (
     WorkflowStarted,
     WorkflowTerminated,
 )
-from loomwork.options import StepOptions
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, StepOptions
 from loomwork.schedules.model import (
     ScheduleAction,
     ScheduledRun,
@@ -233,6 +235,225 @@ class StoreConformance:
         assert await store.get_step_jobs("r1") == []
         assert await store.next_timer_at() is None
         assert not await store.request_cancel("r1", "", T0)
+
+    # ------------------------------------------------------------------ id policies
+
+    async def test_id_conflict_fail_is_default(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        rec2 = record("r2", workflow_id="wf-1")
+        with pytest.raises(WorkflowAlreadyStartedError) as info:
+            await store.create_execution(rec2, started(rec2), T0)
+        assert info.value.run_id == "r1"
+
+    async def test_id_conflict_use_existing(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        rec2 = record("r2", workflow_id="wf-1")
+        result, _ = await store.create_execution(
+            rec2, started(rec2), T0, id_conflict_policy=IdConflictPolicy.USE_EXISTING
+        )
+        assert result.run_id == "r1"
+        with pytest.raises(NotFoundError):
+            await store.get_execution("r2")
+
+    async def test_id_conflict_terminate_existing(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            new_steps=[job("r1", 1)],
+            new_timers=[TimerRecord("r1", 1, T0 + timedelta(hours=1))],
+        )
+        rec2 = record("r2", workflow_id="wf-1")
+        result, _ = await store.create_execution(
+            rec2, started(rec2), T0, id_conflict_policy=IdConflictPolicy.TERMINATE_EXISTING
+        )
+        assert result.run_id == "r2"
+        old = await store.get_execution("r1")
+        assert old.status is ExecutionStatus.TERMINATED
+        assert old.close_reason == "superseded by id conflict policy"
+        assert await store.get_step_jobs("r1") == []
+        assert (await store.get_execution("r2")).status is ExecutionStatus.RUNNING
+        assert (await store.find_execution("wf-1")).run_id == "r2"
+
+    async def test_id_reuse_allow_duplicate_is_default(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        await store.terminate("r1", "", T0)
+        await self.create(store, "r2", workflow_id="wf-1")
+        assert (await store.find_execution("wf-1")).run_id == "r2"
+
+    async def test_id_reuse_reject_duplicate(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        await store.terminate("r1", "", T0)
+        rec2 = record("r2", workflow_id="wf-1")
+        with pytest.raises(WorkflowIdReuseRejectedError) as info:
+            await store.create_execution(
+                rec2, started(rec2), T0, id_reuse_policy=IdReusePolicy.REJECT_DUPLICATE
+            )
+        assert info.value.run_id == "r1"
+        with pytest.raises(NotFoundError):
+            await store.get_execution("r2")
+
+    async def test_id_reuse_failed_only(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-completed")
+        await self.claim(store)
+        await self.commit(
+            store, "r1", consumed=1, close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD)
+        )
+        rejected = record("r2", workflow_id="wf-completed")
+        with pytest.raises(WorkflowIdReuseRejectedError):
+            await store.create_execution(
+                rejected,
+                started(rejected),
+                T0,
+                id_reuse_policy=IdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+            )
+
+        await self.create(store, "r3", workflow_id="wf-failed")
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r3",
+            consumed=1,
+            close=CloseOutcome(
+                ExecutionStatus.FAILED, failure=FailureInfo(message="boom", type="Boom")
+            ),
+        )
+        allowed = record("r4", workflow_id="wf-failed")
+        created, _ = await store.create_execution(
+            allowed, started(allowed), T0, id_reuse_policy=IdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
+        )
+        assert created.run_id == "r4"
+
+    # ------------------------------------------------------------------ reset
+
+    async def test_reset_reconstructs_an_open_step(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            decisions=[StepScheduled(seq=1, step_name="charge", args=[PAYLOAD])],
+            new_steps=[job("r1", 1, "charge")],
+        )
+        # The step never finished: the run is stuck, exactly the recovery scenario.
+        old, new = await store.reset_run(
+            "r1", "r1-reset", ResetPoint.after_tick(1), "fix deployed", T0
+        )
+        assert old.status is ExecutionStatus.TERMINATED
+        assert old.continued_run_id == "r1-reset"
+        assert await store.get_step_jobs("r1") == []
+
+        assert new.status is ExecutionStatus.RUNNING
+        assert new.reset_from_run_id == "r1"
+        assert new.workflow_id == "wf-1"
+        history = await store.load_history("r1-reset")
+        assert [e.event_id for e in history] == [1, 2, 3]
+        assert [type(e) for e in history] == [WorkflowStarted, TickCompleted, StepScheduled]
+        new_jobs = await store.get_step_jobs("r1-reset")
+        assert [j.seq for j in new_jobs] == [1]
+        assert new_jobs[0].step_name == "charge"
+        assert new_jobs[0].job_id != "job-r1-1"  # a fresh job, not the old (deleted) one
+
+    async def test_reset_lets_a_fixed_step_redo_its_work(self, store: Store) -> None:
+        """The point of resetting past a failed step is that the *new* run's step
+        worker executes it again (presumably with the bug fixed) -- not that the old
+        failure is replayed into the new run, which would just reproduce it."""
+        await self.create(store, "r1", workflow_id="wf-1")
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            decisions=[StepScheduled(seq=1, step_name="charge", args=[PAYLOAD])],
+            new_steps=[job("r1", 1, "charge")],
+        )
+        # An unrelated tick happens first (so it, and everything after it, is what
+        # gets dropped)...
+        await store.append_input("r1", SignalReceived(channel="c", payload=PAYLOAD), T0)
+        await self.claim(store)
+        await self.commit(store, "r1", consumed=4)
+        # ...and only then does the step fail (a bug). The next tick would fail the
+        # run, but nobody has claimed it yet: still just a dangling input.
+        await store.append_input(
+            "r1", StepFailed(seq=1, failure=FailureInfo(message="bug", type="Bug")), T0
+        )
+
+        old, new = await store.reset_run(
+            "r1", "r1-reset", ResetPoint.after_tick(1), "fix deployed", T0
+        )
+        assert old.status is ExecutionStatus.TERMINATED
+        history = await store.load_history("r1-reset")
+        assert not any(isinstance(e, StepFailed) for e in history)
+        assert any(isinstance(e, SignalReceived) for e in history)  # the unrelated tick's input
+        new_rec = await store.get_execution("r1-reset")
+        # The signal was consumed by the dropped tick 2, so tick 1's own consumed_through
+        # leaves it pending again -- correctly: the new run has not yet reacted to it.
+        assert new_rec.tick_pending
+        assert [j.seq for j in await store.get_step_jobs("r1-reset")] == [1]
+
+    async def test_reset_to_first_tick_redelivers_pending_inputs(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        await store.append_input("r1", SignalReceived(channel="c", payload=PAYLOAD), T0)
+        old, new = await store.reset_run("r1", "r1-reset", ResetPoint.first_tick(), "", T0)
+        assert old.status is ExecutionStatus.TERMINATED
+        history = await store.load_history("r1-reset")
+        assert [type(e) for e in history] == [WorkflowStarted, SignalReceived]
+        assert [e.event_id for e in history] == [1, 2]  # redelivered as a fresh event
+        new_rec = await store.get_execution("r1-reset")
+        assert new_rec.consumed_through == 0
+        assert new_rec.tick_pending
+
+    async def test_reset_before_last_failure_keeps_earlier_ticks(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            decisions=[StepScheduled(seq=1, step_name="charge", args=[PAYLOAD])],
+            new_steps=[job("r1", 1, "charge")],
+        )
+        await store.append_input("r1", StepCompleted(seq=1, result=PAYLOAD), T0)
+        await self.claim(store)
+        failure = FailureInfo(message="boom", type="Boom")
+        await self.commit(
+            store, "r1", consumed=4, close=CloseOutcome(ExecutionStatus.FAILED, failure=failure)
+        )
+        closed = await store.get_execution("r1")
+        assert closed.status is ExecutionStatus.FAILED  # a bug turned a real failure
+
+        old, new = await store.reset_run(
+            "r1", "r1-reset", ResetPoint.before_last_failure(), "bug fixed", T0
+        )
+        # The old run's own outcome is left alone: only its forward link changes.
+        assert old.status is ExecutionStatus.FAILED
+        assert old.failure is not None and old.failure.message == "boom"
+        assert old.continued_run_id == "r1-reset"
+
+        history = await store.load_history("r1-reset")
+        # Tick 1 committed only events 1-3; event 4 (StepCompleted) arrived afterwards
+        # and is dropped along with tick 2, so the step gets to run again.
+        assert [e.event_id for e in history] == [1, 2, 3]
+        assert not any(isinstance(e, WorkflowCompleted) for e in history)
+        new_rec = await store.get_execution("r1-reset")
+        assert new_rec.status is ExecutionStatus.RUNNING
+        assert new_rec.consumed_through == 1
+        assert not new_rec.tick_pending  # nothing pending: only the reconstructed job
+        assert [j.seq for j in await store.get_step_jobs("r1-reset")] == [1]
+
+    async def test_reset_invalid_tick_count(self, store: Store) -> None:
+        await self.create(store, "r1", workflow_id="wf-1")
+        with pytest.raises(InvalidResetPointError):
+            await store.reset_run("r1", "r1-reset", ResetPoint.after_tick(1), "", T0)
+        with pytest.raises(NotFoundError):
+            await store.get_execution("r1-reset")
+
+    async def test_reset_missing_run(self, store: Store) -> None:
+        with pytest.raises(NotFoundError):
+            await store.reset_run("nope", "new", ResetPoint.first_tick(), "", T0)
 
     # ------------------------------------------------------------------ ticks
 

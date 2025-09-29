@@ -17,6 +17,10 @@ Shared by the engine, workers and clients of one deployment. Pass the same objec
 | `timer_batch_size` | 100 | Timers fired, and outbox messages relayed, per store call. |
 | `continue_as_new_after_events` | 10000 | History size at which `continue_as_new_suggested()` returns `True`. |
 | `search_attributes` | empty | Declared search attribute types; queries may only reference declared attributes. |
+| `history_warning_events` | 10000 | History size (event count) at which a run logs one warning and reports it through `Telemetry.history_size_warning`. |
+| `history_limit_events` | 50000 | History size (event count) at which a run is failed cleanly with `HistoryLimitExceeded`, recommending continue-as-new. Checked before a tick runs, so the failure is deterministic. |
+| `history_warning_bytes` | `None` (disabled) | Same as `history_warning_events`, evaluated against the store's running total of encoded event bytes instead of event count. |
+| `history_limit_bytes` | `None` (disabled) | Same as `history_limit_events`, evaluated against encoded event bytes. Setting it requires `history_warning_bytes` to be set too. |
 
 ## `WorkerOptions`
 

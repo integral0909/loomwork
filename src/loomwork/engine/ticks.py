@@ -20,8 +20,15 @@ from loomwork.codec.converter import DataConverter
 from loomwork.codec.transform import CodecBoundary
 from loomwork.engine.cache import ReplayerCache
 from loomwork.engine.config import EngineConfig
-from loomwork.errors import LeaseLostError, NondeterminismError
-from loomwork.history.events import SignalReceived, TickCompleted, WorkflowStarted
+from loomwork.errors import HistoryLimitExceeded, LeaseLostError, NondeterminismError
+from loomwork.failure import FailureInfo
+from loomwork.history.events import (
+    Event,
+    SignalReceived,
+    TickCompleted,
+    WorkflowFailed,
+    WorkflowStarted,
+)
 from loomwork.ids import new_id
 from loomwork.observability.telemetry import NoopTelemetry, Telemetry, TickReport
 from loomwork.retry import RetryPolicy
@@ -85,6 +92,16 @@ class TickProcessor:
         self._rng = random.Random()
         self.ticks_completed = 0
         self.ticks_failed = 0
+        # Best-effort, this worker's own memory: which runs it has already reported a
+        # history-size warning for, per unit. History growth also happens outside of
+        # tick processing (a step or timer outcome arriving is a plain append), so the
+        # threshold can already be crossed by the time a tick is next claimed; checking
+        # a persisted "warned" flag would need a store round trip or a schema field for
+        # a purely informational signal, so this checks the record already in hand
+        # instead and accepts that a run reprocessed by a different worker (or one whose
+        # cache of this set was never populated) may warn again.
+        self._warned_events: set[str] = set()
+        self._warned_bytes: set[str] = set()
 
     async def claim(self) -> ExecutionRecord | None:
         """Lease a run with a pending tick of a registered workflow, if there is one."""
@@ -134,6 +151,8 @@ class TickProcessor:
     ) -> tuple[str, int, str | None]:
         """Run the tick; returns (outcome, number of commands, error message)."""
         run_id = record.run_id
+        commands = 0
+        self._check_history_warning(record)
         try:
             events = await self.store.load_history(run_id, after_id=replayer.last_event_id)
             replayer.feed(await self.boundary.decode(events))
@@ -145,10 +164,15 @@ class TickProcessor:
                     record, TickOutcome(self.worker_id, record.consumed_through, self.clock.now())
                 )
                 return "closed", 0, None
-            live = replayer.live_tick(self.clock.now())
-            if self.boundary.active:
-                live = dataclasses.replace(live, commands=await self.boundary.encode(live.commands))
-            outcome = self._build_outcome(record, live, replayer.instance)
+            outcome = self._history_limit_outcome(record)
+            if outcome is None:
+                live = replayer.live_tick(self.clock.now())
+                if self.boundary.active:
+                    live = dataclasses.replace(
+                        live, commands=await self.boundary.encode(live.commands)
+                    )
+                outcome = self._build_outcome(record, live, replayer.instance)
+                commands = len(live.commands)
             committed = await self._commit(record, outcome)
         except LeaseLostError as exc:
             replayer.close()
@@ -166,17 +190,82 @@ class TickProcessor:
                 break
         if outcome.close is not None:
             replayer.close()
+            self._warned_events.discard(run_id)
+            self._warned_bytes.discard(run_id)
         else:
             self.cache.put(run_id, replayer)
         if not committed:
             return "empty", 0, None
         return (
             ("completed" if outcome.close is not None else "progressed"),
-            len(live.commands),
+            commands,
             None,
         )
 
-    async def _commit(self, record: ExecutionRecord, outcome: TickOutcome) -> list[object]:
+    def _history_limit_outcome(self, record: ExecutionRecord) -> TickOutcome | None:
+        """A synthetic failing tick if ``record`` already reached its history limit.
+
+        Checked against the history size as of the *last committed* tick (before this
+        one runs), so the decision is deterministic and identical across retries: no
+        workflow code executes, so nothing about it can vary with the worker or the
+        wall clock. A run that reaches the limit stays failed; every later claim of its
+        (now non-running) execution is impossible, so this never re-fires.
+        """
+        if record.last_event_id >= self.config.history_limit_events:
+            size, unit = record.last_event_id, "events"
+        elif (
+            self.config.history_limit_bytes is not None
+            and record.history_bytes >= self.config.history_limit_bytes
+        ):
+            size, unit = record.history_bytes, "bytes"
+        else:
+            return None
+        failure = FailureInfo.from_exception(
+            HistoryLimitExceeded(
+                f"history reached the configured limit of {size} {unit}; call "
+                "loomwork.continue_as_new() well before this point to keep it bounded"
+            )
+        )
+        logger.error(
+            "run %s of %s failed: history limit reached (%d %s)",
+            record.run_id,
+            record.workflow_name,
+            size,
+            unit,
+        )
+        return TickOutcome(
+            worker_id=self.worker_id,
+            consumed_through=record.consumed_through,
+            time=self.clock.now(),
+            decisions=[WorkflowFailed(failure=failure)],
+            close=CloseOutcome(ExecutionStatus.FAILED, failure=failure),
+        )
+
+    def _check_history_warning(self, record: ExecutionRecord) -> None:
+        """Report ``history_warning_events``/``history_warning_bytes``, at most once per
+        run per unit, using only the (already committed) counts on ``record`` -- the
+        state as of this tick's claim, which reflects every append so far, whether from
+        a tick or a step/timer outcome arriving on its own."""
+        run_id = record.run_id
+        if record.last_event_id >= self.config.history_warning_events and run_id not in (
+            self._warned_events
+        ):
+            self._warned_events.add(run_id)
+            self.telemetry.history_size_warning(
+                run_id, record.workflow_name, record.last_event_id, "events"
+            )
+        warn_bytes = self.config.history_warning_bytes
+        if (
+            warn_bytes is not None
+            and record.history_bytes >= warn_bytes
+            and run_id not in self._warned_bytes
+        ):
+            self._warned_bytes.add(run_id)
+            self.telemetry.history_size_warning(
+                run_id, record.workflow_name, record.history_bytes, "bytes"
+            )
+
+    async def _commit(self, record: ExecutionRecord, outcome: TickOutcome) -> list[Event]:
         events = await self.store.complete_tick(
             record.run_id, self.worker_id, outcome, self.clock.now()
         )

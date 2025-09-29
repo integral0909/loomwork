@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event, StepCompleted, StepFailed, WorkflowStarted
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.schedules.model import ScheduleState
 
 if TYPE_CHECKING:
@@ -32,6 +33,30 @@ from loomwork.store.records import (
     StepJob,
     TickOutcome,
 )
+
+#: Statuses that satisfy IdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY: the latest run did
+#: not complete successfully. CONTINUED_AS_NEW is deliberately excluded even though it is
+#: not a failure either: in practice it is never the *latest* run of a workflow id (its
+#: successor, created in the same transaction, immediately takes that place), and
+#: treating it as reusable would let a caller race a continuation still being written.
+_REUSE_FAILED_ONLY_STATUSES = frozenset(
+    {
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELED,
+        ExecutionStatus.TERMINATED,
+        ExecutionStatus.TIMED_OUT,
+    }
+)
+
+
+def id_reuse_allowed(policy: IdReusePolicy, latest_status: ExecutionStatus) -> bool:
+    """Whether ``policy`` allows starting a new run given the workflow id's latest
+    (closed) run status. Shared by every store so the rule is identical everywhere."""
+    if policy is IdReusePolicy.ALLOW_DUPLICATE:
+        return True
+    if policy is IdReusePolicy.REJECT_DUPLICATE:
+        return False
+    return latest_status in _REUSE_FAILED_ONLY_STATUSES
 
 
 class Store(abc.ABC):
@@ -57,13 +82,36 @@ class Store(abc.ABC):
         started: WorkflowStarted,
         now: datetime,
         extra_inputs: Sequence[Event] = (),
+        *,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> tuple[ExecutionRecord, Event]:
         """Insert a new running execution whose history starts with ``started``,
         followed by ``extra_inputs`` (used by signal-with-start).
 
+        The workflow id's existing runs, if any, are checked and acted on atomically in
+        the same transaction that inserts the new row, so two concurrent callers can
+        never both believe they won a ``TERMINATE_EXISTING`` race or both see "no
+        running execution" for ``REJECT_DUPLICATE``:
+
+        * If a run of ``record.workflow_id`` is currently running, ``id_conflict_policy``
+          decides: ``FAIL`` raises :class:`~loomwork.errors.WorkflowAlreadyStartedError`;
+          ``USE_EXISTING`` does not create a new run and instead returns the running
+          execution's current record (paired with the given ``started``, which is not
+          persisted); ``TERMINATE_EXISTING`` terminates it (recorded reason: "superseded
+          by id conflict policy") and proceeds to create the new run in the same
+          transaction.
+        * Otherwise, if the workflow id has at least one previous (closed) run,
+          ``id_reuse_policy`` decides: ``ALLOW_DUPLICATE`` always proceeds;
+          ``ALLOW_DUPLICATE_FAILED_ONLY`` proceeds only if the latest run did not
+          complete successfully; ``REJECT_DUPLICATE`` never proceeds. Either rejecting
+          case raises :class:`~loomwork.errors.WorkflowIdReuseRejectedError`.
+
         Raises:
-            WorkflowAlreadyStartedError: another run with the same workflow id is
-                still running.
+            WorkflowAlreadyStartedError: ``id_conflict_policy`` is ``FAIL`` (the
+                default) and another run with the same workflow id is still running.
+            WorkflowIdReuseRejectedError: ``id_reuse_policy`` forbids starting a new
+                run given the workflow id's latest (closed) run.
         """
 
     @abc.abstractmethod
@@ -111,6 +159,47 @@ class Store(abc.ABC):
         """Close the run immediately without involving workflow code.
 
         Returns ``False`` if the run was already closed.
+        """
+
+    @abc.abstractmethod
+    async def reset_run(
+        self,
+        run_id: str,
+        new_run_id: str,
+        to: ResetPoint,
+        reason: str,
+        now: datetime,
+    ) -> tuple[ExecutionRecord, ExecutionRecord]:
+        """Start ``new_run_id`` as ``run_id``'s history truncated at ``to``.
+
+        Atomically, in one transaction per run touched:
+
+        1. If ``run_id`` is still running, it is terminated (``reason`` recorded, and
+           its ``continued_run_id`` set to ``new_run_id``); step jobs and timers of
+           ``run_id`` are deleted as part of that close, exactly as any other
+           termination. If it was already closed, only ``continued_run_id`` is set
+           (its status, result and failure are untouched).
+        2. A new execution ``new_run_id`` is created for the same workflow id, whose
+           history is a byte-for-byte prefix of ``run_id``'s history: every event up to
+           and including the tick boundary ``to`` resolves to (event ids are preserved).
+           ``new_run_id.reset_from_run_id`` is set to ``run_id``.
+        3. Every *input* event of ``run_id`` after that boundary (signals, updates,
+           step or timer outcomes that already arrived, ...) is re-delivered to
+           ``new_run_id`` as a freshly appended input, so nothing sent to the old run is
+           lost. Decision events after the boundary are dropped: that is the point of
+           resetting.
+        4. Steps and timers that ``to`` leaves outstanding (a step scheduled by a kept
+           tick with no matching outcome in the kept history, likewise for timers) are
+           recreated for ``new_run_id`` so live processing can complete them; none of
+           ``run_id``'s step jobs or timers are copied or reused.
+
+        Returns ``(old_record, new_record)`` after the transaction(s).
+
+        Raises:
+            NotFoundError: ``run_id`` does not exist.
+            InvalidResetPointError: ``to`` does not resolve against ``run_id``'s history
+                (for example, :meth:`~loomwork.options.ResetPoint.after_tick` with a
+                count higher than the number of ticks the run completed).
         """
 
     # ------------------------------------------------------------------ ticks

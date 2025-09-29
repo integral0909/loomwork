@@ -6,7 +6,7 @@ import enum
 import re
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from loomwork.retry import RetryPolicy
 
@@ -22,6 +22,94 @@ class ParentClosePolicy(enum.StrEnum):
     TERMINATE = "terminate"
     REQUEST_CANCEL = "request_cancel"
     ABANDON = "abandon"
+
+
+class IdReusePolicy(enum.StrEnum):
+    """What starting a workflow id may do when its *latest* run has already closed.
+
+    Evaluated only when there is no currently running execution of the id; see
+    :class:`IdConflictPolicy` for that case.
+    """
+
+    ALLOW_DUPLICATE = "allow_duplicate"
+    """Always start a new run. The default, and the historical behaviour."""
+
+    ALLOW_DUPLICATE_FAILED_ONLY = "allow_duplicate_failed_only"
+    """Start a new run only if the latest run did not complete successfully (it failed,
+    was cancelled, was terminated, or timed out). Raises
+    :class:`~loomwork.errors.WorkflowIdReuseRejectedError` if the latest run completed."""
+
+    REJECT_DUPLICATE = "reject_duplicate"
+    """Never start a new run while any run (open or closed) has used this id. Raises
+    :class:`~loomwork.errors.WorkflowIdReuseRejectedError`."""
+
+
+class IdConflictPolicy(enum.StrEnum):
+    """What starting a workflow id should do when it is *currently running*."""
+
+    FAIL = "fail"
+    """Raise :class:`~loomwork.errors.WorkflowAlreadyStartedError`. The default, and the
+    historical behaviour."""
+
+    USE_EXISTING = "use_existing"
+    """Return a handle to the already-running execution instead of starting a new one."""
+
+    TERMINATE_EXISTING = "terminate_existing"
+    """Terminate the running execution and start the new run in its place, atomically:
+    no worker ever observes both runs active for the same workflow id."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResetPoint:
+    """Where to truncate a run's history when resetting it (see :meth:`Engine.reset`).
+
+    A reset point always names a **tick boundary**: a freeze-frame of the run's history
+    exactly as it stood the moment some tick committed (its ``TickCompleted`` plus the
+    decision events it produced), with everything from that point on dropped -- including
+    any input that arrived before the *next* tick ran but that this tick itself never
+    consumed. Construct one with a factory method rather than the constructor.
+    """
+
+    _kind: Literal["first_tick", "after_tick", "before_last_failure"]
+    _tick: int | None = None
+
+    @classmethod
+    def first_tick(cls) -> ResetPoint:
+        """Keep only ``WorkflowStarted``: the new run replays from scratch."""
+        return cls("first_tick")
+
+    @classmethod
+    def after_tick(cls, count: int) -> ResetPoint:
+        """Keep the first ``count`` completed ticks (and drop everything after).
+
+        ``count=0`` is equivalent to :meth:`first_tick`.
+        """
+        if count < 0:
+            raise ValueError("count must be >= 0")
+        return cls("after_tick", count)
+
+    @classmethod
+    def before_last_failure(cls) -> ResetPoint:
+        """Keep every completed tick except the run's last one.
+
+        Since a tick that raises :class:`~loomwork.errors.NondeterminismError` is never
+        committed to history (ADR-0002), the tick that produced a run's final, recorded
+        outcome (a business failure, a cancellation, a termination, ...) is always its
+        *last* committed tick. Dropping that tick reverts the decisions it made (for
+        example, the step call whose result triggered a bad code path) while keeping
+        everything that came before. A run with zero or one completed ticks resets to
+        :meth:`first_tick`.
+        """
+        return cls("before_last_failure")
+
+    @property
+    def kind(self) -> Literal["first_tick", "after_tick", "before_last_failure"]:
+        return self._kind
+
+    @property
+    def tick_count(self) -> int | None:
+        """The ``count`` given to :meth:`after_tick`; ``None`` for other kinds."""
+        return self._tick
 
 
 def as_timedelta(value: timedelta | float | None) -> timedelta | None:

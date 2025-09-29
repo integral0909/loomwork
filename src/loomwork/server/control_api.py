@@ -18,12 +18,14 @@ from starlette.routing import Route
 
 from loomwork.codec.converter import default_converter
 from loomwork.history.events import UpdateCompleted
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.server.auth import audit
 from loomwork.server.errors import bad_request
 from loomwork.server.responses import event_view, execution_view, failure_view, payload_view
 from loomwork.server.schemas import (
     ReasonRequest,
     RequestUpdateRequest,
+    ResetWorkflowRequest,
     SignalRequest,
     SignalWithStartRequest,
     StartWorkflowRequest,
@@ -68,7 +70,13 @@ async def start_workflow(request: Request) -> JSONResponse:
     ns = _namespace(request)
     body = await _model(request, StartWorkflowRequest)
     args = default_converter.encode_args(body.args)
-    record = await ns.engine.start_workflow(body.name, args, workflow_id=body.workflow_id)
+    record = await ns.engine.start_workflow(
+        body.name,
+        args,
+        workflow_id=body.workflow_id,
+        id_reuse_policy=IdReusePolicy(body.id_reuse_policy),
+        id_conflict_policy=IdConflictPolicy(body.id_conflict_policy),
+    )
     _audit(request, token.id, "start_workflow", record.run_id)
     return JSONResponse(execution_view(record), status_code=201)
 
@@ -210,6 +218,27 @@ async def terminate_workflow(request: Request) -> JSONResponse:
     return JSONResponse({"ok": ok})
 
 
+async def reset_workflow(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    run_id = request.path_params["run_id"]
+    body = await _model(request, ResetWorkflowRequest)
+    if (body.to is None) == (body.after_tick is None):
+        raise bad_request("exactly one of 'to' and 'after_tick' is required")
+    to = (
+        ResetPoint.after_tick(body.after_tick)
+        if body.after_tick is not None
+        else (
+            ResetPoint.first_tick() if body.to == "first_tick" else ResetPoint.before_last_failure()
+        )
+    )
+    record = await ns.engine.reset(run_id, to=to, reason=body.reason)
+    _audit(request, token.id, "reset_workflow", record.run_id)
+    return JSONResponse(execution_view(record), status_code=201)
+
+
 async def workflow_result(request: Request) -> JSONResponse:
     token = await authenticate(
         request, namespace=_namespace_name(request), capability="control_read"
@@ -235,6 +264,7 @@ routes = [
     Route("/workflows/{run_id}/updates/{update_id}", wait_update, methods=["GET"]),
     Route("/workflows/{run_id}/cancel", cancel_workflow, methods=["POST"]),
     Route("/workflows/{run_id}/terminate", terminate_workflow, methods=["POST"]),
+    Route("/workflows/{run_id}/reset", reset_workflow, methods=["POST"]),
     Route("/workflows/{run_id}/result", workflow_result, methods=["GET"]),
 ]
 

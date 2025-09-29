@@ -223,3 +223,80 @@ async def test_duplicate_workflow_id_is_409(control_client: httpx.AsyncClient) -
     )
     assert second.status_code == 409
     assert second.json()["code"] == "workflow_already_started"
+
+
+async def test_start_with_use_existing_conflict_policy(control_client: httpx.AsyncClient) -> None:
+    first = await control_client.post(
+        "/workflows", json={"name": "control.has_update", "workflow_id": "use-existing-1"}
+    )
+    assert first.status_code == 201
+    second = await control_client.post(
+        "/workflows",
+        json={
+            "name": "control.has_update",
+            "workflow_id": "use-existing-1",
+            "id_conflict_policy": "use_existing",
+        },
+    )
+    assert second.status_code == 201
+    assert second.json()["run_id"] == first.json()["run_id"]
+
+
+async def test_start_with_reject_duplicate_reuse_policy(
+    control_client: httpx.AsyncClient,
+) -> None:
+    started = await control_client.post(
+        "/workflows",
+        json={"name": "control.echo", "args": ["a"], "workflow_id": "reject-dup-1"},
+    )
+    run_id = started.json()["run_id"]
+    await _wait_status(control_client, run_id, "completed")
+
+    rejected = await control_client.post(
+        "/workflows",
+        json={
+            "name": "control.echo",
+            "args": ["b"],
+            "workflow_id": "reject-dup-1",
+            "id_reuse_policy": "reject_duplicate",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "workflow_id_reuse_rejected"
+
+
+async def test_reset_workflow(control_client: httpx.AsyncClient) -> None:
+    started = await control_client.post(
+        "/workflows", json={"name": "control.waits_for_signal", "workflow_id": "reset-1"}
+    )
+    run_id = started.json()["run_id"]
+
+    reset = await control_client.post(
+        f"/workflows/{run_id}/reset",
+        json={"to": "first_tick", "reason": "operator reset"},
+    )
+    assert reset.status_code == 201
+    new_run_id = reset.json()["run_id"]
+    assert new_run_id != run_id
+
+    old = await control_client.get(f"/workflows/{run_id}")
+    assert old.json()["status"] == "terminated"
+    assert old.json()["continued_run_id"] == new_run_id
+
+    reply = await control_client.post(
+        f"/workflows/{new_run_id}/signal", json={"channel": "greet", "value": "hi"}
+    )
+    assert reply.status_code == 204
+    result = await control_client.get(f"/workflows/{new_run_id}/result", params={"timeout": 5})
+    assert result.json()["result"] == "hi"
+
+
+async def test_reset_requires_exactly_one_of_to_or_after_tick(
+    control_client: httpx.AsyncClient,
+) -> None:
+    started = await control_client.post(
+        "/workflows", json={"name": "control.waits_for_signal", "workflow_id": "reset-bad"}
+    )
+    run_id = started.json()["run_id"]
+    response = await control_client.post(f"/workflows/{run_id}/reset", json={"reason": "x"})
+    assert response.status_code == 400

@@ -14,7 +14,9 @@ Lock ordering
 from __future__ import annotations
 
 import abc
+import asyncio
 import dataclasses
+import random
 from collections.abc import Collection, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta
@@ -27,6 +29,7 @@ from loomwork.errors import (
     ScheduleConflictError,
     ScheduleExistsError,
     WorkflowAlreadyStartedError,
+    WorkflowIdReuseRejectedError,
 )
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
@@ -41,12 +44,13 @@ from loomwork.history.events import (
     WorkflowTimedOut,
 )
 from loomwork.history.serde import event_from_dict
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.schedules.model import ScheduleState
 from loomwork.visibility.attributes import attribute_rows, decode_attributes
 
 if TYPE_CHECKING:
     from loomwork.visibility.schema import SearchAttributes
-from loomwork.store.base import Store
+from loomwork.store.base import Store, id_reuse_allowed
 from loomwork.store.closing import (
     DEADLINE_TIMER_SEQ,
     child_start_failed_event,
@@ -74,6 +78,7 @@ from loomwork.store.records import (
     StepJob,
     TickOutcome,
 )
+from loomwork.store.reset import ResetPlan, plan_reset, reconstruct_step_job, reconstruct_timer
 from loomwork.store.sql import codec
 from loomwork.store.sql.migrations import Dialect
 
@@ -94,6 +99,13 @@ class SqlTransaction(Protocol):
     def notify(self, topic: str) -> None:
         """Publish ``topic`` once the transaction commits."""
         ...
+
+
+#: create_execution's retry budget for IdConflictPolicy.TERMINATE_EXISTING racing a
+#: concurrent creation of the same, previously nonexistent, workflow id. A jittered
+#: backoff between attempts (below) keeps many simultaneous racers from repeatedly
+#: colliding in lockstep.
+_MAX_CREATE_ATTEMPTS = 20
 
 
 def _in_clause(column: str, values: Collection[str]) -> tuple[str, list[str]]:
@@ -151,7 +163,7 @@ class SQLStore(Store, abc.ABC):
                 consumed_through = ?, tick_pending = ?, tick_ready_at = ?, tick_failures = ?,
                 last_tick_error = ?, lease_owner = ?, lease_expires_at = ?,
                 cancel_requested = ?, result = ?, failure = ?, close_reason = ?,
-                continued_run_id = ?
+                continued_run_id = ?, history_bytes = ?
             WHERE run_id = ?
             """,
             (
@@ -171,6 +183,7 @@ class SQLStore(Store, abc.ABC):
                 codec.failure_to_json(rec.failure),
                 rec.close_reason,
                 rec.continued_run_id,
+                rec.history_bytes,
                 rec.run_id,
             ),
         )
@@ -179,18 +192,14 @@ class SQLStore(Store, abc.ABC):
         self, tx: SqlTransaction, rec: ExecutionRecord, event: Event, now: datetime
     ) -> Event:
         stored = dataclasses.replace(event, event_id=rec.last_event_id + 1, timestamp=now)
+        body = codec.event_body_to_json(stored)
         await tx.execute(
             "INSERT INTO lw_events (run_id, event_id, kind, created_at, body) "
             "VALUES (?, ?, ?, ?, ?)",
-            (
-                rec.run_id,
-                stored.event_id,
-                stored.kind,
-                self.ts_in(now),
-                codec.event_body_to_json(stored),
-            ),
+            (rec.run_id, stored.event_id, stored.kind, self.ts_in(now), body),
         )
         rec.last_event_id = stored.event_id
+        rec.history_bytes += len(body)
         if stored.is_input:
             rec.last_input_id = stored.event_id
         tx.notify(run_topic(rec.run_id))
@@ -208,15 +217,9 @@ class SQLStore(Store, abc.ABC):
             if item.is_input:
                 rec.last_input_id = item.event_id
             stored.append(item)
-            params.extend(
-                (
-                    rec.run_id,
-                    item.event_id,
-                    item.kind,
-                    self.ts_in(now),
-                    codec.event_body_to_json(item),
-                )
-            )
+            body = codec.event_body_to_json(item)
+            rec.history_bytes += len(body)
+            params.extend((rec.run_id, item.event_id, item.kind, self.ts_in(now), body))
         if stored:
             rows = ", ".join("(?, ?, ?, ?, ?)" for _ in stored)
             await tx.execute(
@@ -344,28 +347,73 @@ class SQLStore(Store, abc.ABC):
         started: WorkflowStarted,
         now: datetime,
         extra_inputs: Sequence[Event] = (),
+        *,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> tuple[ExecutionRecord, Event]:
         rec = dataclasses.replace(record)
-        try:
-            async with self.transaction() as tx:
-                running = await tx.fetchone(
-                    "SELECT run_id FROM lw_executions WHERE workflow_id = ? AND status = ?",
-                    (rec.workflow_id, ExecutionStatus.RUNNING.value),
-                )
-                if running is not None:
-                    raise WorkflowAlreadyStartedError(rec.workflow_id, running["run_id"])
-                if await tx.fetchone("SELECT 1 FROM lw_executions WHERE run_id = ?", (rec.run_id,)):
-                    raise WorkflowAlreadyStartedError(rec.workflow_id, rec.run_id)
-                event = await self._insert_run(tx, rec, started, now, extra_inputs)
-        except WorkflowAlreadyStartedError:
-            raise
-        except Exception as exc:
-            if self.is_unique_violation(exc):
+        # `SELECT ... FOR UPDATE` locks a running row if one exists, but locks nothing
+        # when none does: two callers can both see "no running execution" and both reach
+        # the insert below before either commits. TERMINATE_EXISTING must still win that
+        # race deterministically (its whole point is "my run replaces whoever is running,
+        # no matter what"), so on a unique violation it loops back: the next iteration's
+        # SELECT is guaranteed to see the row the other caller just committed.
+        for _ in range(_MAX_CREATE_ATTEMPTS):
+            try:
+                async with self.transaction() as tx:
+                    running_row = await tx.fetchone(
+                        f"SELECT * FROM lw_executions WHERE workflow_id = ? AND status = ?"
+                        f"{self.FOR_UPDATE}",
+                        (rec.workflow_id, ExecutionStatus.RUNNING.value),
+                    )
+                    if running_row is not None:
+                        running = self._record(running_row)
+                        if id_conflict_policy is IdConflictPolicy.USE_EXISTING:
+                            return running, started
+                        if id_conflict_policy is IdConflictPolicy.TERMINATE_EXISTING:
+                            reason = "superseded by id conflict policy"
+                            await self._append(tx, running, WorkflowTerminated(reason=reason), now)
+                            await self._close(
+                                tx,
+                                running,
+                                CloseOutcome(ExecutionStatus.TERMINATED, reason=reason),
+                                now,
+                            )
+                            await self._write(tx, running)
+                        else:
+                            raise WorkflowAlreadyStartedError(rec.workflow_id, running.run_id)
+                    elif id_reuse_policy is not IdReusePolicy.ALLOW_DUPLICATE:
+                        latest_row = await tx.fetchone(
+                            "SELECT * FROM lw_executions WHERE workflow_id = ? "
+                            "ORDER BY seq DESC LIMIT 1",
+                            (rec.workflow_id,),
+                        )
+                        if latest_row is not None:
+                            latest = self._record(latest_row)
+                            if not id_reuse_allowed(id_reuse_policy, latest.status):
+                                raise WorkflowIdReuseRejectedError(
+                                    rec.workflow_id, latest.run_id, id_reuse_policy.value
+                                )
+                    if await tx.fetchone(
+                        "SELECT 1 FROM lw_executions WHERE run_id = ?", (rec.run_id,)
+                    ):
+                        raise WorkflowAlreadyStartedError(rec.workflow_id, rec.run_id)
+                    event = await self._insert_run(tx, rec, started, now, extra_inputs)
+                return rec, event
+            except (WorkflowAlreadyStartedError, WorkflowIdReuseRejectedError):
+                raise
+            except Exception as exc:
+                if not self.is_unique_violation(exc):
+                    raise
                 # Lost a race with a concurrent start of the same workflow id.
+                if id_conflict_policy is IdConflictPolicy.TERMINATE_EXISTING:
+                    await asyncio.sleep(random.uniform(0, 0.002))
+                    continue
                 existing = await self.find_execution(rec.workflow_id)
+                if id_conflict_policy is IdConflictPolicy.USE_EXISTING:
+                    return existing, started
                 raise WorkflowAlreadyStartedError(rec.workflow_id, existing.run_id) from exc
-            raise
-        return rec, event
+        raise WorkflowAlreadyStartedError(rec.workflow_id, "<contended>")
 
     async def get_execution(self, run_id: str) -> ExecutionRecord:
         async with self.transaction() as tx:
@@ -469,6 +517,169 @@ class SQLStore(Store, abc.ABC):
             await self._close(tx, rec, CloseOutcome(ExecutionStatus.TERMINATED, reason=reason), now)
             await self._write(tx, rec)
             return True
+
+    async def reset_run(
+        self,
+        run_id: str,
+        new_run_id: str,
+        to: ResetPoint,
+        reason: str,
+        now: datetime,
+    ) -> tuple[ExecutionRecord, ExecutionRecord]:
+        # Validate `to` against the run's current history before mutating anything:
+        # ticks only accumulate, so if this succeeds the second computation below
+        # (against a history that may have grown further by then) is guaranteed to
+        # succeed too.
+        plan_reset(await self.load_history(run_id), to)
+
+        # Two transactions, never locking both execution rows at once (ADR-0004): once
+        # the old run is closed it is immutable, so the history read after this one
+        # can no longer change under it.
+        async with self.transaction() as tx:
+            rec = await self._load(tx, run_id, lock=True)
+            was_running = not rec.is_closed
+            if was_running:
+                await self._append(tx, rec, WorkflowTerminated(reason=reason), now)
+                await self._close(
+                    tx,
+                    rec,
+                    CloseOutcome(
+                        ExecutionStatus.TERMINATED, reason=reason, continued_run_id=new_run_id
+                    ),
+                    now,
+                )
+            else:
+                # `rec` itself cannot be racing a tick (closed runs reject everything),
+                # but some other run of the same workflow id may have started since it
+                # closed; the insert below still has the partial unique index as a
+                # last-resort safety net against a concurrent one.
+                other_running = await tx.fetchone(
+                    "SELECT run_id FROM lw_executions WHERE workflow_id = ? AND status = ?",
+                    (rec.workflow_id, ExecutionStatus.RUNNING.value),
+                )
+                if other_running is not None:
+                    raise WorkflowAlreadyStartedError(rec.workflow_id, other_running["run_id"])
+                rec.continued_run_id = new_run_id
+            await self._write(tx, rec)
+
+        # Exclude the WorkflowTerminated just appended, if any: it is not part of the
+        # history being reset, only a record of this call having closed the run.
+        history = await self.load_history(run_id)
+        if was_running:
+            history = history[:-1]
+        plan = plan_reset(history, to)
+        kept = [e for e in history if e.event_id <= plan.cutoff_event_id]
+        started = kept[0]
+        assert isinstance(started, WorkflowStarted)
+
+        new_rec = ExecutionRecord(
+            run_id=new_run_id,
+            workflow_id=rec.workflow_id,
+            workflow_name=rec.workflow_name,
+            status=ExecutionStatus.RUNNING,
+            created_at=now,
+            parent_run_id=rec.parent_run_id,
+            parent_seq=rec.parent_seq,
+            parent_close_policy=rec.parent_close_policy,
+            reset_from_run_id=run_id,
+        )
+        try:
+            async with self.transaction() as tx:
+                await self._insert_reset_successor(tx, new_rec, kept, plan, started, now)
+        except Exception as exc:
+            if self.is_unique_violation(exc):
+                # Lost a race with a concurrent start of the same workflow id.
+                existing = await self.find_execution(new_rec.workflow_id)
+                raise WorkflowAlreadyStartedError(new_rec.workflow_id, existing.run_id) from exc
+            raise
+        return rec, new_rec
+
+    async def _insert_reset_successor(
+        self,
+        tx: SqlTransaction,
+        new_rec: ExecutionRecord,
+        kept: Sequence[Event],
+        plan: ResetPlan,
+        started: WorkflowStarted,
+        now: datetime,
+    ) -> None:
+        """The second transaction of :meth:`reset_run`: create ``new_rec`` with a
+        history that is ``kept`` copied verbatim, its reconstructed step jobs and
+        timers, and ``plan.redeliver`` appended as fresh inputs."""
+        await tx.execute(
+            """
+            INSERT INTO lw_executions (
+                run_id, workflow_id, workflow_name, status, created_at,
+                parent_run_id, parent_seq, parent_close_policy, reset_from_run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_rec.run_id,
+                new_rec.workflow_id,
+                new_rec.workflow_name,
+                new_rec.status.value,
+                self.ts_in(new_rec.created_at),
+                new_rec.parent_run_id,
+                new_rec.parent_seq,
+                new_rec.parent_close_policy,
+                new_rec.reset_from_run_id,
+            ),
+        )
+        if kept:
+            params: list[Any] = []
+            for event in kept:
+                body = codec.event_body_to_json(event)
+                new_rec.history_bytes += len(body)
+                params.extend(
+                    (new_rec.run_id, event.event_id, event.kind, self.ts_in(event.timestamp), body)
+                )
+            rows = ", ".join("(?, ?, ?, ?, ?)" for _ in kept)
+            await tx.execute(
+                f"INSERT INTO lw_events (run_id, event_id, kind, created_at, body) VALUES {rows}",
+                params,
+            )
+        new_rec.last_event_id = plan.cutoff_event_id
+        new_rec.last_input_id = max((e.event_id for e in kept if e.is_input), default=0)
+        new_rec.consumed_through = plan.consumed_through
+
+        if plan.search_attributes:
+            await self._write_attributes(tx, new_rec.run_id, plan.search_attributes)
+        for scheduled in plan.open_steps:
+            await self._insert_job(
+                tx,
+                reconstruct_step_job(
+                    run_id=new_rec.run_id,
+                    workflow_id=new_rec.workflow_id,
+                    workflow_name=new_rec.workflow_name,
+                    scheduled=scheduled,
+                    now=now,
+                ),
+            )
+        for timer_started in plan.open_timers:
+            timer = reconstruct_timer(new_rec.run_id, timer_started)
+            await tx.execute(
+                "INSERT INTO lw_timers (run_id, seq, fire_at) VALUES (?, ?, ?)",
+                (timer.run_id, timer.seq, self.ts_in(timer.fire_at)),
+            )
+        deadline = run_deadline(started, now)
+        if deadline is not None:
+            await tx.execute(
+                "INSERT INTO lw_timers (run_id, seq, fire_at) VALUES (?, ?, ?)",
+                (new_rec.run_id, DEADLINE_TIMER_SEQ, self.ts_in(deadline)),
+            )
+
+        self._refresh_tick_pending(tx, new_rec, now)
+        await self._write(tx, new_rec)
+        for redelivered in plan.redeliver:
+            await self._append(tx, new_rec, redelivered, now)
+        if plan.redeliver:
+            self._refresh_tick_pending(tx, new_rec, now)
+            await self._write(tx, new_rec)
+
+        if plan.open_steps:
+            tx.notify(TOPIC_STEPS)
+        if plan.open_timers or deadline is not None:
+            tx.notify(TOPIC_TIMERS)
 
     # ------------------------------------------------------------------ ticks
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from loomwork.errors import (
+    InvalidResetPointError,
     LeaseLostError,
     LoomworkError,
     NotFoundError,
@@ -26,6 +27,7 @@ from loomwork.errors import (
     ScheduleExistsError,
     WorkflowAlreadyStartedError,
     WorkflowClosedError,
+    WorkflowIdReuseRejectedError,
 )
 from loomwork.remote.wire import WireFormatError
 from loomwork.visibility.errors import QuerySyntaxError, QueryTypeError, VisibilityQueryError
@@ -78,8 +80,24 @@ def problem_for(exc: BaseException) -> ProblemDetail:
             status=409,
             extra={"workflow_id": exc.workflow_id, "run_id": exc.run_id},
         )
+    if isinstance(exc, WorkflowIdReuseRejectedError):
+        return ProblemDetail(
+            code="workflow_id_reuse_rejected",
+            title="Workflow id reuse rejected",
+            detail=str(exc),
+            status=409,
+            extra={
+                "workflow_id": exc.workflow_id,
+                "run_id": exc.run_id,
+                "policy": exc.policy,
+            },
+        )
     if isinstance(exc, NotFoundError):
         return ProblemDetail(code="not_found", title="Not found", detail=str(exc), status=404)
+    if isinstance(exc, InvalidResetPointError):
+        return ProblemDetail(
+            code="invalid_reset_point", title="Invalid reset point", detail=str(exc), status=422
+        )
     if isinstance(exc, LeaseLostError):
         return ProblemDetail(code="lease_lost", title="Lease lost", detail=str(exc), status=409)
     if isinstance(exc, WorkflowClosedError):
@@ -145,8 +163,16 @@ def exception_for(problem: ProblemDetail) -> Exception:
         return WorkflowAlreadyStartedError(
             str(problem.extra.get("workflow_id", "")), str(problem.extra.get("run_id", ""))
         )
+    if problem.code == "workflow_id_reuse_rejected":
+        return WorkflowIdReuseRejectedError(
+            str(problem.extra.get("workflow_id", "")),
+            str(problem.extra.get("run_id", "")),
+            str(problem.extra.get("policy", "")),
+        )
     if problem.code == "not_found":
         return NotFoundError(problem.detail or "not found")
+    if problem.code == "invalid_reset_point":
+        return InvalidResetPointError(problem.detail or "invalid reset point")
     if problem.code == "lease_lost":
         return LeaseLostError(problem.detail or "lease lost")
     if problem.code == "workflow_closed":

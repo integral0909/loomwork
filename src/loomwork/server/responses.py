@@ -60,6 +60,8 @@ def execution_view(record: ExecutionRecord) -> dict[str, Any]:
         "close_reason": record.close_reason,
         "parent_run_id": record.parent_run_id,
         "parent_seq": record.parent_seq,
+        "continued_run_id": record.continued_run_id,
+        "reset_from_run_id": record.reset_from_run_id,
     }
 
 

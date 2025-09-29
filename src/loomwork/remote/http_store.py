@@ -39,6 +39,7 @@ from loomwork.clock import Clock, SystemClock
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event, StepCompleted, StepFailed, WorkflowStarted
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.remote import wire
 from loomwork.remote.errors import ProblemDetail, exception_for
 from loomwork.schedules.model import ScheduleState
@@ -178,6 +179,9 @@ class HttpStore(Store):
         started: WorkflowStarted,
         now: datetime,
         extra_inputs: Sequence[Event] = (),
+        *,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> tuple[ExecutionRecord, Event]:
         ref = self.clock.now()
         body = {
@@ -185,6 +189,8 @@ class HttpStore(Store):
             "started": wire.event_to_wire(started),
             "extra_inputs": wire.events_to_wire(list(extra_inputs)),
             "now": wire.offset_seconds(ref, now),
+            "id_reuse_policy": id_reuse_policy.value,
+            "id_conflict_policy": id_conflict_policy.value,
         }
         data = await self._request("POST", "/executions", json=body)
         created = wire.execution_record_from_wire(data["record"])
@@ -276,6 +282,34 @@ class HttpStore(Store):
             self.notifier.publish(run_topic(run_id))
             self.notifier.publish(closed_topic(run_id))
         return ok
+
+    async def reset_run(
+        self,
+        run_id: str,
+        new_run_id: str,
+        to: ResetPoint,
+        reason: str,
+        now: datetime,
+    ) -> tuple[ExecutionRecord, ExecutionRecord]:
+        ref = self.clock.now()
+        body = {
+            "new_run_id": new_run_id,
+            "to": wire.reset_point_to_wire(to),
+            "reason": reason,
+            "now": wire.offset_seconds(ref, now),
+        }
+        data = await self._request("POST", f"/executions/{run_id}/reset", json=body)
+        old_record = wire.execution_record_from_wire(data["old_record"])
+        new_record = wire.execution_record_from_wire(data["new_record"])
+        self.notifier.publish(run_topic(run_id))
+        self.notifier.publish(closed_topic(run_id))
+        self.notifier.publish(run_topic(new_run_id))
+        # A reset may recreate outstanding steps/timers and always may leave a tick
+        # pending; over-notifying is harmless, unlike a missed wake-up.
+        self.notifier.publish(TOPIC_TICKS)
+        self.notifier.publish(TOPIC_STEPS)
+        self.notifier.publish(TOPIC_TIMERS)
+        return old_record, new_record
 
     # ------------------------------------------------------------------ ticks
 

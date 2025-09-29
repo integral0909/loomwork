@@ -24,7 +24,13 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
 from loomwork.codec import default_converter
-from loomwork.errors import LeaseLostError, NotFoundError, WorkflowAlreadyStartedError
+from loomwork.errors import (
+    InvalidResetPointError,
+    LeaseLostError,
+    NotFoundError,
+    WorkflowAlreadyStartedError,
+    WorkflowIdReuseRejectedError,
+)
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
     SignalReceived,
@@ -35,7 +41,7 @@ from loomwork.history.events import (
     WorkflowCompleted,
     WorkflowStarted,
 )
-from loomwork.options import StepOptions
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, StepOptions
 from loomwork.store.base import Store
 from loomwork.store.memory import MemoryStore
 from loomwork.store.records import (
@@ -74,6 +80,7 @@ def normalize(value: Any) -> Any:
             value.cancel_requested,
             value.close_reason,
             value.continued_run_id,
+            value.reset_from_run_id,
         )
     if isinstance(value, StepJob):
         return (
@@ -86,6 +93,8 @@ def normalize(value: Any) -> Any:
         )
     if isinstance(value, list):
         return [normalize(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(normalize(v) for v in value)
     if hasattr(value, "kind") and hasattr(value, "event_id"):
         return (value.event_id, value.kind)
     return value
@@ -123,7 +132,14 @@ class StoreEquivalence(RuleBasedStateMachine):
         for store in (self.memory, self.sqlite):
             try:
                 outcomes.append(Outcome(normalize(self.run(operation(store)))))
-            except (LeaseLostError, NotFoundError, WorkflowAlreadyStartedError, ValueError) as exc:
+            except (
+                LeaseLostError,
+                NotFoundError,
+                WorkflowAlreadyStartedError,
+                WorkflowIdReuseRejectedError,
+                InvalidResetPointError,
+                ValueError,
+            ) as exc:
                 outcomes.append(Outcome(error=type(exc).__name__))
         assert outcomes[0] == outcomes[1], f"stores disagree: {outcomes[0]} != {outcomes[1]}"
         return outcomes[0]
@@ -155,6 +171,65 @@ class StoreEquivalence(RuleBasedStateMachine):
         outcome = self.both(lambda s: s.create_execution(record, started, self.now))
         if outcome.error is None:
             self.run_ids.append(run_id)
+
+    @rule(
+        index=st.integers(0, len(WORKFLOW_IDS) - 1),
+        id_reuse_policy=st.sampled_from(list(IdReusePolicy)),
+        id_conflict_policy=st.sampled_from(list(IdConflictPolicy)),
+    )
+    def create_run_with_policy(
+        self,
+        index: int,
+        id_reuse_policy: IdReusePolicy,
+        id_conflict_policy: IdConflictPolicy,
+    ) -> None:
+        """Same as :meth:`create_run`, but exercising id reuse/conflict policies against
+        whatever the workflow id's current state happens to be (running, closed, or
+        never used) -- the interesting cases only arise from that existing state, which
+        this rule does not otherwise control."""
+        run_id = self.next_id("run")
+        workflow_id = WORKFLOW_IDS[index]
+        record = ExecutionRecord(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            workflow_name="wf",
+            status=ExecutionStatus.RUNNING,
+            created_at=self.now,
+        )
+        started = WorkflowStarted(
+            workflow_name="wf", workflow_id=workflow_id, run_id=run_id, args=[PAYLOAD]
+        )
+        outcome = self.both(
+            lambda s: s.create_execution(
+                record,
+                started,
+                self.now,
+                id_reuse_policy=id_reuse_policy,
+                id_conflict_policy=id_conflict_policy,
+            )
+        )
+        if outcome.error is None:
+            self.run_ids.append(run_id)
+
+    @precondition(lambda self: self.run_ids)
+    @rule(
+        data=st.data(),
+        to_kind=st.sampled_from(["first_tick", "after_tick", "before_last_failure"]),
+        tick_count=st.integers(0, 3),
+    )
+    def reset(self, data: st.DataObject, to_kind: str, tick_count: int) -> None:
+        run_id = data.draw(st.sampled_from(self.run_ids))
+        new_run_id = self.next_id("reset")
+        to = (
+            ResetPoint.first_tick()
+            if to_kind == "first_tick"
+            else ResetPoint.before_last_failure()
+            if to_kind == "before_last_failure"
+            else ResetPoint.after_tick(tick_count)
+        )
+        outcome = self.both(lambda s: s.reset_run(run_id, new_run_id, to, "model reset", self.now))
+        if outcome.error is None:
+            self.run_ids.append(new_run_id)
 
     @precondition(lambda self: self.run_ids)
     @rule(data=st.data(), kind=st.sampled_from(["signal", "cancel", "terminate"]))

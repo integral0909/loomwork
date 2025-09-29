@@ -81,8 +81,15 @@ async def create_execution(request: Request) -> JSONResponse:
     if not isinstance(started, WorkflowStarted):
         raise bad_request("'started' must encode a workflow_started event")
     extra = wire.events_from_wire(body.get("extra_inputs", []))
+    id_reuse_policy = wire.id_reuse_policy_from_wire(body.get("id_reuse_policy", "allow_duplicate"))
+    id_conflict_policy = wire.id_conflict_policy_from_wire(body.get("id_conflict_policy", "fail"))
     created, event = await ns.store.create_execution(
-        record, started, _now(server_now, body), extra_inputs=extra
+        record,
+        started,
+        _now(server_now, body),
+        extra_inputs=extra,
+        id_reuse_policy=id_reuse_policy,
+        id_conflict_policy=id_conflict_policy,
     )
     _audit(request, token.id, "create_execution", created.run_id)
     return JSONResponse(
@@ -187,6 +194,27 @@ async def terminate(request: Request) -> JSONResponse:
     )
     _audit(request, token.id, "terminate", request.path_params["run_id"])
     return JSONResponse({"ok": ok})
+
+
+async def reset_run(request: Request) -> JSONResponse:
+    token = await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    body = await _body(request)
+    server_now = ns.engine.clock.now()
+    old_record, new_record = await ns.store.reset_run(
+        request.path_params["run_id"],
+        str(body["new_run_id"]),
+        wire.reset_point_from_wire(body["to"]),
+        str(body.get("reason", "")),
+        _now(server_now, body),
+    )
+    _audit(request, token.id, "reset_run", new_record.run_id)
+    return JSONResponse(
+        {
+            "old_record": wire.execution_record_to_wire(old_record),
+            "new_record": wire.execution_record_to_wire(new_record),
+        }
+    )
 
 
 # --------------------------------------------------------------------------- ticks
@@ -525,6 +553,7 @@ routes = [
     Route("/executions/{run_id}/inputs", append_input, methods=["POST"]),
     Route("/executions/{run_id}/cancel", request_cancel, methods=["POST"]),
     Route("/executions/{run_id}/terminate", terminate, methods=["POST"]),
+    Route("/executions/{run_id}/reset", reset_run, methods=["POST"]),
     Route("/executions/{run_id}/steps", get_step_jobs, methods=["GET"]),
     Route("/executions/{run_id}/children", list_children, methods=["GET"]),
     Route("/executions/{run_id}/search-attributes", get_search_attributes, methods=["GET"]),

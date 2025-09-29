@@ -105,6 +105,15 @@ class TimeoutFailure(FailureError):
     """A step attempt or a whole step exceeded its configured timeout."""
 
 
+class HistoryLimitExceeded(FailureError):
+    """A run's history reached :attr:`~loomwork.engine.config.EngineConfig.history_limit_events`
+    (or its byte-size equivalent). The run is failed cleanly; continue-as-new before this
+    point to keep a long-running workflow's history bounded."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, type="HistoryLimitExceeded", non_retryable=True)
+
+
 class CanceledFailure(FailureError):
     """The operation was canceled before it produced a result."""
 
@@ -185,6 +194,30 @@ class WorkflowAlreadyStartedError(LoomworkError):
 
 class WorkflowClosedError(LoomworkError):
     """An operation required a running execution but the run has already closed."""
+
+
+class WorkflowIdReuseRejectedError(LoomworkError):
+    """Starting a workflow id was rejected by its :class:`~loomwork.options.IdReusePolicy`.
+
+    Raised when the id's latest run has closed but the policy in effect does not allow
+    reusing the id (``REJECT_DUPLICATE``, or ``ALLOW_DUPLICATE_FAILED_ONLY`` when the
+    latest run completed successfully).
+    """
+
+    def __init__(self, workflow_id: str, run_id: str, policy: str) -> None:
+        super().__init__(
+            f"workflow id {workflow_id!r} cannot be reused under {policy}: "
+            f"its latest run {run_id} does not qualify"
+        )
+        self.workflow_id = workflow_id
+        self.run_id = run_id
+        self.policy = policy
+
+
+class InvalidResetPointError(LoomworkError):
+    """The requested :class:`~loomwork.options.ResetPoint` cannot be resolved against a
+    run's history (for example, an ``after_tick`` count higher than the number of ticks
+    the run actually completed)."""
 
 
 class ScheduleExistsError(LoomworkError):

@@ -26,7 +26,12 @@ from loomwork.history.events import (
     WorkflowStarted,
 )
 from loomwork.ids import new_id
-from loomwork.options import as_timedelta
+from loomwork.options import (
+    IdConflictPolicy,
+    IdReusePolicy,
+    ResetPoint,
+    as_timedelta,
+)
 from loomwork.retry import RetryPolicy
 from loomwork.store.base import Store
 from loomwork.store.notify import closed_topic, run_topic
@@ -78,6 +83,8 @@ class Engine:
         run_timeout: timedelta | float | None = None,
         execution_timeout: timedelta | float | None = None,
         retry_policy: RetryPolicy | None = None,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> ExecutionRecord:
         """Create a new run of ``workflow_name``.
 
@@ -86,10 +93,16 @@ class Engine:
         ``timed_out``. ``retry_policy`` starts a fresh attempt when a run fails.
 
         ``workflow_id`` identifies the business entity the workflow is about (an order
-        id, for example). Only one run per workflow id can be running at a time.
+        id, for example). ``id_reuse_policy`` and ``id_conflict_policy`` decide what
+        happens when the id has been used before (see :class:`~loomwork.options.
+        IdReusePolicy` and :class:`~loomwork.options.IdConflictPolicy`); the defaults
+        reproduce the historical behaviour: reject only a currently running execution.
 
         Raises:
-            WorkflowAlreadyStartedError: a run with this workflow id is running.
+            WorkflowAlreadyStartedError: ``id_conflict_policy`` is ``FAIL`` (the
+                default) and a run with this workflow id is running.
+            WorkflowIdReuseRejectedError: ``id_reuse_policy`` forbids reusing the id
+                given its latest (closed) run.
         """
         record, started = self._new_run(workflow_name, args, workflow_id)
         run_td = as_timedelta(run_timeout)
@@ -112,7 +125,13 @@ class Engine:
                     search_attributes, self.config.search_attributes
                 ),
             )
-        created, _ = await self.store.create_execution(record, started, self.clock.now())
+        created, _ = await self.store.create_execution(
+            record,
+            started,
+            self.clock.now(),
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
+        )
         return created
 
     def _new_run(
@@ -292,6 +311,29 @@ class Engine:
     async def terminate(self, run_id: str, reason: str = "") -> bool:
         """Close the run immediately, without running any more workflow code."""
         return await self.store.terminate(run_id, reason, self.clock.now())
+
+    async def reset(self, run_id: str, *, to: ResetPoint, reason: str = "") -> ExecutionRecord:
+        """Recover ``run_id`` from a bug: start a new run of the same workflow id whose
+        history is ``run_id``'s history truncated at the tick boundary ``to``.
+
+        ``run_id`` is terminated first if it is still running (``reason`` recorded on
+        it); if it had already closed, its outcome is left untouched. Either way its
+        ``continued_run_id`` is set to the new run, so :meth:`WorkflowHandle.result`
+        (and anyone else following that chain) transparently gets the new run's outcome.
+        The new run's ``reset_from_run_id`` names the run it was reset from.
+
+        No message is lost: any input the old run received after the reset point
+        (a signal, an update, a step or timer outcome that had already arrived, ...) is
+        re-delivered to the new run as a fresh input. See
+        ``docs/operations/recovery.md`` for the exact semantics and worked examples.
+
+        Raises:
+            NotFoundError: ``run_id`` does not exist.
+            InvalidResetPointError: ``to`` does not resolve against ``run_id``'s history.
+        """
+        new_run_id = new_id()
+        _, new_record = await self.store.reset_run(run_id, new_run_id, to, reason, self.clock.now())
+        return new_record
 
     # ------------------------------------------------------------------ waiting
 

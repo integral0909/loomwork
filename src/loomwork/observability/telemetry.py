@@ -68,6 +68,14 @@ class Telemetry(Protocol):
 
     def worker_error(self, loop: str) -> None: ...
 
+    def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
+        """A run's history crossed ``history_warning_events`` or ``history_warning_bytes``.
+
+        Reported at most once per run per ``unit`` (``"events"`` or ``"bytes"``), at the
+        tick where the threshold was first crossed. Consider continue-as-new.
+        """
+        ...
+
 
 class NoopTelemetry:
     """Records nothing. The default."""
@@ -89,6 +97,9 @@ class NoopTelemetry:
         return None
 
     def worker_error(self, loop: str) -> None:
+        return None
+
+    def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
         return None
 
 
@@ -124,6 +135,10 @@ class CompositeTelemetry:
     def worker_error(self, loop: str) -> None:
         for part in self.parts:
             part.worker_error(loop)
+
+    def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
+        for part in self.parts:
+            part.history_size_warning(run_id, workflow_name, size, unit)
 
 
 class MetricsTelemetry(NoopTelemetry):
@@ -171,6 +186,11 @@ class MetricsTelemetry(NoopTelemetry):
         self.errors = r.counter(
             "loomwork_worker_errors_total", "Unexpected errors in worker loops.", ["loop"]
         )
+        self.history_warnings = r.counter(
+            "loomwork_history_size_warnings_total",
+            "Runs whose history crossed the configured warning threshold.",
+            ["workflow", "unit"],
+        )
 
     def tick_finished(self, report: TickReport) -> None:
         self.ticks.inc(workflow=report.workflow_name, outcome=report.outcome)
@@ -205,6 +225,9 @@ class MetricsTelemetry(NoopTelemetry):
 
     def worker_error(self, loop: str) -> None:
         self.errors.inc(loop=loop)
+
+    def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
+        self.history_warnings.inc(workflow=workflow_name, unit=unit)
 
 
 class LoggingTelemetry(NoopTelemetry):
@@ -253,5 +276,20 @@ class LoggingTelemetry(NoopTelemetry):
                 "outcome": report.outcome,
                 "failure_type": report.failure_type,
                 "duration_ms": round(report.duration * 1000, 3),
+            },
+        )
+
+    def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
+        self.logger.warning(
+            "run %s of %s has a history of %d %s and may need continue-as-new",
+            run_id,
+            workflow_name,
+            size,
+            unit,
+            extra={
+                "run_id": run_id,
+                "workflow_name": workflow_name,
+                "history_size": size,
+                "history_size_unit": unit,
             },
         )

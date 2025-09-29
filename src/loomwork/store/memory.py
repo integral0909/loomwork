@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import heapq
+import json
 from collections import deque
 from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
@@ -22,6 +23,7 @@ from loomwork.errors import (
     ScheduleConflictError,
     ScheduleExistsError,
     WorkflowAlreadyStartedError,
+    WorkflowIdReuseRejectedError,
 )
 from loomwork.failure import FailureInfo
 from loomwork.history.events import (
@@ -35,12 +37,14 @@ from loomwork.history.events import (
     WorkflowTerminated,
     WorkflowTimedOut,
 )
+from loomwork.history.serde import event_to_dict
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.schedules.model import ScheduleState
 from loomwork.visibility.attributes import decode_attributes, merge
 
 if TYPE_CHECKING:
     from loomwork.visibility.schema import SearchAttributes
-from loomwork.store.base import Store
+from loomwork.store.base import Store, id_reuse_allowed
 from loomwork.store.closing import (
     DEADLINE_TIMER_SEQ,
     child_start_failed_event,
@@ -69,6 +73,7 @@ from loomwork.store.records import (
     TickOutcome,
     TimerRecord,
 )
+from loomwork.store.reset import plan_reset, reconstruct_step_job, reconstruct_timer
 
 
 @dataclasses.dataclass(slots=True)
@@ -108,6 +113,7 @@ class MemoryStore(Store):
         stored = dataclasses.replace(event, event_id=run.record.last_event_id + 1, timestamp=now)
         run.events.append(stored)
         run.record.last_event_id = stored.event_id
+        run.record.history_bytes += _event_size(stored)
         if stored.is_input:
             run.record.last_input_id = stored.event_id
         self.notifier.publish(run_topic(run.record.run_id))
@@ -218,10 +224,26 @@ class MemoryStore(Store):
         started: WorkflowStarted,
         now: datetime,
         extra_inputs: Sequence[Event] = (),
+        *,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> tuple[ExecutionRecord, Event]:
         running = self._running_for(record.workflow_id)
         if running is not None:
-            raise WorkflowAlreadyStartedError(record.workflow_id, running.run_id)
+            if id_conflict_policy is IdConflictPolicy.USE_EXISTING:
+                return copy.copy(running), started
+            if id_conflict_policy is IdConflictPolicy.TERMINATE_EXISTING:
+                await self.terminate(running.run_id, "superseded by id conflict policy", now)
+            else:
+                raise WorkflowAlreadyStartedError(record.workflow_id, running.run_id)
+        elif id_reuse_policy is not IdReusePolicy.ALLOW_DUPLICATE:
+            run_ids = self._by_workflow_id.get(record.workflow_id)
+            if run_ids:
+                latest = self._runs[run_ids[-1]].record
+                if not id_reuse_allowed(id_reuse_policy, latest.status):
+                    raise WorkflowIdReuseRejectedError(
+                        record.workflow_id, latest.run_id, id_reuse_policy.value
+                    )
         if record.run_id in self._runs:
             raise WorkflowAlreadyStartedError(record.workflow_id, record.run_id)
         run, event = self._insert_run(record, started, now, extra_inputs)
@@ -292,6 +314,102 @@ class MemoryStore(Store):
         self._append(run, WorkflowTerminated(reason=reason), now)
         self._close(run, CloseOutcome(ExecutionStatus.TERMINATED, reason=reason), now)
         return True
+
+    async def reset_run(
+        self,
+        run_id: str,
+        new_run_id: str,
+        to: ResetPoint,
+        reason: str,
+        now: datetime,
+    ) -> tuple[ExecutionRecord, ExecutionRecord]:
+        old = self._run(run_id)
+        # Validate `to` against the run's history before mutating anything: ticks only
+        # accumulate, so if this succeeds the second computation below (against a
+        # history that may have grown further by then) is guaranteed to succeed too.
+        plan_reset(list(old.events), to)
+
+        was_running = not old.record.is_closed
+        if was_running:
+            self._append(old, WorkflowTerminated(reason=reason), now)
+            self._close(
+                old,
+                CloseOutcome(
+                    ExecutionStatus.TERMINATED, reason=reason, continued_run_id=new_run_id
+                ),
+                now,
+            )
+        else:
+            # `old` itself cannot be racing a tick (closed runs reject everything), but
+            # some other run of the same workflow id may have started since it closed.
+            running = self._running_for(old.record.workflow_id)
+            if running is not None:
+                raise WorkflowAlreadyStartedError(old.record.workflow_id, running.run_id)
+            old.record.continued_run_id = new_run_id
+
+        # Exclude the WorkflowTerminated just appended: it is not part of the history
+        # being reset, only a record of this call having closed the run.
+        history = old.events[:-1] if was_running else list(old.events)
+        plan = plan_reset(history, to)
+        kept = [e for e in history if e.event_id <= plan.cutoff_event_id]
+        started = kept[0]
+        assert isinstance(started, WorkflowStarted)
+
+        new_record = ExecutionRecord(
+            run_id=new_run_id,
+            workflow_id=old.record.workflow_id,
+            workflow_name=old.record.workflow_name,
+            status=ExecutionStatus.RUNNING,
+            created_at=now,
+            parent_run_id=old.record.parent_run_id,
+            parent_seq=old.record.parent_seq,
+            parent_close_policy=old.record.parent_close_policy,
+            reset_from_run_id=run_id,
+        )
+        new_run = _Run(record=new_record)
+        self._runs[new_run_id] = new_run
+        self._by_workflow_id.setdefault(new_record.workflow_id, []).append(new_run_id)
+        self._order.append(new_run_id)
+        if new_record.parent_run_id is not None:
+            self._children.setdefault(new_record.parent_run_id, []).append(new_run_id)
+
+        for event in kept:
+            new_run.events.append(event)  # verbatim: same event_id and timestamp
+            new_run.record.history_bytes += _event_size(event)
+        new_run.record.last_event_id = plan.cutoff_event_id
+        new_run.record.last_input_id = max((e.event_id for e in kept if e.is_input), default=0)
+        new_run.record.consumed_through = plan.consumed_through
+
+        if plan.search_attributes:
+            self._attributes[new_run_id] = dict(plan.search_attributes)
+
+        for scheduled in plan.open_steps:
+            new_job = reconstruct_step_job(
+                run_id=new_run_id,
+                workflow_id=new_record.workflow_id,
+                workflow_name=new_record.workflow_name,
+                scheduled=scheduled,
+                now=now,
+            )
+            self._jobs[new_job.job_id] = new_job
+            new_run.step_jobs[new_job.seq] = new_job.job_id
+        for timer_started in plan.open_timers:
+            self._add_timer(new_run, reconstruct_timer(new_run_id, timer_started))
+
+        deadline = run_deadline(started, now)
+        if deadline is not None:
+            self._add_timer(new_run, TimerRecord(new_run_id, DEADLINE_TIMER_SEQ, deadline))
+
+        for event in plan.redeliver:
+            self._append(new_run, event, now)
+        self._mark_tick_pending(new_run, now)
+
+        if plan.open_steps:
+            self.notifier.publish(TOPIC_STEPS)
+        if plan.open_timers or deadline is not None:
+            self.notifier.publish(TOPIC_TIMERS)
+
+        return copy.copy(old.record), copy.copy(new_run.record)
 
     # ------------------------------------------------------------------ ticks
 
@@ -836,3 +954,13 @@ class MemoryStore(Store):
 
 def _claim_order(job: StepJob) -> tuple[int, datetime, str]:
     return (-job.priority, job.ready_at, job.job_id)
+
+
+def _event_size(event: Event) -> int:
+    """Approximate encoded size of ``event``, for ``EngineConfig.history_limit_bytes``.
+
+    Matches the shape (not the exact bytes) of what the SQL stores persist per event, so
+    the limit means roughly the same thing on every backend without requiring this
+    non-durable store to actually serialize anything.
+    """
+    return len(json.dumps(event_to_dict(event), default=str))

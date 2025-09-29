@@ -71,6 +71,13 @@ class ExecutionRecord:
     parent_seq: int | None = None
     parent_close_policy: str = "terminate"
     continued_run_id: str | None = None
+    reset_from_run_id: str | None = None
+    """Set on a run created by :meth:`~loomwork.engine.engine.Engine.reset`: the run
+    whose history it continues from. The reverse link is ``continued_run_id`` on that
+    run, reused from continue-as-new (see ``docs/operations/recovery.md``)."""
+    history_bytes: int = 0
+    """Running total of encoded event body bytes, maintained by the store as events are
+    appended. Used for :attr:`~loomwork.engine.config.EngineConfig.history_limit_bytes`."""
 
     @property
     def is_closed(self) -> bool:

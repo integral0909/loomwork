@@ -140,6 +140,42 @@ async with lw.Loomwork(store=store, workflows=[monthly_invoice], steps=[...]) as
 `handle.result()` raises `WorkflowFailedError`, `WorkflowCanceledError` or
 `WorkflowTerminatedError` when the run did not complete.
 
+### Id reuse and conflict policies
+
+Starting a workflow id that already has a **running** run is governed by
+`id_conflict_policy`:
+
+```python
+import loomwork as lw
+
+await app.start_workflow(
+    process_order, order_id, id=f"order-{order_id}",
+    id_conflict_policy=lw.IdConflictPolicy.USE_EXISTING,
+)
+```
+
+| Policy | Effect |
+| --- | --- |
+| `FAIL` (default) | Raises `WorkflowAlreadyStartedError`. |
+| `USE_EXISTING` | Returns a handle to the run that is already going; no new run starts. |
+| `TERMINATE_EXISTING` | Terminates the running execution and starts the new run in its place, atomically: no worker ever observes both runs active for the id. |
+
+Starting a workflow id whose **latest** run has already *closed* is governed by
+`id_reuse_policy`:
+
+| Policy | Effect |
+| --- | --- |
+| `ALLOW_DUPLICATE` (default) | Always starts a new run. |
+| `ALLOW_DUPLICATE_FAILED_ONLY` | Starts a new run only if the latest run failed, was cancelled, was terminated, or timed out; raises `WorkflowIdReuseRejectedError` if it completed successfully. Useful for a "retry this order" button that should not silently start a second, independent run of one that already succeeded. |
+| `REJECT_DUPLICATE` | Never starts a new run for an id that has been used before, open or closed; raises `WorkflowIdReuseRejectedError`. Useful for ids meant to be used exactly once (an idempotency key). |
+
+Both checks and the resulting action (terminating an existing run, or not) happen
+atomically inside the store's transaction that creates the new run: two callers racing
+to start the same id never both succeed, and a `TERMINATE_EXISTING` race never leaves two
+runs of the id active. `Client.start(...)` and `Engine.start_workflow(...)` take the same
+two keyword arguments; child workflows started with `lw.start_child(...)` use the default
+policies (`FAIL`/`ALLOW_DUPLICATE`).
+
 ## Cancellation
 
 `handle.cancel()` delivers `asyncio.CancelledError` into the workflow at its current
@@ -170,3 +206,12 @@ async def subscription(customer_id: str, cycle: int) -> None:
 
 `lw.continue_as_new_suggested()` becomes true once the history passes the engine's
 `continue_as_new_after_events` threshold.
+
+A run that ignores the hint keeps growing regardless: past
+`EngineConfig.history_warning_events` (or `history_warning_bytes`) each tick logs one
+warning and reports it through `Telemetry.history_size_warning`; past
+`history_limit_events` (or `history_limit_bytes`) the run is failed cleanly with
+`HistoryLimitExceeded`, recommending continue-as-new. See
+[operations/configuration.md](../operations/configuration.md) for the defaults and
+[operations/recovery.md](../operations/recovery.md) for recovering a run that was broken
+by a bug rather than by its own size.

@@ -1,6 +1,6 @@
 """Client API."""
 
-from loomwork.client.client import Client
+from loomwork.client.client import BatchError, BatchResult, Client
 from loomwork.client.handle import WorkflowHandle
 
-__all__ = ["Client", "WorkflowHandle"]
+__all__ = ["BatchError", "BatchResult", "Client", "WorkflowHandle"]

@@ -18,6 +18,7 @@ from loomwork.errors import (
     WorkflowTimedOutError,
 )
 from loomwork.history.events import Event
+from loomwork.options import ResetPoint
 from loomwork.sdk.messaging import Channel
 from loomwork.store.records import ExecutionRecord, ExecutionStatus, StepJob
 
@@ -134,6 +135,23 @@ class WorkflowHandle(Generic[R]):
 
     async def terminate(self, reason: str = "") -> bool:
         return await self._engine.terminate(await self._run_id(), reason)
+
+    async def reset(self, *, to: ResetPoint, reason: str = "") -> WorkflowHandle[R]:
+        """Reset this run: see :meth:`~loomwork.engine.engine.Engine.reset`.
+
+        Returns a new handle to the reset run (this handle keeps referring to the run
+        it already did; follow ``.result()`` on either handle and you land on the new
+        run's outcome, since the old run's ``continued_run_id`` now points to it).
+        """
+        new_record = await self._engine.reset(await self._run_id(), to=to, reason=reason)
+        return WorkflowHandle(
+            self._engine,
+            self._converter,
+            workflow_id=new_record.workflow_id,
+            run_id=new_record.run_id,
+            result_hint=self._result_hint,
+            queries=self._queries,
+        )
 
     async def result(self, timeout: float | None = None) -> R:
         """Wait for the run to close and return its result.
