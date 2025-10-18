@@ -33,9 +33,11 @@ from loomwork.errors import FailureError, NotFoundError, RegistrationError
 from loomwork.options import StepOptions
 from loomwork.retry import RetryPolicy
 from loomwork.runtime.context import current_instance_or_none
+from loomwork.sdk.handlers import DEFINITION_ATTRIBUTE
 
 P = ParamSpec("P")
 R = TypeVar("R")
+C = TypeVar("C", bound=type)
 
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:\-/]{0,199}$")
 
@@ -133,6 +135,10 @@ class WorkflowDefinition(Generic[P, R]):
 
 
 @overload
+def workflow(fn: C, /) -> C: ...
+
+
+@overload
 def workflow(fn: Callable[P, Coroutine[Any, Any, R]], /) -> WorkflowDefinition[P, R]: ...
 
 
@@ -141,35 +147,77 @@ def workflow(
     *,
     name: str | None = None,
     fail_on: Iterable[type[BaseException]] = (),
-) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], WorkflowDefinition[P, R]]: ...
+) -> _WorkflowDecorator: ...
 
 
 def workflow(
-    fn: Callable[P, Coroutine[Any, Any, R]] | None = None,
+    fn: Callable[P, Coroutine[Any, Any, R]] | type | None = None,
     /,
     *,
     name: str | None = None,
     fail_on: Iterable[type[BaseException]] = (),
-) -> (
-    WorkflowDefinition[P, R]
-    | Callable[[Callable[P, Coroutine[Any, Any, R]]], WorkflowDefinition[P, R]]
-):
-    """Declare a workflow.
+) -> WorkflowDefinition[P, R] | type | _WorkflowDecorator:
+    """Declare a workflow: an ``async def`` function, or a class with a ``@run`` method
+    and handler methods (see :mod:`loomwork.sdk.classes`).
 
     Args:
-        name: stable name recorded in histories; defaults to the function name.
+        name: stable name recorded in histories; defaults to the function or class name.
         fail_on: extra exception types that fail the run when they escape the workflow.
             :class:`~loomwork.ApplicationError`, :class:`~loomwork.StepError` and
             :class:`TimeoutError` always do. Any other exception fails only the current
             tick, which is retried; this lets a fixed deploy resume the run.
     """
-
-    def decorate(f: Callable[P, Coroutine[Any, Any, R]]) -> WorkflowDefinition[P, R]:
-        return WorkflowDefinition(f, name=name, fail_on=fail_on)
-
+    decorator = _WorkflowDecorator(name, tuple(fail_on))
     if fn is not None:
-        return decorate(fn)
-    return decorate
+        return decorator(fn)
+    return decorator
+
+
+#: What APIs accept as "a workflow": a definition, or a class decorated with
+#: ``@workflow``. Type checkers ignore what a class decorator returns and keep seeing the
+#: class, hence the ``type`` alternative; :func:`as_definition` checks it at runtime.
+WorkflowLike = WorkflowDefinition[..., Any] | type
+
+
+def as_definition(workflow: WorkflowLike) -> WorkflowDefinition[..., Any]:
+    """``workflow`` as a definition.
+
+    Raises:
+        RegistrationError: it is a class that was not decorated with ``@workflow``.
+    """
+    if isinstance(workflow, WorkflowDefinition):
+        return workflow
+    # Only the class's own attribute counts: a subclass of a workflow class is not the
+    # same workflow and must be decorated itself.
+    attached = vars(workflow).get(DEFINITION_ATTRIBUTE)
+    if isinstance(attached, WorkflowDefinition):
+        return attached
+    raise RegistrationError(f"{workflow!r} is not a workflow; decorate it with @loomwork.workflow")
+
+
+class _WorkflowDecorator:
+    """What ``@workflow(name=...)`` returns: applies to a function or a class."""
+
+    def __init__(self, name: str | None, fail_on: tuple[type[BaseException], ...]) -> None:
+        self.name = name
+        self.fail_on = fail_on
+
+    @overload
+    def __call__(self, target: C, /) -> C: ...
+
+    @overload
+    def __call__(
+        self, target: Callable[P, Coroutine[Any, Any, R]], /
+    ) -> WorkflowDefinition[P, R]: ...
+
+    def __call__(
+        self, target: Callable[P, Coroutine[Any, Any, R]] | type, /
+    ) -> WorkflowDefinition[P, R] | type:
+        if inspect.isclass(target):
+            from loomwork.sdk.classes import workflow_class
+
+            return workflow_class(target, name=self.name, fail_on=self.fail_on)
+        return WorkflowDefinition(target, name=self.name, fail_on=self.fail_on)
 
 
 # --------------------------------------------------------------------------- steps
@@ -318,7 +366,7 @@ class Registry:
 
     def __init__(
         self,
-        workflows: Iterable[WorkflowDefinition[Any, Any]] = (),
+        workflows: Iterable[WorkflowLike] = (),
         steps: Iterable[StepDefinition[Any, Any]] = (),
     ) -> None:
         self._workflows: dict[str, WorkflowDefinition[Any, Any]] = {}
@@ -328,11 +376,8 @@ class Registry:
         for st in steps:
             self.add_step(st)
 
-    def add_workflow(self, definition: WorkflowDefinition[Any, Any]) -> None:
-        if not isinstance(definition, WorkflowDefinition):
-            raise RegistrationError(
-                f"{definition!r} is not a workflow; decorate it with @loomwork.workflow"
-            )
+    def add_workflow(self, workflow: WorkflowLike) -> None:
+        definition = as_definition(workflow)
         existing = self._workflows.get(definition.name)
         if existing is not None and existing.fn is not definition.fn:
             raise RegistrationError(f"workflow name {definition.name!r} is registered twice")

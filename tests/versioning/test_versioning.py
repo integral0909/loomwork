@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -103,7 +104,7 @@ async def _v3(to: str) -> list[str]:
     return [await send_sms(to)]
 
 
-def version(fn: Any) -> WorkflowDefinition[..., Any]:
+def version(fn: Callable[..., Coroutine[Any, Any, Any]]) -> WorkflowDefinition[..., Any]:
     return lw.workflow(name="ver.notify")(fn)
 
 

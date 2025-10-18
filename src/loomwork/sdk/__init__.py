@@ -21,6 +21,8 @@ from loomwork.sdk.api import (
     upsert_search_attributes,
     uuid4,
 )
+from loomwork.sdk.classes import WorkflowClass
+from loomwork.sdk.conditions import notify_conditions, wait_condition
 from loomwork.sdk.definitions import (
     Registry,
     StepDefinition,
@@ -28,6 +30,7 @@ from loomwork.sdk.definitions import (
     step,
     workflow,
 )
+from loomwork.sdk.handlers import run, signal
 from loomwork.sdk.messaging import (
     Channel,
     ChannelEmpty,
@@ -40,6 +43,11 @@ from loomwork.sdk.messaging import (
 )
 
 __all__ = [
+    "WorkflowClass",
+    "notify_conditions",
+    "run",
+    "signal",
+    "wait_condition",
     "search_attributes",
     "upsert_search_attributes",
     "deprecate_patch",

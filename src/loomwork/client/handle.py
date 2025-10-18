@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from typing import Any, Generic, TypeVar
 
 from loomwork.codec.converter import DataConverter
@@ -19,7 +20,8 @@ from loomwork.errors import (
 )
 from loomwork.history.events import Event
 from loomwork.options import ResetPoint
-from loomwork.sdk.messaging import Channel
+from loomwork.sdk.handlers import handler_name
+from loomwork.sdk.messaging import Channel, resolve_signal
 from loomwork.store.records import ExecutionRecord, ExecutionStatus, StepJob
 
 R = TypeVar("R")
@@ -78,14 +80,20 @@ class WorkflowHandle(Generic[R]):
         return await self._engine.children(await self._run_id())
 
     async def signal(
-        self, channel: Channel[Any] | str, value: Any, *, message_id: str | None = None
+        self,
+        channel: Channel[Any] | str | Callable[..., Any],
+        value: Any,
+        *,
+        message_id: str | None = None,
     ) -> None:
         """Send ``value`` to one of the workflow's channels.
 
-        When a :class:`~loomwork.Channel` is given, the value is validated against its
-        type first. ``message_id`` makes delivery idempotent: the workflow ignores a
-        second message with the same id.
+        ``channel`` is a :class:`~loomwork.Channel`, a channel name, or a signal method of
+        a workflow class (``Cart.add``). A typed channel validates the value first.
+        ``message_id`` makes delivery idempotent: the workflow ignores a second message
+        with the same id.
         """
+        channel = resolve_signal(channel)
         if isinstance(channel, Channel):
             value = channel.validate(value)
             name = channel.name
@@ -98,15 +106,21 @@ class WorkflowHandle(Generic[R]):
             message_id=message_id or "",
         )
 
-    async def query(self, name: str, *args: Any, result_type: Any = _NO_HINT) -> Any:
-        """Ask the workflow a read-only question (requires its code in this process)."""
+    async def query(
+        self, name: str | Callable[..., Any], *args: Any, result_type: Any = _NO_HINT
+    ) -> Any:
+        """Ask the workflow a read-only question (requires its code in this process).
+
+        ``name`` is the query name or a query method of a workflow class (``Cart.count``).
+        """
         if self._queries is None:
             raise LoomworkError("queries need the workflow code: create the client with a registry")
-        return await self._queries.query_value(await self._run_id(), name, args, result_type)
+        query_name = handler_name(name, "query")
+        return await self._queries.query_value(await self._run_id(), query_name, args, result_type)
 
     async def update(
         self,
-        name: str,
+        name: str | Callable[..., Any],
         *args: Any,
         result_type: Any = _NO_HINT,
         timeout: float | None = None,
@@ -122,7 +136,10 @@ class WorkflowHandle(Generic[R]):
         """
         run_id = await self._run_id()
         update_id = await self._engine.request_update(
-            run_id, name, await self._converter.encode_args_async(list(args)), update_id=update_id
+            run_id,
+            handler_name(name, "update"),
+            await self._converter.encode_args_async(list(args)),
+            update_id=update_id,
         )
         outcome = await self._engine.wait_update(run_id, update_id, timeout)
         if outcome.failure is not None:

@@ -51,6 +51,7 @@ from loomwork.sdk import (
     Compensations,
     Registry,
     StepDefinition,
+    WorkflowClass,
     WorkflowDefinition,
     continue_as_new,
     continue_as_new_suggested,
@@ -62,11 +63,14 @@ from loomwork.sdk import (
     info,
     is_replaying,
     logger,
+    notify_conditions,
     now,
     patched,
     query,
     random,
+    run,
     search_attributes,
+    signal,
     signal_external,
     sleep,
     sleep_until,
@@ -76,12 +80,18 @@ from loomwork.sdk import (
     update,
     upsert_search_attributes,
     uuid4,
+    wait_condition,
     workflow,
 )
 from loomwork.store import ExecutionRecord, ExecutionStatus, MemoryStore, Store
 from loomwork.worker import Worker, WorkerOptions
 
 __all__ = [
+    "WorkflowClass",
+    "notify_conditions",
+    "run",
+    "signal",
+    "wait_condition",
     "Channel",
     "ChannelEmpty",
     "ChildHandle",

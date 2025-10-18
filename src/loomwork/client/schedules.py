@@ -16,7 +16,7 @@ from loomwork.schedules.model import (
     validate_schedule_id,
 )
 from loomwork.schedules.service import ScheduleService
-from loomwork.sdk.definitions import WorkflowDefinition
+from loomwork.sdk.definitions import WorkflowLike, as_definition
 
 
 class ScheduleHandle:
@@ -79,7 +79,7 @@ class ScheduleClient:
     async def create(
         self,
         schedule_id: str,
-        workflow: WorkflowDefinition[..., Any] | str,
+        workflow: WorkflowLike | str,
         *args: Any,
         cron: str | None = None,
         interval: timedelta | float | None = None,
@@ -98,10 +98,11 @@ class ScheduleClient:
         Raises:
             ScheduleExistsError: a schedule with this id exists.
         """
-        if isinstance(workflow, WorkflowDefinition):
-            name, positional = workflow.name, workflow.bind(args)
-        else:
+        if isinstance(workflow, str):
             name, positional = workflow, list(args)
+        else:
+            definition = as_definition(workflow)
+            name, positional = definition.name, definition.bind(args)
         state = ScheduleState(
             schedule_id=validate_schedule_id(schedule_id),
             spec=ScheduleSpec(

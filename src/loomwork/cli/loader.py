@@ -4,7 +4,8 @@ Commands that execute or replay workflow code (``worker``, ``compat``, ``workflo
 query``) take an *app reference*:
 
 ``package.module``
-    every ``@workflow`` and ``@step`` defined at the top level of the module.
+    every ``@workflow`` (function or class) and ``@step`` defined at the top level of the
+    module.
 ``package.module:name``
     ``name`` is a :class:`~loomwork.Loomwork` app (its registry and converter are used),
     a :class:`~loomwork.sdk.definitions.Registry`, a list of definitions, or a function
@@ -27,6 +28,7 @@ from typing import Any
 from loomwork.cli.errors import UsageError
 from loomwork.codec.converter import DataConverter, default_converter
 from loomwork.sdk.definitions import Registry, StepDefinition, WorkflowDefinition
+from loomwork.sdk.handlers import DEFINITION_ATTRIBUTE
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,10 +93,14 @@ def _import_module(name: str) -> ModuleType:
         raise
 
 
+def _is_workflow_class(value: Any) -> bool:
+    return isinstance(value, type) and DEFINITION_ATTRIBUTE in vars(value)
+
+
 def _definitions(values: Iterable[Any]) -> Registry:
     registry = Registry()
     for value in values:
-        if isinstance(value, WorkflowDefinition):
+        if isinstance(value, WorkflowDefinition) or _is_workflow_class(value):
             registry.add_workflow(value)
         elif isinstance(value, StepDefinition):
             registry.add_step(value)
@@ -108,7 +114,7 @@ def _from_object(reference: str, value: Any) -> tuple[Registry, DataConverter]:
         return value.registry, value.converter
     if isinstance(value, Registry):
         return value, default_converter
-    if isinstance(value, WorkflowDefinition | StepDefinition):
+    if isinstance(value, WorkflowDefinition | StepDefinition) or _is_workflow_class(value):
         return _definitions([value]), default_converter
     if isinstance(value, list | tuple | set | frozenset):
         return _definitions(value), default_converter

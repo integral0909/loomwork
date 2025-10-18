@@ -19,8 +19,8 @@ from loomwork.errors import WorkflowClosedError
 from loomwork.options import IdConflictPolicy, IdReusePolicy
 from loomwork.retry import RetryPolicy
 from loomwork.schedules.service import ScheduleService
-from loomwork.sdk.definitions import Registry, WorkflowDefinition
-from loomwork.sdk.messaging import Channel
+from loomwork.sdk.definitions import Registry, WorkflowDefinition, WorkflowLike, as_definition
+from loomwork.sdk.messaging import Channel, resolve_signal
 from loomwork.store.records import ExecutionRecord, ExecutionStatus
 
 logger = logging.getLogger("loomwork.client")
@@ -102,7 +102,7 @@ class Client:
     @overload
     async def start(
         self,
-        workflow: str,
+        workflow: str | type,
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
@@ -115,7 +115,7 @@ class Client:
 
     async def start(
         self,
-        workflow: WorkflowDefinition[..., Any] | str,
+        workflow: WorkflowLike | str,
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
@@ -132,14 +132,15 @@ class Client:
         :class:`~loomwork.options.IdConflictPolicy`. With ``IdConflictPolicy.
         USE_EXISTING`` the returned handle refers to the already-running execution.
         """
-        if isinstance(workflow, WorkflowDefinition):
-            name = workflow.name
-            positional = workflow.bind(args)
-            hint = return_hint(workflow.fn)
-        else:
+        if isinstance(workflow, str):
             name = workflow
             positional = list(args)
             hint = _NO_HINT
+        else:
+            definition = as_definition(workflow)
+            name = definition.name
+            positional = definition.bind(args)
+            hint = return_hint(definition.fn)
         record = await self.engine.start_workflow(
             name,
             await self.converter.encode_args_async(positional),
@@ -171,12 +172,12 @@ class Client:
 
     @overload
     async def execute(
-        self, workflow: str, *args: Any, id: str | None = None, timeout: float | None = None
+        self, workflow: str | type, *args: Any, id: str | None = None, timeout: float | None = None
     ) -> Any: ...
 
     async def execute(
         self,
-        workflow: WorkflowDefinition[..., Any] | str,
+        workflow: WorkflowLike | str,
         *args: Any,
         id: str | None = None,
         timeout: float | None = None,
@@ -203,18 +204,21 @@ class Client:
 
     async def signal_with_start(
         self,
-        workflow: WorkflowDefinition[..., Any] | str,
+        workflow: WorkflowLike | str,
         *args: Any,
         id: str,
-        channel: Channel[Any] | str,
+        channel: Channel[Any] | str | Callable[..., Any],
         value: Any,
         message_id: str | None = None,
     ) -> WorkflowHandle[Any]:
         """Send a message to workflow ``id``, starting it with ``args`` if not running."""
-        if isinstance(workflow, WorkflowDefinition):
-            name, positional, hint = workflow.name, workflow.bind(args), return_hint(workflow.fn)
-        else:
+        if isinstance(workflow, str):
             name, positional, hint = workflow, list(args), _NO_HINT
+        else:
+            definition = as_definition(workflow)
+            name, positional = definition.name, definition.bind(args)
+            hint = return_hint(definition.fn)
+        channel = resolve_signal(channel)
         if isinstance(channel, Channel):
             value = channel.validate(value)
             channel_name = channel.name
@@ -246,11 +250,15 @@ class Client:
     async def list(
         self,
         *,
-        workflow: WorkflowDefinition[..., Any] | str | None = None,
+        workflow: WorkflowLike | str | None = None,
         status: ExecutionStatus | None = None,
         limit: int = 100,
     ) -> list[ExecutionRecord]:
-        name = workflow.name if isinstance(workflow, WorkflowDefinition) else workflow
+        name = (
+            workflow
+            if workflow is None or isinstance(workflow, str)
+            else as_definition(workflow).name
+        )
         return await self.engine.list_executions(workflow_name=name, status=status, limit=limit)
 
     # ------------------------------------------------------------------ batch operations
@@ -328,7 +336,7 @@ class Client:
     async def batch_signal(
         self,
         query: str,
-        channel: Channel[Any] | str,
+        channel: Channel[Any] | str | Callable[..., Any],
         value: Any,
         *,
         message_id: str | None = None,
@@ -341,6 +349,7 @@ class Client:
         A run that closes between being matched and being signalled counts as
         ``skipped_closed``, not a failure.
         """
+        channel = resolve_signal(channel)
         if isinstance(channel, Channel):
             value = channel.validate(value)
             name = channel.name

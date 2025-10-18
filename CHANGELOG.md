@@ -136,6 +136,11 @@ All notable changes to this project are documented here. The format follows
   visibility query, with bounded concurrency and a per-run outcome summary.
 - History limits: a warning (metric and log) and a hard limit on events and bytes per run
   that fails the run cleanly with `HistoryLimitExceeded`.
+- Class-based workflows: `@lw.workflow` on a class with `@lw.run`, `@lw.signal`,
+  `@lw.query` and `@lw.update` methods; handler methods double as client references
+  (`handle.signal(Cart.add, item)`). Same histories as function workflows.
+- `lw.wait_condition(predicate, timeout=...)`, re-evaluated whenever a signal or update
+  handler finishes.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

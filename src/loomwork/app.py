@@ -23,7 +23,13 @@ from loomwork.errors import NotFoundError
 from loomwork.observability.telemetry import Telemetry
 from loomwork.options import IdConflictPolicy, IdReusePolicy
 from loomwork.retry import RetryPolicy
-from loomwork.sdk.definitions import Registry, StepDefinition, WorkflowDefinition
+from loomwork.sdk.definitions import (
+    Registry,
+    StepDefinition,
+    WorkflowDefinition,
+    WorkflowLike,
+    as_definition,
+)
 from loomwork.store.base import Store
 from loomwork.store.memory import MemoryStore
 from loomwork.worker.worker import Worker, WorkerOptions
@@ -48,7 +54,7 @@ class Loomwork:
         self,
         *,
         store: Store | None = None,
-        workflows: Iterable[WorkflowDefinition[..., Any]] = (),
+        workflows: Iterable[WorkflowLike] = (),
         steps: Iterable[StepDefinition[..., Any]] = (),
         clock: Clock | None = None,
         converter: DataConverter | None = None,
@@ -115,15 +121,12 @@ class Loomwork:
 
     # ------------------------------------------------------------------ client shortcuts
 
-    def _check_known(self, workflow: WorkflowDefinition[..., Any] | str) -> None:
-        if isinstance(workflow, WorkflowDefinition) and not self.registry.has_workflow(
-            workflow.name
-        ):
-            if not self._run_worker:
-                return
-            raise NotFoundError(
-                f"workflow {workflow.name!r} is not registered with this Loomwork instance"
-            )
+    def _check_known(self, workflow: WorkflowLike | str) -> None:
+        if isinstance(workflow, str):
+            return
+        name = as_definition(workflow).name
+        if not self.registry.has_workflow(name) and self._run_worker:
+            raise NotFoundError(f"workflow {name!r} is not registered with this Loomwork instance")
 
     @overload
     async def start_workflow(
@@ -142,7 +145,7 @@ class Loomwork:
     @overload
     async def start_workflow(
         self,
-        workflow: str,
+        workflow: str | type,
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
@@ -155,7 +158,7 @@ class Loomwork:
 
     async def start_workflow(
         self,
-        workflow: WorkflowDefinition[..., Any] | str,
+        workflow: WorkflowLike | str,
         *args: Any,
         id: str | None = None,
         search_attributes: dict[str, Any] | None = None,
@@ -189,12 +192,12 @@ class Loomwork:
 
     @overload
     async def execute(
-        self, workflow: str, *args: Any, id: str | None = None, timeout: float | None = None
+        self, workflow: str | type, *args: Any, id: str | None = None, timeout: float | None = None
     ) -> Any: ...
 
     async def execute(
         self,
-        workflow: WorkflowDefinition[..., Any] | str,
+        workflow: WorkflowLike | str,
         *args: Any,
         id: str | None = None,
         timeout: float | None = None,

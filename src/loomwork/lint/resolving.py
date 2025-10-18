@@ -116,9 +116,10 @@ def _decorator_target(decorator: ast.expr, names: Mapping[str, str]) -> str | No
 
 
 def classify_decorators(
-    fn: ast.FunctionDef | ast.AsyncFunctionDef, names: Mapping[str, str]
+    fn: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, names: Mapping[str, str]
 ) -> str | None:
-    """Return ``"workflow"``, ``"step"`` or ``None`` for a function's decorators."""
+    """Return ``"workflow"``, ``"step"`` or ``None`` for a function's (or a class's)
+    decorators."""
     for decorator in fn.decorator_list:
         target = _decorator_target(decorator, names)
         if target in WORKFLOW_DECORATOR_TARGETS:

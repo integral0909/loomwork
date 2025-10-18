@@ -38,7 +38,12 @@ from loomwork.clock import ManualClock
 from loomwork.codec.converter import DataConverter
 from loomwork.engine.config import EngineConfig
 from loomwork.retry import RetryPolicy
-from loomwork.sdk.definitions import Registry, StepDefinition, WorkflowDefinition
+from loomwork.sdk.definitions import (
+    Registry,
+    StepDefinition,
+    WorkflowDefinition,
+    WorkflowLike,
+)
 from loomwork.sdk.messaging import Channel
 from loomwork.store.memory import MemoryStore
 from loomwork.store.notify import (
@@ -143,7 +148,7 @@ class WorkflowEnvironment:
     def __init__(
         self,
         *,
-        workflows: Iterable[WorkflowDefinition[..., Any]] = (),
+        workflows: Iterable[WorkflowLike] = (),
         steps: Iterable[StepDefinition[..., Any]] = (),
         start_time: datetime | None = None,
         auto_time_skipping: bool = True,
@@ -233,11 +238,11 @@ class WorkflowEnvironment:
 
     @overload
     async def start_workflow(
-        self, workflow: str, *args: Any, id: str | None = None
+        self, workflow: str | type, *args: Any, id: str | None = None
     ) -> WorkflowHandle[Any]: ...
 
     async def start_workflow(
-        self, workflow: WorkflowDefinition[..., Any] | str, *args: Any, id: str | None = None
+        self, workflow: WorkflowLike | str, *args: Any, id: str | None = None
     ) -> WorkflowHandle[Any]:
         return await self.app.start_workflow(workflow, *args, id=id)
 
@@ -252,12 +257,12 @@ class WorkflowEnvironment:
 
     @overload
     async def execute(
-        self, workflow: str, *args: Any, id: str | None = None, timeout: float | None = None
+        self, workflow: str | type, *args: Any, id: str | None = None, timeout: float | None = None
     ) -> Any: ...
 
     async def execute(
         self,
-        workflow: WorkflowDefinition[..., Any] | str,
+        workflow: WorkflowLike | str,
         *args: Any,
         id: str | None = None,
         timeout: float | None = None,

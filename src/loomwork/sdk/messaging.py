@@ -48,8 +48,15 @@ from pydantic import TypeAdapter, ValidationError
 
 from loomwork.errors import PayloadError
 from loomwork.options import ParentClosePolicy
-from loomwork.runtime.context import current_instance
-from loomwork.sdk.definitions import WorkflowDefinition, bind_positional
+from loomwork.runtime.context import current_instance, current_instance_or_none
+from loomwork.sdk.conditions import notifying
+from loomwork.sdk.definitions import (
+    WorkflowDefinition,
+    WorkflowLike,
+    as_definition,
+    bind_positional,
+)
+from loomwork.sdk.handlers import CHANNEL_ATTRIBUTE, is_method, mark_query, mark_update
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -140,15 +147,32 @@ class Channel(Generic[T]):
         signal_external(workflow_id, self, value, message_id=message_id)
 
 
+def resolve_signal(reference: Channel[Any] | str | Callable[..., Any]) -> Channel[Any] | str:
+    """A channel given as a :class:`Channel`, a name, or a signal method of a workflow class
+    (``Cart.add``)."""
+    if isinstance(reference, Channel | str):
+        return reference
+    channel = getattr(reference, CHANNEL_ATTRIBUTE, None)
+    if isinstance(channel, Channel):
+        return channel
+    raise TypeError(
+        f"{reference!r} is not a channel or a signal handler method of a @workflow class"
+    )
+
+
 def signal_external(
     workflow_id: str,
-    channel: Channel[Any] | str,
+    channel: Channel[Any] | str | Callable[..., Any],
     value: Any,
     *,
     message_id: str | None = None,
 ) -> None:
-    """Send ``value`` to ``channel`` of the running workflow ``workflow_id``. *Workflow-only.*"""
+    """Send ``value`` to ``channel`` of the running workflow ``workflow_id``. *Workflow-only.*
+
+    ``channel`` may also be a signal method of a workflow class (``Cart.add``).
+    """
     instance = current_instance()
+    channel = resolve_signal(channel)
     if isinstance(channel, Channel):
         value = channel.validate(value)
         name = channel.name
@@ -171,12 +195,14 @@ def query(name: str | None = None, /) -> Callable[[F], F]: ...
 def query(name: str | F | None = None, /) -> F | Callable[[F], F]:
     """Register a query handler for the running workflow. *Workflow-only.*
 
-    Use as ``@lw.query`` or ``@lw.query("name")`` on a nested function. Handlers must be
-    plain (not async) functions that read state; anything that would schedule work is
-    rejected.
+    Use as ``@lw.query`` or ``@lw.query("name")`` on a nested function, or on a method
+    of a class-based workflow (see :mod:`loomwork.sdk.classes`). Handlers must be plain
+    (not async) functions that read state; anything that would schedule work is rejected.
     """
 
     def register(fn: F, handler_name: str | None) -> F:
+        if current_instance_or_none() is None and is_method(fn):
+            return mark_query(fn, handler_name)
         current_instance().set_query_handler(
             _validate_name(handler_name or fn.__name__, "query"), fn
         )
@@ -200,12 +226,14 @@ def update(name: str | F | None = None, /) -> F | Callable[[F], F]:
 
     The handler runs as workflow code (it may be async, run steps and sleep). Its return
     value, or the error it raises, is recorded and delivered to the caller; an error
-    does not fail the workflow.
+    does not fail the workflow. Also usable on a method of a class-based workflow.
     """
 
     def register(fn: F, handler_name: str | None) -> F:
+        if current_instance_or_none() is None and is_method(fn):
+            return mark_update(fn, handler_name)
         current_instance().set_update_handler(
-            _validate_name(handler_name or fn.__name__, "update"), fn
+            _validate_name(handler_name or fn.__name__, "update"), notifying(fn)
         )
         return fn
 
@@ -231,19 +259,37 @@ class ChildHandle(Generic[T]):
     async def result(self) -> T:
         return await self._future
 
-    def signal(self, channel: Channel[Any] | str, value: Any) -> None:
+    def signal(self, channel: Channel[Any] | str | Callable[..., Any], value: Any) -> None:
         signal_external(self.workflow_id, channel, value)
 
     def __repr__(self) -> str:
         return f"ChildHandle(workflow_id={self.workflow_id!r}, run_id={self.run_id!r})"
 
 
+@overload
 def start_child(
     workflow: WorkflowDefinition[..., T],
     *args: Any,
     id: str | None = None,
     parent_close_policy: ParentClosePolicy | str = ParentClosePolicy.TERMINATE,
-) -> ChildHandle[T]:
+) -> ChildHandle[T]: ...
+
+
+@overload
+def start_child(
+    workflow: type,
+    *args: Any,
+    id: str | None = None,
+    parent_close_policy: ParentClosePolicy | str = ParentClosePolicy.TERMINATE,
+) -> ChildHandle[Any]: ...
+
+
+def start_child(
+    workflow: WorkflowLike,
+    *args: Any,
+    id: str | None = None,
+    parent_close_policy: ParentClosePolicy | str = ParentClosePolicy.TERMINATE,
+) -> ChildHandle[Any]:
     """Start ``workflow`` as a child of the running workflow. *Workflow-only.*
 
     The child is created atomically with the parent's next tick. Its workflow id
@@ -255,9 +301,10 @@ def start_child(
     """
     policy = ParentClosePolicy(parent_close_policy)
     instance = current_instance()
-    positional = bind_positional(workflow.fn, args, {})
+    definition = as_definition(workflow)
+    positional = bind_positional(definition.fn, args, {})
     future, workflow_id, run_id = instance.start_child(
-        workflow, positional, workflow_id=id, parent_close_policy=policy.value
+        definition, positional, workflow_id=id, parent_close_policy=policy.value
     )
     return ChildHandle(future, workflow_id, run_id)
 

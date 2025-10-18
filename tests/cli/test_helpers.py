@@ -366,3 +366,17 @@ def test_parse_attribute_types() -> None:
         parse_attribute_types(["x"])
     with pytest.raises(UsageError, match="invalid search attribute name"):
         parse_attribute_types(["bad name=string"])
+
+
+def test_load_finds_workflow_classes(tmp_path: Path) -> None:
+    (tmp_path / "classy.py").write_text(
+        "import loomwork as lw\n"
+        "@lw.workflow(name='c.flow')\n"
+        "class Flow:\n"
+        "    @lw.run\n"
+        "    async def run(self) -> None: ...\n"
+        "class Undecorated:\n"
+        "    pass\n"
+    )
+    assert load_app(str(tmp_path / "classy.py")).workflow_names == ["c.flow"]
+    assert load_app(f"{tmp_path / 'classy.py'}:Flow").workflow_names == ["c.flow"]

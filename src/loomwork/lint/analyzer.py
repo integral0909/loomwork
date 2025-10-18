@@ -59,10 +59,20 @@ def analyze_source(
     forbidden_calls = _combined_forbidden_calls(cfg)
     local_function_names = frozenset(functions)
 
+    # Every method of a workflow class runs as workflow code (the @run method and its
+    # signal, query and update handlers, plus whatever helpers they call on self), so
+    # each is an entry point of its own.
+    entries = [fdef for name, fdef in functions.items() if decorator_kind[name] == "workflow"]
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ClassDef) and classify_decorators(stmt, import_map) == "workflow":
+            entries.extend(
+                member
+                for member in stmt.body
+                if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef)
+            )
+
     findings: list[Finding] = []
-    for name, fdef in functions.items():
-        if decorator_kind[name] != "workflow":
-            continue
+    for fdef in entries:
         findings.extend(
             _analyze_workflow(
                 fdef,
