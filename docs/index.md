@@ -2,6 +2,7 @@
 
 ## Start here
 
+- [Tutorial](tutorial.md): build a durable subscription workflow, test it, run it
 - [Concepts](concepts.md): histories, ticks, replay, determinism and delivery guarantees
 
 ## Guides
@@ -9,6 +10,8 @@
 - [Workflows and steps](guides/workflows.md): declaring, retries, timeouts, heartbeats,
   cancellation, continue-as-new
 - [Messaging](guides/messaging.md): typed channels, queries and updates
+- [Class-based workflows](guides/workflow-classes.md): state in attributes, handlers as
+  methods, `wait_condition`
 - [Child workflows and sagas](guides/composition.md)
 - [Schedules](guides/schedules.md): cron, intervals, overlap policies, backfill
 - [Task queues](guides/task-queues.md): routing, priorities, rate and concurrency limits
@@ -45,3 +48,7 @@ Architecture decision records:
 - [ADR-0002](adr/0002-tick-delimited-history.md): tick-delimited history and replay
 - [ADR-0003](adr/0003-shared-sql-store.md): one SQL implementation for all relational stores
 - [ADR-0004](adr/0004-cross-run-outbox.md): cross-run effects through a transactional outbox
+- [ADR-0005](adr/0005-class-based-workflows.md): class-based workflows as a layer over
+  function workflows
+
+[Internals](internals.md) explains how the pieces fit, for people changing Loomwork.
