@@ -141,6 +141,11 @@ All notable changes to this project are documented here. The format follows
   (`handle.signal(Cart.add, item)`). Same histories as function workflows.
 - `lw.wait_condition(predicate, timeout=...)`, re-evaluated whenever a signal or update
   handler finishes.
+- Large payload offloading: `OffloadCodec` moves payloads above a size threshold to a
+  blob store (memory, filesystem, or S3-compatible storage with a built-in SigV4 signer)
+  under content-hash keys verified on read, leaving a small reference in the history.
+  It runs after compression and encryption, so blobs hold ciphertext.
+  `collect_garbage` removes unreferenced blobs after a grace period.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

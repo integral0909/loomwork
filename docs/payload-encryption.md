@@ -7,7 +7,8 @@ lets you run those payloads through a chain of codecs -- compression, encryption
 validation -- so that what actually reaches the store is exactly what the codec chain
 produces. This document covers the encryption codec: the threat model it addresses,
 how to set it up, how to rotate keys, and -- just as important -- what it does *not*
-protect.
+protect. See `docs/large-payloads.md` for `OffloadCodec`, which moves large payloads to a
+blob store and composes with encryption so the blob store only ever holds ciphertext.
 
 ## Threat model
 

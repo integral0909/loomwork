@@ -38,6 +38,7 @@
 - [Command line](cli.md): the `loomwork` command
 - [Visibility queries](visibility-queries.md)
 - [Payload encryption](payload-encryption.md)
+- [Large payloads](large-payloads.md): offloading big step results and arguments to a blob store
 - [Determinism lint rules](lint-rules.md)
 
 ## Design

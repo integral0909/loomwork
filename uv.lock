@@ -358,6 +358,9 @@ postgres = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
 ]
+s3 = [
+    { name = "httpx" },
+]
 server = [
     { name = "httpx" },
     { name = "jinja2" },
@@ -395,6 +398,7 @@ requires-dist = [
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.20,<0.21" },
     { name = "cryptography", marker = "extra == 'crypto'", specifier = ">=43,<44" },
     { name = "httpx", marker = "extra == 'client'", specifier = ">=0.27,<0.28" },
+    { name = "httpx", marker = "extra == 's3'", specifier = ">=0.27,<0.28" },
     { name = "httpx", marker = "extra == 'server'", specifier = ">=0.27,<0.28" },
     { name = "jinja2", marker = "extra == 'server'", specifier = ">=3.1.4,<3.1.6" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.27,<1.28" },
@@ -404,7 +408,7 @@ requires-dist = [
     { name = "starlette", marker = "extra == 'server'", specifier = ">=0.39,<0.40" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.30,<0.31" },
 ]
-provides-extras = ["client", "crypto", "otel", "postgres", "server", "sqlite"]
+provides-extras = ["client", "crypto", "otel", "postgres", "s3", "server", "sqlite"]
 
 [package.metadata.requires-dev]
 dev = [
