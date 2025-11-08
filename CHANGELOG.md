@@ -146,6 +146,14 @@ All notable changes to this project are documented here. The format follows
   under content-hash keys verified on read, leaving a small reference in the history.
   It runs after compression and encryption, so blobs hold ciphertext.
   `collect_garbage` removes unreferenced blobs after a grace period.
+- Headers on runs, steps and child workflows, and end-to-end trace propagation: a trace
+  active when a run starts (or a `traceparent` header) becomes the parent of every step
+  span, through children and continue-as-new, with span ids derived deterministically so
+  replays record identical events. `loomwork.current_trace_context()` reads it.
+- Interceptors: step-attempt interceptors on workers and outbound client interceptors,
+  plus `TracingClientInterceptor` for OpenTelemetry.
+- `CorrelationFilter` stamps workflow, run, step and trace ids on ordinary log records
+  emitted from workflows and steps.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

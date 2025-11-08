@@ -17,6 +17,7 @@ from typing import Any, NoReturn, Protocol
 
 from loomwork.errors import ContinueAsNew, NotInWorkflowError
 from loomwork.info import StepInfo, WorkflowInfo
+from loomwork.observability.propagation import TraceContext
 from loomwork.runtime.context import current_instance, current_instance_or_none, in_workflow
 
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "patched",
     "continue_as_new",
     "continue_as_new_suggested",
+    "correlation_fields",
+    "current_trace_context",
     "history_length",
     "heartbeat",
     "heartbeat_details",
@@ -74,6 +77,25 @@ def uuid4() -> _uuid.UUID:
 def is_replaying() -> bool:
     """Whether the current activation is re-executing recorded history. *Workflow-only.*"""
     return current_instance().replaying
+
+
+def current_trace_context() -> TraceContext | None:
+    """The trace context propagated to the running workflow or step, if any.
+
+    Inside a workflow this is the run's own context, parsed once from
+    ``WorkflowStarted.headers``; every step the workflow schedules gets a deterministic
+    child of it (see :mod:`loomwork.observability.propagation`). Inside a step it is the
+    context recorded on the ``StepScheduled`` that created this attempt. Returns
+    ``None`` outside of both, or when nothing was propagated. A pure function of already
+    recorded state, so it is safe to call during replay.
+    """
+    instance = current_instance_or_none()
+    if instance is not None:
+        return instance.trace
+    step = _step_info.get()
+    if step is not None:
+        return TraceContext.from_headers(step.headers)
+    return None
 
 
 def continue_as_new(*args: Any, workflow: Any = None) -> NoReturn:
@@ -238,6 +260,38 @@ def heartbeat_details(hint: Any = Any) -> Any:
 # --------------------------------------------------------------------------- logging
 
 
+def correlation_fields() -> dict[str, Any]:
+    """Identity of the running workflow or step, and its propagated trace ids, as a dict
+    of ``logging.LogRecord`` extras (``{}`` outside of both).
+
+    Backs ``loomwork.logger`` and :class:`~loomwork.observability.logging.
+    CorrelationFilter`, which attaches the same fields to records from plain
+    ``logging.getLogger(...)`` loggers used inside steps and workflows.
+    """
+    fields: dict[str, Any] = {}
+    instance = current_instance_or_none()
+    context: TraceContext | None
+    if instance is not None:
+        fields["workflow_id"] = instance.info.workflow_id
+        fields["run_id"] = instance.info.run_id
+        fields["workflow_name"] = instance.info.workflow_name
+        context = instance.trace
+    else:
+        step = _step_info.get()
+        if step is None:
+            return fields
+        fields["workflow_id"] = step.workflow_id
+        fields["run_id"] = step.run_id
+        fields["workflow_name"] = step.workflow_name
+        fields["step_name"] = step.step_name
+        fields["step_attempt"] = step.attempt
+        context = TraceContext.from_headers(step.headers)
+    if context is not None:
+        fields["trace_id"] = context.trace_id
+        fields["span_id"] = context.span_id
+    return fields
+
+
 class _ContextLogger(logging.LoggerAdapter[logging.Logger]):
     """Logger that is quiet during replay and tags records with run identity.
 
@@ -256,18 +310,8 @@ class _ContextLogger(logging.LoggerAdapter[logging.Logger]):
         self, msg: Any, kwargs: MutableMapping[str, Any]
     ) -> tuple[Any, MutableMapping[str, Any]]:
         extra: dict[str, Any] = dict(kwargs.get("extra") or {})
-        instance = current_instance_or_none()
-        if instance is not None:
-            extra.setdefault("workflow_id", instance.info.workflow_id)
-            extra.setdefault("run_id", instance.info.run_id)
-            extra.setdefault("workflow_name", instance.info.workflow_name)
-        else:
-            current_step = _step_info.get()
-            if current_step is not None:
-                extra.setdefault("workflow_id", current_step.workflow_id)
-                extra.setdefault("run_id", current_step.run_id)
-                extra.setdefault("step_name", current_step.step_name)
-                extra.setdefault("step_attempt", current_step.attempt)
+        for key, value in correlation_fields().items():
+            extra.setdefault(key, value)
         kwargs["extra"] = extra
         return msg, kwargs
 

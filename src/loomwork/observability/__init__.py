@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from loomwork.observability.exporter import MetricsServer
+from loomwork.observability.logging import CorrelationFilter
 from loomwork.observability.metrics import (
     Counter,
     Gauge,
@@ -22,12 +23,13 @@ from loomwork.observability.telemetry import (
 )
 
 if TYPE_CHECKING:
-    from loomwork.observability.otel import OpenTelemetryTelemetry
+    from loomwork.observability.otel import OpenTelemetryTelemetry, TracingClientInterceptor
 
 __all__ = [
     "AttemptInfo",
     "AttemptReport",
     "CompositeTelemetry",
+    "CorrelationFilter",
     "Counter",
     "Gauge",
     "Histogram",
@@ -40,13 +42,16 @@ __all__ = [
     "OpenTelemetryTelemetry",
     "Telemetry",
     "TickReport",
+    "TracingClientInterceptor",
 ]
+
+_OTEL_NAMES = frozenset({"OpenTelemetryTelemetry", "TracingClientInterceptor"})
 
 
 def __getattr__(name: str) -> object:
     # Imported lazily so that `opentelemetry` is only needed when actually used.
-    if name == "OpenTelemetryTelemetry":
-        from loomwork.observability.otel import OpenTelemetryTelemetry
+    if name in _OTEL_NAMES:
+        from loomwork.observability import otel
 
-        return OpenTelemetryTelemetry
+        return getattr(otel, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

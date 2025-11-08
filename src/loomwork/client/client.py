@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, TypeVar, overload
@@ -16,6 +16,7 @@ from loomwork.codec.converter import DataConverter, default_converter, return_hi
 from loomwork.engine.engine import Engine
 from loomwork.engine.queries import QueryRunner
 from loomwork.errors import WorkflowClosedError
+from loomwork.interceptors import ClientCallContext, ClientInterceptor, wrap_call
 from loomwork.options import IdConflictPolicy, IdReusePolicy
 from loomwork.retry import RetryPolicy
 from loomwork.schedules.service import ScheduleService
@@ -77,9 +78,11 @@ class Client:
         converter: DataConverter | None = None,
         *,
         registry: Registry | None = None,
+        interceptors: Sequence[ClientInterceptor] = (),
     ) -> None:
         self.engine = engine
         self.converter = converter or default_converter
+        self.interceptors = interceptors
         self.queries = (
             QueryRunner(engine.store, registry, self.converter) if registry is not None else None
         )
@@ -97,6 +100,7 @@ class Client:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[R]: ...
 
     @overload
@@ -111,6 +115,7 @@ class Client:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]: ...
 
     async def start(
@@ -124,6 +129,7 @@ class Client:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]:
         """Start a run and return a handle to it without waiting.
 
@@ -131,6 +137,11 @@ class Client:
         has been used before; see :class:`~loomwork.options.IdReusePolicy` and
         :class:`~loomwork.options.IdConflictPolicy`. With ``IdConflictPolicy.
         USE_EXISTING`` the returned handle refers to the already-running execution.
+
+        ``headers`` is recorded on the run's ``WorkflowStarted`` (see
+        :meth:`~loomwork.engine.engine.Engine.start_workflow`); registered
+        :class:`~loomwork.interceptors.ClientInterceptor` objects may add to it first,
+        for example to propagate the caller's active trace.
         """
         if isinstance(workflow, str):
             name = workflow
@@ -141,17 +152,22 @@ class Client:
             name = definition.name
             positional = definition.bind(args)
             hint = return_hint(definition.fn)
-        record = await self.engine.start_workflow(
-            name,
-            await self.converter.encode_args_async(positional),
-            workflow_id=id,
-            search_attributes=search_attributes,
-            run_timeout=run_timeout,
-            execution_timeout=execution_timeout,
-            retry_policy=retry_policy,
-            id_reuse_policy=id_reuse_policy,
-            id_conflict_policy=id_conflict_policy,
+        ctx = ClientCallContext(
+            kind="start", workflow_name=name, workflow_id=id, headers=dict(headers or {})
         )
+        with wrap_call(self.interceptors, ctx):
+            record = await self.engine.start_workflow(
+                name,
+                await self.converter.encode_args_async(positional),
+                workflow_id=id,
+                search_attributes=search_attributes,
+                run_timeout=run_timeout,
+                execution_timeout=execution_timeout,
+                retry_policy=retry_policy,
+                id_reuse_policy=id_reuse_policy,
+                id_conflict_policy=id_conflict_policy,
+                headers=ctx.headers,
+            )
         return WorkflowHandle(
             self.engine,
             self.converter,
@@ -159,6 +175,7 @@ class Client:
             run_id=record.run_id,
             result_hint=hint,
             queries=self.queries,
+            interceptors=self.interceptors,
         )
 
     @overload
@@ -200,6 +217,7 @@ class Client:
             run_id=run_id,
             result_hint=result_type,
             queries=self.queries,
+            interceptors=self.interceptors,
         )
 
     async def signal_with_start(
@@ -210,8 +228,13 @@ class Client:
         channel: Channel[Any] | str | Callable[..., Any],
         value: Any,
         message_id: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]:
-        """Send a message to workflow ``id``, starting it with ``args`` if not running."""
+        """Send a message to workflow ``id``, starting it with ``args`` if not running.
+
+        ``headers`` is recorded on ``WorkflowStarted`` when a new run is created (see
+        :meth:`Client.start`); it has no effect when the workflow was already running.
+        """
         if isinstance(workflow, str):
             name, positional, hint = workflow, list(args), _NO_HINT
         else:
@@ -224,20 +247,29 @@ class Client:
             channel_name = channel.name
         else:
             channel_name = channel
-        record = await self.engine.signal_with_start(
-            name,
-            await self.converter.encode_args_async(positional),
+        ctx = ClientCallContext(
+            kind="signal_with_start",
+            workflow_name=name,
             workflow_id=id,
-            channel=channel_name,
-            payload=await self.converter.encode_async(value),
-            message_id=message_id or "",
+            headers=dict(headers or {}),
         )
+        with wrap_call(self.interceptors, ctx):
+            record = await self.engine.signal_with_start(
+                name,
+                await self.converter.encode_args_async(positional),
+                workflow_id=id,
+                channel=channel_name,
+                payload=await self.converter.encode_async(value),
+                message_id=message_id or "",
+                headers=ctx.headers,
+            )
         return WorkflowHandle(
             self.engine,
             self.converter,
             workflow_id=record.workflow_id,
             run_id=record.run_id,
             result_hint=hint,
+            interceptors=self.interceptors,
             queries=self.queries,
         )
 

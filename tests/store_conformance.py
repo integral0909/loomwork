@@ -27,6 +27,7 @@ from loomwork.history.events import (
     CancelRequested,
     ChildCompleted,
     ChildFailed,
+    ChildScheduled,
     SignalReceived,
     StepCompleted,
     StepFailed,
@@ -86,7 +87,14 @@ def started(rec: ExecutionRecord) -> WorkflowStarted:
     )
 
 
-def job(run_id: str, seq: int, name: str = "step", *, job_id: str | None = None) -> StepJob:
+def job(
+    run_id: str,
+    seq: int,
+    name: str = "step",
+    *,
+    job_id: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> StepJob:
     return StepJob(
         job_id=job_id or f"job-{run_id}-{seq}",
         run_id=run_id,
@@ -98,6 +106,7 @@ def job(run_id: str, seq: int, name: str = "step", *, job_id: str | None = None)
         options=StepOptions(timeout=timedelta(seconds=5)),
         scheduled_at=T0,
         ready_at=T0,
+        headers=headers or {},
     )
 
 
@@ -700,6 +709,68 @@ class StoreConformance:
         assert not await store.renew_step_lease(claimed.job_id, "w2", T0 + timedelta(hours=1))
         assert await store.claim_step("w2", T0 + LEASE, LEASE) is None
         assert await store.claim_step("w2", T0 + timedelta(hours=1), LEASE) is not None
+
+    # ------------------------------------------------------------------ propagated headers
+
+    async def test_step_job_headers_round_trip(self, store: Store) -> None:
+        """A ``StepScheduled``'s propagated context (see ``observability/propagation.py``)
+        survives being turned into a job, claimed, retried, and read back."""
+        headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+        await self._with_jobs(store, job("r1", 1, headers=headers))
+        claimed = await store.claim_step("w1", T0, LEASE)
+        assert claimed is not None
+        assert claimed.headers == headers
+        (fetched,) = await store.get_step_jobs("r1")
+        assert fetched.headers == headers
+        failure = FailureInfo(message="flaky", type="Flaky")
+        await store.retry_step(claimed.job_id, "w1", T0 + timedelta(seconds=1), failure, T0)
+        retried = await store.claim_step("w1", T0 + timedelta(seconds=1), LEASE)
+        assert retried is not None
+        assert retried.headers == headers
+
+    async def test_workflow_started_headers_round_trip(self, store: Store) -> None:
+        rec = record("r1")
+        headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+        with_headers = dataclasses.replace(started(rec), headers=headers)
+        await store.create_execution(rec, with_headers, T0)
+        history = await store.load_history("r1")
+        assert isinstance(history[0], WorkflowStarted)
+        assert history[0].headers == headers
+
+    async def test_child_scheduled_headers_round_trip(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+        child = ChildScheduled(
+            seq=1,
+            workflow_name="child",
+            workflow_id="child-1",
+            run_id="r1.c1",
+            headers=headers,
+        )
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            decisions=[child],
+            new_children=[
+                ChildSpec(
+                    record=record("r1.c1", workflow_id="child-1", name="child"),
+                    started=WorkflowStarted(
+                        workflow_name="child",
+                        workflow_id="child-1",
+                        run_id="r1.c1",
+                        headers=headers,
+                    ),
+                )
+            ],
+        )
+        history = await store.load_history("r1")
+        recorded = next(e for e in history if isinstance(e, ChildScheduled))
+        assert recorded.headers == headers
+        child_history = await store.load_history("r1.c1")
+        assert isinstance(child_history[0], WorkflowStarted)
+        assert child_history[0].headers == headers
 
     # ------------------------------------------------------------------ queues and heartbeats
 

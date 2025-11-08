@@ -198,6 +198,7 @@ def reconstruct_step_job(
         deadline=deadline,
         queue=options.effective_queue,
         priority=options.effective_priority,
+        headers=dict(scheduled.headers),
     )
 
 

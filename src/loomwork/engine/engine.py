@@ -85,6 +85,7 @@ class Engine:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        headers: dict[str, str] | None = None,
     ) -> ExecutionRecord:
         """Create a new run of ``workflow_name``.
 
@@ -98,13 +99,19 @@ class Engine:
         IdReusePolicy` and :class:`~loomwork.options.IdConflictPolicy`); the defaults
         reproduce the historical behaviour: reject only a currently running execution.
 
+        ``headers`` is recorded on ``WorkflowStarted`` and read back by workflow code
+        through :func:`loomwork.info`; a ``traceparent``/``tracestate`` pair there
+        becomes the parent of every step this run schedules (see
+        ``docs/guides/interceptors.md``). Usually set by a client interceptor rather
+        than by hand.
+
         Raises:
             WorkflowAlreadyStartedError: ``id_conflict_policy`` is ``FAIL`` (the
                 default) and a run with this workflow id is running.
             WorkflowIdReuseRejectedError: ``id_reuse_policy`` forbids reusing the id
                 given its latest (closed) run.
         """
-        record, started = self._new_run(workflow_name, args, workflow_id)
+        record, started = self._new_run(workflow_name, args, workflow_id, headers)
         run_td = as_timedelta(run_timeout)
         execution_td = as_timedelta(execution_timeout)
         for name, value in (("run_timeout", run_td), ("execution_timeout", execution_td)):
@@ -135,7 +142,11 @@ class Engine:
         return created
 
     def _new_run(
-        self, workflow_name: str, args: Sequence[Payload], workflow_id: str | None
+        self,
+        workflow_name: str,
+        args: Sequence[Payload],
+        workflow_id: str | None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[ExecutionRecord, WorkflowStarted]:
         run_id = new_id()
         workflow_id = workflow_id or run_id
@@ -148,6 +159,7 @@ class Engine:
             run_id=run_id,
             args=list(args),
             random_seed=secrets.randbits(63),
+            headers=dict(headers or {}),
         )
         record = ExecutionRecord(
             run_id=run_id,
@@ -189,15 +201,17 @@ class Engine:
         channel: str,
         payload: Payload,
         message_id: str = "",
+        headers: dict[str, str] | None = None,
     ) -> ExecutionRecord:
         """Signal the running workflow ``workflow_id``, starting it first if necessary.
 
         The start and the signal are atomic: a new run sees the message as part of its
-        first activation.
+        first activation. ``headers`` is recorded on ``WorkflowStarted`` when a new run
+        is created; it has no effect when the workflow was already running.
         """
         signal = SignalReceived(channel=channel, payload=payload, message_id=message_id)
         for _ in range(3):
-            record, started = self._new_run(workflow_name, args, workflow_id)
+            record, started = self._new_run(workflow_name, args, workflow_id, headers)
             try:
                 created, _ = await self.store.create_execution(
                     record, started, self.clock.now(), extra_inputs=[signal]

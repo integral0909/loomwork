@@ -36,6 +36,12 @@ from loomwork.errors import (
 )
 from loomwork.failure import FailureInfo
 from loomwork.info import StepInfo, WorkflowInfo
+from loomwork.interceptors import (
+    ClientCallContext,
+    ClientInterceptor,
+    StepAttemptContext,
+    StepInterceptor,
+)
 from loomwork.options import (
     IdConflictPolicy,
     IdReusePolicy,
@@ -55,6 +61,7 @@ from loomwork.sdk import (
     WorkflowDefinition,
     continue_as_new,
     continue_as_new_suggested,
+    current_trace_context,
     deprecate_patch,
     heartbeat,
     heartbeat_details,
@@ -109,6 +116,8 @@ __all__ = [
     "BatchResult",
     "CanceledFailure",
     "Client",
+    "ClientCallContext",
+    "ClientInterceptor",
     "Clock",
     "DataConverter",
     "DeterminismViolation",
@@ -133,9 +142,11 @@ __all__ = [
     "Registry",
     "ResetPoint",
     "RetryPolicy",
+    "StepAttemptContext",
     "StepDefinition",
     "StepError",
     "StepInfo",
+    "StepInterceptor",
     "StepOptions",
     "Store",
     "SystemClock",
@@ -158,6 +169,7 @@ __all__ = [
     "patched",
     "continue_as_new",
     "continue_as_new_suggested",
+    "current_trace_context",
     "history_length",
     "heartbeat",
     "heartbeat_details",

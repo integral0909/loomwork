@@ -63,6 +63,34 @@ Some signals live in the store rather than in one worker:
 
 Configure exporters with the OpenTelemetry SDK as usual; Loomwork only uses the API.
 
+### End-to-end propagation
+
+A run started inside an active span, or one started with a `traceparent` passed as
+`headers=`, makes every step that run schedules a child of that trace, all the way
+through child workflows, continue-as-new and retries, even across a worker restart or a
+replay days later. `step <name>` spans are parented on it automatically once
+`OpenTelemetryTelemetry` is in use; no extra configuration is needed beyond starting
+runs with a propagated context. The built-in `TracingClientInterceptor` does that
+automatically from the caller's active span:
+
+```python
+from loomwork.observability import OpenTelemetryTelemetry, TracingClientInterceptor
+
+app = lw.Loomwork(
+    ...,
+    telemetry=OpenTelemetryTelemetry(),
+    client_interceptors=[TracingClientInterceptor()],
+)
+
+with tracer.start_as_current_span("checkout"):
+    await app.start_workflow(process_order, order_id)
+```
+
+See [Interceptors and context propagation](../guides/interceptors.md) for how the
+propagated context is derived deterministically (so replay reproduces it exactly), how
+to read it from workflow or step code, and the client/step middleware API it is built
+on.
+
 ## Logs
 
 - `loomwork.engine.ticks`: tick failures (nondeterminism at ERROR, other failures at
@@ -74,3 +102,24 @@ Configure exporters with the OpenTelemetry SDK as usual; Loomwork only uses the 
   `workflow_id`, `run_id` and step identity, and silent during replay.
 - `loomwork.telemetry`: one record per tick and step attempt when `LoggingTelemetry` is
   used; fields are in `extra`, ready for JSON formatters.
+
+### Correlating your own logs
+
+`loomwork.logger` tags its own records, but application code inside a step (or a
+library it calls) usually logs through its own `logging.getLogger(__name__)`, which by
+default carries none of that context. `CorrelationFilter` closes the gap: attach it to
+a handler or a logger and matching records gain `workflow_id`, `run_id`, `step_name`,
+`step_attempt`, `trace_id` and `span_id` (whichever apply) while a workflow or step is
+running:
+
+```python
+from loomwork.observability import CorrelationFilter
+
+logging.getLogger().addFilter(CorrelationFilter())
+```
+
+Fields that do not apply (for example `step_name` inside a workflow, or any of them
+outside a run) are left unset rather than `None`; a JSON formatter picks up whatever is
+there. `trace_id`/`span_id` come from the same propagated context described above, so
+log lines and trace spans for the same step attempt share an id even without an
+OpenTelemetry exporter configured.

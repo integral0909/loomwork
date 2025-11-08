@@ -289,6 +289,67 @@ class TestEvents:
         assert isinstance(event, StepCompleted)
         assert event.attempts == 1
 
+    def test_headers_default_to_empty_for_data_recorded_before_the_field_existed(self) -> None:
+        """Histories written before ``headers`` was added still decode (see
+        CONTRIBUTING.md: new event fields must default so old histories keep working)."""
+        started = event_from_dict(
+            {
+                "kind": "workflow_started",
+                "id": 1,
+                "ts": T.isoformat(),
+                "workflow_name": "wf",
+                "workflow_id": "w",
+                "run_id": "r",
+            }
+        )
+        assert isinstance(started, WorkflowStarted)
+        assert started.headers == {}
+        scheduled = event_from_dict(
+            {
+                "kind": "step_scheduled",
+                "id": 2,
+                "ts": T.isoformat(),
+                "seq": 1,
+                "step_name": "charge",
+            }
+        )
+        assert isinstance(scheduled, StepScheduled)
+        assert scheduled.headers == {}
+        child = event_from_dict(
+            {
+                "kind": "child_scheduled",
+                "id": 3,
+                "ts": T.isoformat(),
+                "seq": 1,
+                "workflow_name": "child",
+                "workflow_id": "w/child/1",
+                "run_id": "r.c1",
+            }
+        )
+        assert isinstance(child, ChildScheduled)
+        assert child.headers == {}
+
+    def test_headers_round_trip_when_set(self) -> None:
+        headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+        for event in (
+            WorkflowStarted(
+                workflow_name="wf", workflow_id="w", run_id="r", args=[P], headers=headers
+            ),
+            StepScheduled(seq=1, step_name="charge", args=[P], headers=headers),
+            ChildScheduled(
+                seq=1,
+                workflow_name="child",
+                workflow_id="w/child/1",
+                run_id="r.c1",
+                headers=headers,
+            ),
+        ):
+            stamped = dataclasses.replace(event, event_id=1, timestamp=T)
+            via_dict = event_from_dict(event_to_dict(stamped))
+            via_json = event_from_json(event_to_json(stamped))
+            assert via_dict.headers == headers  # type: ignore[attr-defined]
+            assert via_json.headers == headers  # type: ignore[attr-defined]
+
     def test_naive_timestamps_are_rejected(self) -> None:
         with pytest.raises(HistoryFormatError, match="naive"):
             event_from_dict({"kind": "timer_fired", "id": 1, "ts": "2024-01-01T00:00:00", "seq": 1})

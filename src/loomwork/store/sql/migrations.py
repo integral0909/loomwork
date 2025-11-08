@@ -356,6 +356,11 @@ _0007 = (
     "ALTER TABLE lw_executions ADD COLUMN history_bytes INTEGER NOT NULL DEFAULT 0",
 )
 
+# ---------------------------------------------------------------------------------------
+# 0008: propagated context on step jobs (trace headers; see observability/propagation.py)
+
+_0008 = ("ALTER TABLE lw_step_jobs ADD COLUMN headers TEXT",)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
@@ -364,6 +369,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "continue as new", _0005, _0005),
     Migration(6, "search attributes", _0006_SQLITE, _0006_POSTGRES),
     Migration(7, "reset lineage and history size", _0007, _0007),
+    Migration(8, "step job headers", _0008, _0008),
 )
 
 

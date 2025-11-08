@@ -117,6 +117,9 @@ class StepJob:
     priority: int = 0
     heartbeat_details: Payload | None = None
     last_heartbeat_at: datetime | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    """Copied from the ``StepScheduled`` decision that created this job (propagated
+    trace context; see :mod:`loomwork.observability.propagation`)."""
 
 
 @dataclass(frozen=True, slots=True)

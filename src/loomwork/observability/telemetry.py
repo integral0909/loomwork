@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from loomwork.observability.metrics import MetricsRegistry
@@ -43,6 +43,10 @@ class AttemptInfo:
     seq: int
     queue_delay: float
     """Seconds between the job becoming ready and the attempt starting."""
+    headers: Mapping[str, str] = field(default_factory=dict)
+    """Context propagated from the workflow (see :mod:`loomwork.observability.
+    propagation`). :class:`~loomwork.observability.otel.OpenTelemetryTelemetry` parses a
+    ``traceparent`` here to make the step span a child of the originating trace."""
 
 
 @dataclass(frozen=True, slots=True)

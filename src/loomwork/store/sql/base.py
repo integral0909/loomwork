@@ -838,8 +838,8 @@ class SQLStore(Store, abc.ABC):
                 job_id, run_id, workflow_id, workflow_name, seq, step_name, args, options,
                 scheduled_at, ready_at, deadline, attempt, lease_owner, lease_expires_at,
                 last_failure, cancel_requested, queue, priority, heartbeat_details,
-                last_heartbeat_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_heartbeat_at, headers
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.job_id,
@@ -862,6 +862,7 @@ class SQLStore(Store, abc.ABC):
                 job.priority,
                 codec.payload_to_json(job.heartbeat_details),
                 self.ts_in(job.last_heartbeat_at),
+                codec.headers_to_json(job.headers),
             ),
         )
 

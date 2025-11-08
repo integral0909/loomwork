@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -23,6 +23,9 @@ class WorkflowInfo:
     date a daily report is about), independent of when the run actually started."""
     continued_from_run_id: str | None = None
     """The run that continued as new into this one, if any."""
+    headers: dict[str, str] = field(default_factory=dict)
+    """Context propagated to this run (for example a ``traceparent``), as recorded on
+    its ``WorkflowStarted``. See :func:`loomwork.current_trace_context`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,9 @@ class StepInfo:
     seq: int
     attempt: int
     scheduled_at: datetime
+    headers: dict[str, str] = field(default_factory=dict)
+    """Context propagated from the workflow that scheduled this step (see
+    :func:`loomwork.current_trace_context`)."""
 
     @property
     def idempotency_key(self) -> str:

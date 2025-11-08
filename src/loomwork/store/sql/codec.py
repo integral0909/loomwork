@@ -71,6 +71,14 @@ def options_from_json(value: Any) -> StepOptions:
     return StepOptions.from_dict(loads(value) or {})
 
 
+def headers_to_json(headers: Mapping[str, str]) -> str:
+    return dumps(dict(headers))
+
+
+def headers_from_json(value: Any) -> dict[str, str]:
+    return dict(loads(value) or {})
+
+
 # --------------------------------------------------------------------------- events
 
 
@@ -142,6 +150,7 @@ STEP_JOB_COLUMNS = (
     "priority",
     "heartbeat_details",
     "last_heartbeat_at",
+    "headers",
 )
 
 
@@ -198,4 +207,5 @@ def step_job_from_row(row: Row, ts: Any) -> StepJob:
         priority=int(row["priority"]),
         heartbeat_details=payload_from_json(row["heartbeat_details"]),
         last_heartbeat_at=ts(row["last_heartbeat_at"]),
+        headers=headers_from_json(row["headers"]),
     )

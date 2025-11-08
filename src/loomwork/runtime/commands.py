@@ -64,10 +64,15 @@ class ScheduleStep(Command):
     step_name: str
     args: list[Payload] = field(default_factory=list)
     options: StepOptions = field(default_factory=StepOptions)
+    headers: dict[str, str] = field(default_factory=dict)
 
     def to_event(self) -> Event:
         return StepScheduled(
-            seq=self.seq, step_name=self.step_name, args=self.args, options=self.options
+            seq=self.seq,
+            step_name=self.step_name,
+            args=self.args,
+            options=self.options,
+            headers=self.headers,
         )
 
     def matches(self, event: Event) -> bool:
@@ -239,6 +244,7 @@ class ScheduleChild(Command):
     run_id: str
     args: list[Payload] = field(default_factory=list)
     parent_close_policy: str = "terminate"
+    headers: dict[str, str] = field(default_factory=dict)
 
     def to_event(self) -> Event:
         return ChildScheduled(
@@ -248,6 +254,7 @@ class ScheduleChild(Command):
             run_id=self.run_id,
             args=self.args,
             parent_close_policy=self.parent_close_policy,
+            headers=self.headers,
         )
 
     def matches(self, event: Event) -> bool:

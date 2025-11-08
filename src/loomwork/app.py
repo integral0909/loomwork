@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import timedelta
 from typing import Any, TypeVar, overload
 
@@ -20,6 +20,7 @@ from loomwork.codec.converter import DataConverter, default_converter
 from loomwork.engine.config import EngineConfig
 from loomwork.engine.engine import Engine
 from loomwork.errors import NotFoundError
+from loomwork.interceptors import ClientInterceptor, StepInterceptor
 from loomwork.observability.telemetry import Telemetry
 from loomwork.options import IdConflictPolicy, IdReusePolicy
 from loomwork.retry import RetryPolicy
@@ -48,6 +49,11 @@ class Loomwork:
         clock: time source (use :class:`~loomwork.clock.ManualClock` in tests).
         run_worker: set to ``False`` to use this object purely as a client.
         telemetry: receives metrics and trace hooks (see :mod:`loomwork.observability`).
+        step_interceptors: middleware wrapped around every step attempt (see
+            :mod:`loomwork.interceptors`); a shorthand for ``worker_options=
+            WorkerOptions(step_interceptors=...)`` -- pass at most one of the two.
+        client_interceptors: middleware wrapped around every outbound call made through
+            :attr:`client` (``start``, ``signal_with_start``, ``signal``, ``update``).
     """
 
     def __init__(
@@ -63,7 +69,15 @@ class Loomwork:
         worker_id: str | None = None,
         run_worker: bool = True,
         telemetry: Telemetry | None = None,
+        step_interceptors: Sequence[StepInterceptor] = (),
+        client_interceptors: Sequence[ClientInterceptor] = (),
     ) -> None:
+        if step_interceptors:
+            if worker_options is not None:
+                raise ValueError(
+                    "pass step_interceptors either directly or via worker_options, not both"
+                )
+            worker_options = WorkerOptions(step_interceptors=step_interceptors)
         self._owns_store = store is None
         self.store = store or MemoryStore()
         self.registry = Registry(workflows, steps)
@@ -71,7 +85,9 @@ class Loomwork:
         self.converter = converter or default_converter
         self.config = config or EngineConfig()
         self.engine = Engine(self.store, clock=self.clock, config=self.config)
-        self.client = Client(self.engine, self.converter, registry=self.registry)
+        self.client = Client(
+            self.engine, self.converter, registry=self.registry, interceptors=client_interceptors
+        )
         self.worker = Worker(
             self.store,
             self.registry,
@@ -140,6 +156,7 @@ class Loomwork:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[R]: ...
 
     @overload
@@ -154,6 +171,7 @@ class Loomwork:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]: ...
 
     async def start_workflow(
@@ -167,6 +185,7 @@ class Loomwork:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]:
         self._check_known(workflow)
         return await self.client.start(
@@ -179,6 +198,7 @@ class Loomwork:
             retry_policy=retry_policy,
             id_reuse_policy=id_reuse_policy,
             id_conflict_policy=id_conflict_policy,
+            headers=headers,
         )
 
     @overload

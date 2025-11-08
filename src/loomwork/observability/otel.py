@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any
 
+from loomwork.interceptors import ClientCallContext
+from loomwork.observability.propagation import TRACEPARENT, TraceContext
 from loomwork.observability.telemetry import AttemptInfo, AttemptReport, TickReport
 
 _INSTRUMENTATION = "loomwork"
@@ -100,10 +102,31 @@ class OpenTelemetryTelemetry:
 
     # ------------------------------------------------------------------ steps
 
+    def _parent_context(self, headers: Mapping[str, str]) -> Any | None:
+        """The OpenTelemetry context a propagated ``traceparent`` describes, or ``None``.
+
+        Built directly from the parsed :class:`~loomwork.observability.propagation.
+        TraceContext` rather than through an OpenTelemetry propagator, since Loomwork
+        already validated and carries the header itself (see ``StepScheduled.headers``);
+        this just turns it into the remote parent :meth:`opentelemetry.trace.Tracer.
+        start_span` expects.
+        """
+        context = TraceContext.from_headers(headers)
+        if context is None:
+            return None
+        span_context = self._trace.SpanContext(
+            trace_id=int(context.trace_id, 16),
+            span_id=int(context.span_id, 16),
+            is_remote=True,
+            trace_flags=self._trace.TraceFlags(context.flags),
+        )
+        return self._trace.set_span_in_context(self._trace.NonRecordingSpan(span_context))
+
     @contextlib.contextmanager
     def step_attempt(self, info: AttemptInfo) -> Iterator[None]:
         span = self.tracer.start_span(
             f"step {info.step_name}",
+            context=self._parent_context(info.headers),
             attributes={
                 "loomwork.run_id": info.run_id,
                 "loomwork.workflow": info.workflow_name,
@@ -164,3 +187,47 @@ class OpenTelemetryTelemetry:
         for span in self._open_spans.values():
             span.end()
         self._open_spans.clear()
+
+
+class TracingClientInterceptor:
+    """Built-in :class:`~loomwork.interceptors.ClientInterceptor` that carries the
+    caller's active OpenTelemetry trace into a new run and wraps the call in a
+    client-side span.
+
+    Register it on :class:`~loomwork.client.client.Client` or the ``client_interceptors``
+    of :class:`~loomwork.Loomwork` so a run started or signalled from inside a traced
+    request joins that trace: the ``start``/``signal_with_start`` context becomes the new
+    run's ``WorkflowStarted.headers``, and from there every step it schedules becomes a
+    descendant span (see :mod:`loomwork.observability.propagation` and
+    ``docs/guides/interceptors.md``). A ``signal``/``update`` against an already running
+    workflow only gets the client-side span: there is no history event to carry the
+    context into the run.
+    """
+
+    def __init__(self, tracer_provider: Any = None) -> None:
+        trace, _, _ = _import_otel()
+        self._trace = trace
+        from loomwork._version import __version__
+
+        self.tracer = trace.get_tracer(_INSTRUMENTATION, __version__, tracer_provider)
+
+    @contextlib.contextmanager
+    def intercept_call(self, ctx: ClientCallContext) -> Iterator[None]:
+        current = self._trace.get_current_span().get_span_context()
+        if current.is_valid and not any(k.lower() == TRACEPARENT for k in ctx.headers):
+            propagated = TraceContext(
+                trace_id=format(current.trace_id, "032x"),
+                span_id=format(current.span_id, "016x"),
+                flags=int(current.trace_flags),
+            )
+            ctx.headers.update(propagated.to_headers())
+        attributes = {
+            k: v
+            for k, v in (
+                ("loomwork.workflow", ctx.workflow_name),
+                ("loomwork.workflow_id", ctx.workflow_id),
+            )
+            if v is not None
+        }
+        with self.tracer.start_as_current_span(f"loomwork.{ctx.kind}", attributes=attributes):
+            yield

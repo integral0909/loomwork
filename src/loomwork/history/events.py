@@ -103,6 +103,10 @@ class WorkflowStarted(Event):
     """When the whole workflow id (across retries and continue-as-new) times out."""
     retry_policy: dict[str, Any] | None = None
     """``RetryPolicy.to_dict()`` for restarting the workflow when a run fails."""
+    headers: dict[str, str] = field(default_factory=dict)
+    """Propagated context (for example a ``traceparent``/``tracestate`` pair): set by
+    the caller that started this run, or copied from the parent run for a child or a
+    continuation. See ``docs/guides/interceptors.md``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -212,6 +216,9 @@ class StepScheduled(Event):
     step_name: str
     args: list[Payload] = field(default_factory=list)
     options: StepOptions = field(default_factory=StepOptions)
+    headers: dict[str, str] = field(default_factory=dict)
+    """The trace context this step attempt should continue, derived deterministically
+    from the run id and ``seq`` (see :mod:`loomwork.observability.propagation`)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -276,6 +283,9 @@ class ChildScheduled(Event):
     run_id: str
     args: list[Payload] = field(default_factory=list)
     parent_close_policy: str = "terminate"
+    headers: dict[str, str] = field(default_factory=dict)
+    """The context handed to the child's ``WorkflowStarted``, derived deterministically
+    from the parent run id and ``seq``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

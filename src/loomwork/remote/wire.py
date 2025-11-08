@@ -359,6 +359,7 @@ def step_job_to_wire(job: StepJob, *, encode_dt: DtEncoder = iso_encode) -> dict
         "last_heartbeat_at": (
             None if job.last_heartbeat_at is None else encode_dt(job.last_heartbeat_at)
         ),
+        "headers": dict(job.headers),
     }
 
 
@@ -393,6 +394,7 @@ def step_job_from_wire(data: dict[str, Any], *, decode_dt: DtDecoder = iso_decod
                 if data.get("last_heartbeat_at") is None
                 else decode_dt(data["last_heartbeat_at"])
             ),
+            headers=dict(data.get("headers") or {}),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise WireFormatError(f"malformed step job: {exc}") from exc

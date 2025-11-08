@@ -43,6 +43,7 @@ from loomwork.history.events import (
     WorkflowStarted,
 )
 from loomwork.info import WorkflowInfo
+from loomwork.observability.propagation import TraceContext, derived_span_id
 from loomwork.runtime.commands import (
     CancelTimer,
     CancelWorkflow,
@@ -114,7 +115,13 @@ class WorkflowInstance:
             schedule_id=started.schedule_id or None,
             scheduled_time=started.scheduled_time,
             continued_from_run_id=started.continued_from or None,
+            headers=dict(started.headers),
         )
+        #: The context this run continues, parsed once from ``started.headers``; ``None``
+        #: if the caller passed none or an invalid ``traceparent``. Steps and child runs
+        #: derive their own headers from it, never from the wall clock or randomness, so
+        #: they are identical on replay.
+        self.trace = TraceContext.from_headers(started.headers)
         #: Approximate history size: the id of the newest input the current activation
         #: consumed (identical on replay). Workflows use it to decide when to continue
         #: as new.
@@ -292,8 +299,29 @@ class WorkflowInstance:
         future: asyncio.Future[Any] = self.loop.create_future()
         self._steps[seq] = _PendingStep(definition.name, future, return_hint(definition.fn))
         future.add_done_callback(functools.partial(self._on_step_future_done, seq))
-        self._emit(ScheduleStep(seq=seq, step_name=definition.name, args=payloads, options=options))
+        self._emit(
+            ScheduleStep(
+                seq=seq,
+                step_name=definition.name,
+                args=payloads,
+                options=options,
+                headers=self._derived_headers("step", seq),
+            )
+        )
         return future
+
+    def _derived_headers(self, kind: str, seq: int) -> dict[str, str]:
+        """The propagated context handed to a child span, or ``{}`` without one.
+
+        The span id is derived from the run id, ``kind`` and ``seq`` instead of drawn at
+        random: workflow code runs again on every replay, and the id must be the same
+        each time so the recorded and replayed ``StepScheduled``/``ChildScheduled``
+        events match exactly (see :mod:`loomwork.observability.propagation`).
+        """
+        if self.trace is None:
+            return {}
+        span_id = derived_span_id(self.info.run_id, kind, seq)
+        return self.trace.child(span_id).to_headers()
 
     def _on_step_future_done(self, seq: int, future: asyncio.Future[Any]) -> None:
         # Cancelled by workflow code (directly or via gather/timeout) before a result
@@ -545,6 +573,7 @@ class WorkflowInstance:
                 run_id=run_id,
                 args=payloads,
                 parent_close_policy=parent_close_policy,
+                headers=self._derived_headers("child", seq),
             )
         )
         return future, child_workflow_id, run_id

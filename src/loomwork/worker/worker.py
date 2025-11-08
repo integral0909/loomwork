@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 import socket
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from loomwork.clock import Clock, SystemClock
@@ -29,6 +29,7 @@ from loomwork.engine.config import EngineConfig
 from loomwork.engine.steps import StepExecutor
 from loomwork.engine.ticks import TickProcessor
 from loomwork.ids import new_id
+from loomwork.interceptors import StepInterceptor
 from loomwork.observability.telemetry import NoopTelemetry, Telemetry
 from loomwork.options import validate_queue
 from loomwork.schedules.service import ScheduleService
@@ -73,6 +74,8 @@ class WorkerOptions:
             own queue.
         queue_limits: per-queue rate (attempts/second) and concurrency limits. Every
             limited queue must be listed in ``task_queues``.
+        step_interceptors: middleware wrapped around every step attempt, outermost
+            first (see :mod:`loomwork.interceptors`).
     """
 
     workflow_concurrency: int = 4
@@ -83,6 +86,7 @@ class WorkerOptions:
     shutdown_grace: float = 10.0
     task_queues: tuple[str, ...] | None = None
     queue_limits: Mapping[str, QueueLimit] = field(default_factory=dict)
+    step_interceptors: Sequence[StepInterceptor] = ()
 
     def __post_init__(self) -> None:
         if self.workflow_concurrency < 0 or self.step_concurrency < 0:
@@ -138,6 +142,7 @@ class Worker:
             config=self.config,
             worker_id=self.worker_id,
             telemetry=self.telemetry,
+            interceptors=self.options.step_interceptors,
         )
         self.schedules = ScheduleService(store, self.clock, self.telemetry)
         self._gate = QueueGate(self.options.task_queues, self.options.queue_limits)

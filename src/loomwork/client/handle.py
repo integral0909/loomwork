@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Generic, TypeVar
 
 from loomwork.codec.converter import DataConverter
@@ -19,6 +19,7 @@ from loomwork.errors import (
     WorkflowTimedOutError,
 )
 from loomwork.history.events import Event
+from loomwork.interceptors import ClientCallContext, ClientInterceptor, wrap_call
 from loomwork.options import ResetPoint
 from loomwork.sdk.handlers import handler_name
 from loomwork.sdk.messaging import Channel, resolve_signal
@@ -45,6 +46,7 @@ class WorkflowHandle(Generic[R]):
         run_id: str | None = None,
         result_hint: Any = _NO_HINT,
         queries: QueryRunner | None = None,
+        interceptors: Sequence[ClientInterceptor] = (),
     ) -> None:
         if workflow_id is None and run_id is None:
             raise ValueError("a handle needs a workflow_id or a run_id")
@@ -54,6 +56,7 @@ class WorkflowHandle(Generic[R]):
         self.workflow_id = workflow_id
         self.run_id = run_id
         self._result_hint = result_hint
+        self._interceptors = interceptors
 
     def __repr__(self) -> str:
         return f"WorkflowHandle(workflow_id={self.workflow_id!r}, run_id={self.run_id!r})"
@@ -92,6 +95,10 @@ class WorkflowHandle(Generic[R]):
         a workflow class (``Cart.add``). A typed channel validates the value first.
         ``message_id`` makes delivery idempotent: the workflow ignores a second message
         with the same id.
+
+        Registered :class:`~loomwork.interceptors.ClientInterceptor` objects wrap this
+        call, but a signal against an already-running workflow has no event to carry
+        their headers into the run's history; see ``docs/guides/interceptors.md``.
         """
         channel = resolve_signal(channel)
         if isinstance(channel, Channel):
@@ -99,12 +106,16 @@ class WorkflowHandle(Generic[R]):
             name = channel.name
         else:
             name = channel
-        await self._engine.signal(
-            await self._run_id(),
-            name,
-            await self._converter.encode_async(value),
-            message_id=message_id or "",
+        ctx = ClientCallContext(
+            kind="signal", workflow_name=None, workflow_id=self.workflow_id, headers={}
         )
+        with wrap_call(self._interceptors, ctx):
+            await self._engine.signal(
+                await self._run_id(),
+                name,
+                await self._converter.encode_async(value),
+                message_id=message_id or "",
+            )
 
     async def query(
         self, name: str | Callable[..., Any], *args: Any, result_type: Any = _NO_HINT
@@ -133,15 +144,22 @@ class WorkflowHandle(Generic[R]):
             WorkflowClosedError: the run closed before handling the update.
             TimeoutError: no outcome within ``timeout`` seconds (the update may still
                 run later; retry with the same ``update_id`` to wait again).
+
+        Registered :class:`~loomwork.interceptors.ClientInterceptor` objects wrap this
+        call the same way as :meth:`signal`.
         """
         run_id = await self._run_id()
-        update_id = await self._engine.request_update(
-            run_id,
-            handler_name(name, "update"),
-            await self._converter.encode_args_async(list(args)),
-            update_id=update_id,
+        ctx = ClientCallContext(
+            kind="update", workflow_name=None, workflow_id=self.workflow_id, headers={}
         )
-        outcome = await self._engine.wait_update(run_id, update_id, timeout)
+        with wrap_call(self._interceptors, ctx):
+            update_id = await self._engine.request_update(
+                run_id,
+                handler_name(name, "update"),
+                await self._converter.encode_args_async(list(args)),
+                update_id=update_id,
+            )
+            outcome = await self._engine.wait_update(run_id, update_id, timeout)
         if outcome.failure is not None:
             raise UpdateFailedError(update_id, outcome.failure) from outcome.failure.to_exception()
         assert outcome.result is not None
@@ -168,6 +186,7 @@ class WorkflowHandle(Generic[R]):
             run_id=new_record.run_id,
             result_hint=self._result_hint,
             queries=self._queries,
+            interceptors=self._interceptors,
         )
 
     async def result(self, timeout: float | None = None) -> R:

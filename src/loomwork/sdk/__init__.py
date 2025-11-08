@@ -3,6 +3,7 @@
 from loomwork.sdk.api import (
     continue_as_new,
     continue_as_new_suggested,
+    current_trace_context,
     deprecate_patch,
     heartbeat,
     heartbeat_details,
@@ -54,6 +55,7 @@ __all__ = [
     "patched",
     "continue_as_new",
     "continue_as_new_suggested",
+    "current_trace_context",
     "history_length",
     "Channel",
     "ChannelEmpty",

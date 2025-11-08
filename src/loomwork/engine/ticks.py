@@ -307,6 +307,7 @@ class TickProcessor:
                         deadline=deadline,
                         queue=options.effective_queue,
                         priority=options.effective_priority,
+                        headers=dict(command.headers),
                     )
                 case RequestCancelStep():
                     # Scheduled and cancelled within the same tick: never enqueue it.
@@ -388,6 +389,7 @@ class TickProcessor:
             random_seed=secrets.randbits(63),
             parent_workflow_id=parent.workflow_id,
             parent_run_id=parent.run_id,
+            headers=dict(command.headers),
         )
         return ChildSpec(record=child, started=started)
 
@@ -468,6 +470,7 @@ class TickProcessor:
             run_timeout=previous.run_timeout if previous else None,
             execution_deadline=previous.execution_deadline if previous else None,
             retry_policy=previous.retry_policy if previous else None,
+            headers=dict(previous.headers) if previous else {},
         )
         return ChildSpec(record=successor, started=started)
 

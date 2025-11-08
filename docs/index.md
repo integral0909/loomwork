@@ -15,6 +15,8 @@
 - [Child workflows and sagas](guides/composition.md)
 - [Schedules](guides/schedules.md): cron, intervals, overlap policies, backfill
 - [Task queues](guides/task-queues.md): routing, priorities, rate and concurrency limits
+- [Interceptors and context propagation](guides/interceptors.md): step and client
+  middleware, distributed tracing, structured logging correlation
 - [Versioning](guides/versioning.md): safe changes, patches, compatibility checks
 - [Testing](testing.md): the testkit, time skipping and golden histories
 - [Debugging](debugging.md): the replay debugger and history graphs

@@ -28,7 +28,7 @@ import inspect
 import logging
 import random
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -39,10 +39,11 @@ from loomwork.engine.config import EngineConfig
 from loomwork.failure import FailureInfo
 from loomwork.history.events import StepCompleted, StepFailed
 from loomwork.info import StepInfo
+from loomwork.interceptors import StepAttemptContext, StepInterceptor, wrap_step
 from loomwork.observability.telemetry import AttemptInfo, AttemptReport, NoopTelemetry, Telemetry
 from loomwork.retry import RetryPolicy
 from loomwork.sdk.api import _reset_attempt, _reset_step_info, _set_attempt, _set_step_info
-from loomwork.sdk.definitions import Registry
+from loomwork.sdk.definitions import Registry, StepDefinition
 from loomwork.store.base import Store
 from loomwork.store.records import StepJob
 
@@ -145,6 +146,7 @@ class StepExecutor:
         config: EngineConfig,
         worker_id: str,
         telemetry: Telemetry | None = None,
+        interceptors: Sequence[StepInterceptor] = (),
     ) -> None:
         self.telemetry: Telemetry = telemetry or NoopTelemetry()
         self.store = store
@@ -153,6 +155,7 @@ class StepExecutor:
         self.converter = converter
         self.config = config
         self.worker_id = worker_id
+        self.interceptors = interceptors
         self.boundary = CodecBoundary(converter.codec)
         self._rng = random.Random()
         self.attempts_started = 0
@@ -215,6 +218,7 @@ class StepExecutor:
             attempt=job.attempt,
             seq=job.seq,
             queue_delay=(now - job.ready_at).total_seconds(),
+            headers=job.headers,
         )
         began = time.perf_counter()
         try:
@@ -343,6 +347,7 @@ class StepExecutor:
             seq=job.seq,
             attempt=job.attempt,
             scheduled_at=job.scheduled_at,
+            headers=dict(job.headers),
         )
         try:
             args = self.converter.decode_args(definition.fn, job.args)
@@ -354,7 +359,7 @@ class StepExecutor:
         info_token = _set_step_info(info)
         attempt_token = _set_attempt(attempt)
         try:
-            task: asyncio.Task[Any] = asyncio.ensure_future(definition.invoke(args))
+            task: asyncio.Task[Any] = asyncio.ensure_future(self._invoke(definition, args, info))
         finally:
             _reset_attempt(attempt_token)
             _reset_step_info(info_token)
@@ -401,6 +406,28 @@ class StepExecutor:
         except Exception as encode_error:
             return FailureInfo.from_exception(encode_error)
         return StepCompleted(seq=job.seq, result=payload, attempts=job.attempt)
+
+    def _invoke(
+        self, definition: StepDefinition[Any, Any], args: Sequence[Any], info: StepInfo
+    ) -> Any:
+        """Run the step function, wrapped by any registered :class:`StepInterceptor`.
+
+        A plain coroutine when there are none, so interceptor-free workers pay nothing
+        beyond the check.
+        """
+        if not self.interceptors:
+            return definition.invoke(args)
+        ctx = StepAttemptContext(info=info, args=tuple(args), headers=info.headers)
+        return self._invoke_wrapped(definition, args, ctx)
+
+    async def _invoke_wrapped(
+        self,
+        definition: StepDefinition[Any, Any],
+        args: Sequence[Any],
+        ctx: StepAttemptContext,
+    ) -> Any:
+        with wrap_step(self.interceptors, ctx):
+            return await definition.invoke(args)
 
     @staticmethod
     async def _watch(attempt: _Attempt, heartbeat_timeout: timedelta) -> None:
