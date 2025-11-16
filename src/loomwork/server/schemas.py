@@ -22,6 +22,13 @@ class StartWorkflowRequest(BaseModel):
     name: str
     args: list[Any] = Field(default_factory=list)
     workflow_id: str | None = None
+    search_attributes: dict[str, Any] | None = None
+    #: Seconds; closes the run after this long regardless of its own logic.
+    run_timeout: float | None = None
+    #: Seconds; bounds the whole workflow id across retries and continue-as-new.
+    execution_timeout: float | None = None
+    #: Retries a failed run up to this many attempts; omit for no automatic retry.
+    retry_max_attempts: int | None = None
     id_reuse_policy: Literal[
         "allow_duplicate", "allow_duplicate_failed_only", "reject_duplicate"
     ] = "allow_duplicate"
@@ -69,6 +76,59 @@ class ReasonRequest(BaseModel):
     reason: str = ""
 
 
+# --------------------------------------------------------------------------- schedules
+
+
+class CreateScheduleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schedule_id: str
+    workflow: str
+    args: list[Any] = Field(default_factory=list)
+    cron: str | None = None
+    #: Fixed interval, in seconds; give exactly one of ``cron`` and ``interval``.
+    interval: float | None = None
+    timezone: str = "UTC"
+    start_at: str | None = None
+    end_at: str | None = None
+    jitter: float = 0
+    overlap: Literal["skip", "buffer_one", "allow_all", "cancel_other", "terminate_other"] = "skip"
+    catchup_window: float = 60
+    pause_on_failure: bool = False
+    paused: bool = False
+    note: str = ""
+
+
+class UpdateScheduleRequest(BaseModel):
+    """Every field is optional; only the ones given are changed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cron: str | None = None
+    interval: float | None = None
+    timezone: str | None = None
+    jitter: float | None = None
+    overlap: (
+        Literal["skip", "buffer_one", "allow_all", "cancel_other", "terminate_other"] | None
+    ) = None
+    catchup_window: float | None = None
+    pause_on_failure: bool | None = None
+    note: str | None = None
+
+
+class ScheduleNoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = ""
+
+
+class BackfillRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: str
+    end: str
+
+
 # --------------------------------------------------------------------------- responses
 
 
@@ -97,6 +157,11 @@ class ExecutionView(BaseModel):
     status: str
     created_at: str
     closed_at: str | None = None
+    last_event_id: int = 0
+    tick_pending: bool = False
+    tick_failures: int = 0
+    last_tick_error: str | None = None
+    lease_owner: str | None = None
     cancel_requested: bool = False
     result: Any = None
     failure: FailureView | None = None

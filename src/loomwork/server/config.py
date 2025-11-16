@@ -40,6 +40,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from loomwork.visibility.schema import AttributeType, SchemaError, SearchAttributes
+
 ENV_PREFIX = "LOOMWORK_SERVER__"
 
 
@@ -108,9 +110,10 @@ class ConsoleConfig(BaseModel):
     server processes behind a load balancer.
 
     ``search_attributes`` is a display hint only: it names and types search attributes
-    for the runs-list query box so operators do not have to guess them. It does not
-    change which attributes a query may actually reference -- that is controlled by the
-    engine's own :class:`~loomwork.engine.config.EngineConfig.search_attributes`.
+    for the runs-list query box so operators do not have to guess them, overriding
+    ``[server.search_attributes]`` for this namespace when both are set. What a query may
+    actually reference is controlled by ``[server.search_attributes]`` (see
+    :class:`ServerConfig`), not by this field.
     """
 
     model_config = {"extra": "forbid"}
@@ -137,6 +140,15 @@ class ServerConfig(BaseModel):
     port: int = 8080
     #: Namespace name -> store URL (see ``loomwork.store.factory.store_from_url``).
     namespaces: dict[str, str] = Field(default_factory=dict)
+    #: Namespace name -> declared search attribute types (``{"tier": "string"}``), fed
+    #: into that namespace's ``EngineConfig.search_attributes`` (see
+    #: :mod:`loomwork.visibility.schema`). Declared per namespace, like the store URL
+    #: itself: unrelated namespaces (different tenants, different workflow families)
+    #: have no reason to share a search attribute schema. A namespace with no entry gets
+    #: an empty schema, so its queries may only use built-in fields (``status``,
+    #: ``created_at``, ...), matching the historical default. Used by both the control
+    #: API's workflow list/query endpoint and the console's runs-list query box.
+    search_attributes: dict[str, dict[str, str]] = Field(default_factory=dict)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     cors: CorsConfig = Field(default_factory=CorsConfig)
@@ -149,6 +161,37 @@ class ServerConfig(BaseModel):
             if not name or "/" in name:
                 raise ValueError(f"invalid namespace name {name!r}")
         return value
+
+    @field_validator("search_attributes")
+    @classmethod
+    def _validate_search_attributes(
+        cls, value: dict[str, dict[str, str]]
+    ) -> dict[str, dict[str, str]]:
+        for namespace, declared in value.items():
+            try:
+                search_attributes_from_config(declared)
+            except SchemaError as exc:
+                raise ValueError(f"search_attributes.{namespace}: {exc}") from exc
+        return value
+
+
+def search_attributes_from_config(declared: dict[str, str]) -> SearchAttributes:
+    """``{"tier": "string"}`` as a :class:`SearchAttributes` schema.
+
+    Shared by :class:`ServerConfig` validation and
+    :class:`~loomwork.server.state.ServerState`, which builds one of these per namespace
+    for its :class:`~loomwork.engine.config.EngineConfig`.
+    """
+    valid = ", ".join(t.value for t in AttributeType)
+    types: dict[str, AttributeType] = {}
+    for name, type_name in declared.items():
+        try:
+            types[name] = AttributeType(type_name)
+        except ValueError:
+            raise SchemaError(
+                f"unknown search attribute type {type_name!r} for {name!r} (use {valid})"
+            ) from None
+    return SearchAttributes.from_mapping(types)
 
 
 def _coerce_scalar(text: str) -> Any:

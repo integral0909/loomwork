@@ -13,11 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from loomwork.clock import Clock, SystemClock
+from loomwork.engine.config import EngineConfig
 from loomwork.engine.engine import Engine
 from loomwork.errors import NotFoundError
 from loomwork.sdk.definitions import Registry
 from loomwork.server.auth import TokenFile
-from loomwork.server.config import ServerConfig
+from loomwork.server.config import ServerConfig, search_attributes_from_config
 from loomwork.store.base import Store
 from loomwork.store.factory import redact_url, store_from_url
 from loomwork.worker.worker import Worker, WorkerOptions
@@ -88,7 +89,8 @@ class ServerState:
             )
         for name, url in config.namespaces.items():
             store = store_from_url(url)
-            engine = Engine(store, clock=self.clock)
+            schema = search_attributes_from_config(config.search_attributes.get(name, {}))
+            engine = Engine(store, clock=self.clock, config=EngineConfig(search_attributes=schema))
             worker = None
             if run_system_workers:
                 worker = Worker(

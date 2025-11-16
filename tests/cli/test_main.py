@@ -245,3 +245,18 @@ def test_worker_process_runs_workflows_and_stops_on_sigterm(cli: Cli, db_path: P
     assert process.returncode == 0, stderr
     assert "worker e2e running 4 workflow(s) and 1 step(s)" in stderr
     assert "stopping" in stderr
+
+
+def test_cli_works_without_the_optional_http_client() -> None:
+    """httpx comes with the server/client extras; a core install must still run the CLI."""
+    script = (
+        "import sys\n"
+        "sys.modules['httpx'] = None\n"  # makes any 'import httpx' raise ImportError
+        "from loomwork.cli.main import main\n"
+        "sys.exit(main(['cron', '0 3 * * *', '-n', '1', '--after', '2024-01-01']))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script], cwd=REPO, capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "2024-01-01T03:00:00+00:00"

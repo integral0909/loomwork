@@ -25,11 +25,15 @@ either one an `HttpStore` and it drives the server instead of a local store, unc
   from Python. It exchanges the lossless wire form of `Store` types
   (`loomwork.remote.wire`) and requires the `worker` role.
 - **Control API** (`/v1/namespaces/{namespace}/control/...`): plain JSON for callers
-  without Loomwork's Python types -- `curl`, another language, a dashboard. Arguments and
-  signal/update values are ordinary JSON, encoded and decoded with the default data
-  converter. It requires the `operator` role for writes, `reader` or `operator` for reads.
-  It cannot answer queries (`WorkflowHandle.query`): those need the workflow code, which
-  the server never imports.
+  without Loomwork's Python types -- `curl`, another language, a dashboard, and the
+  `loomwork` CLI itself when its token has no `worker` role. Arguments and signal/update
+  values are ordinary JSON, encoded and decoded with the default data converter. It
+  requires the `operator` role for writes, `reader` or `operator` for reads. It covers
+  starting, listing, finding, describing, signalling, cancelling, terminating and
+  resetting workflows, waiting for results and update outcomes, and the same schedule
+  operations the CLI's `loomwork schedule` offers. It cannot answer queries
+  (`WorkflowHandle.query`): those need the workflow code, which the server never
+  imports.
 
 A Python caller almost always wants the worker API (i.e. `HttpStore`); reach for the
 control API only when there is no Loomwork Python process on that side of the connection.
@@ -74,6 +78,10 @@ port = 8080
 default = "sqlite:////var/lib/loomwork/default.db"
 billing  = "postgresql://loomwork@db.internal/billing"
 
+[server.search_attributes.default]
+tier = "string"
+amount = "float"
+
 [server.auth]
 tokens_file = "/etc/loomwork/tokens.json"
 
@@ -108,6 +116,7 @@ await serve(config)                # or run it with uvicorn directly
 | `host` | `127.0.0.1` | Bind address for `loomwork server`. |
 | `port` | `8080` | Bind port. |
 | `namespaces` | `{}` | Namespace name → store URL (`loomwork.store.store_from_url`). |
+| `search_attributes` | `{}` | Namespace name → declared search attribute types (`{"tier": "string"}`), fed into that namespace's `EngineConfig.search_attributes` so `attr.*` queries can reference them; see [visibility queries](visibility-queries.md). Declared per namespace, like the store URL itself. Used by the control API's workflow list/query endpoint and by the console (`[server.console.search_attributes]` overrides the console's own *display* of it, but not what a query may reference). |
 | `auth.tokens_file` | none | Path to the JSON tokens file. Required unless `auth.disabled`. |
 | `auth.disabled` | `False` | Skip authentication; every request is an administrator everywhere. **Development only** -- the server logs a loud warning at startup. |
 | `limits.long_poll_max_seconds` | `20` | Upper bound on a client-requested `claim_tick`/`claim_step`/update/result wait; a longer request is capped, not rejected. |
@@ -205,7 +214,11 @@ configured, so it cannot learn what other namespaces exist.
 
 **Python callers need the `worker` role**, not `operator`: `Engine`/`Client` over
 `HttpStore` go through the worker API exactly like `Worker` does. `operator`/`reader` are
-for the plain-JSON control API used by non-Python callers.
+for the plain-JSON control API used by non-Python callers -- and by
+`loomwork.remote.control.ControlClient`, which is what lets the `loomwork` CLI's
+`workflow` and `schedule` commands work with an `operator`/`reader` token: `--server`
+picks whichever API the token's role actually grants automatically (see the
+[CLI reference](cli.md)).
 
 ### Disabling auth
 
@@ -320,10 +333,12 @@ All worker-API paths are under `/v1/namespaces/{namespace}`; control-API paths a
 
 | Method | Path | Effect |
 | ------ | ---- | ------ |
-| POST | `/control/workflows` | Start a workflow: `{name, args: [...], workflow_id?}` → `201` with the execution. |
-| GET | `/control/workflows` | List: `?workflow_name=&status=&limit=`. |
+| GET | `/control/whoami` | The caller's own token id and roles; any correctly-scoped token, no specific role required. |
+| POST | `/control/workflows` | Start a workflow: `{name, args: [...], workflow_id?, search_attributes?, run_timeout?, execution_timeout?, retry_max_attempts?, id_reuse_policy?, id_conflict_policy?}` → `201` with the execution. |
+| GET | `/control/workflows` | List: `?workflow_name=&status=&limit=`, or `?query=<visibility query>&limit=` for a full query (not combinable with `workflow_name`/`status`). |
 | POST | `/control/workflows/signal-with-start` | `{name, args, workflow_id, channel, value, message_id?}`. |
-| GET | `/control/workflows/{run_id}` | Describe. |
+| GET | `/control/workflows/by-id/{workflow_id}` | Describe the *latest* run of a workflow id (the counterpart of the worker API's `find_execution`). |
+| GET | `/control/workflows/{run_id}` | Describe, including `search_attributes`. |
 | GET | `/control/workflows/{run_id}/history` | History as JSON events. |
 | GET | `/control/workflows/{run_id}/children` | Child executions. |
 | POST | `/control/workflows/{run_id}/signal` | `{channel, value, message_id?}` → `204`. |
@@ -331,7 +346,18 @@ All worker-API paths are under `/v1/namespaces/{namespace}`; control-API paths a
 | GET | `/control/workflows/{run_id}/updates/{update_id}` | `?timeout=`; long-polls for the outcome. |
 | POST | `/control/workflows/{run_id}/cancel` | `{reason?}`. |
 | POST | `/control/workflows/{run_id}/terminate` | `{reason?}`. |
-| GET | `/control/workflows/{run_id}/result` | `?timeout=`; long-polls for the run to close. |
+| POST | `/control/workflows/{run_id}/reset` | `{to: "first_tick"|"before_last_failure", reason?}` or `{after_tick: N, reason?}` → `201` with the new run. |
+| GET | `/control/workflows/{run_id}/result` | `?timeout=`; long-polls for the run to close (does not follow a `continued_run_id` chain: it answers for exactly the run id given). |
+| POST | `/control/schedules` | Create: `{schedule_id, workflow, args?, cron|interval, timezone?, start_at?, end_at?, jitter?, overlap?, catchup_window?, pause_on_failure?, paused?, note?}` → `201`. |
+| GET | `/control/schedules` | List: `?limit=`. |
+| GET | `/control/schedules/{schedule_id}` | Describe. |
+| DELETE | `/control/schedules/{schedule_id}` | Delete: `{ok}`. |
+| POST | `/control/schedules/{schedule_id}/pause` | `{note?}`. |
+| POST | `/control/schedules/{schedule_id}/unpause` | `{note?}`. |
+| POST | `/control/schedules/{schedule_id}/trigger` | Start one run now. |
+| POST | `/control/schedules/{schedule_id}/backfill` | `{start, end}` (ISO timestamps): start runs for past fire times. |
+| GET | `/control/schedules/{schedule_id}/upcoming` | `?count=`: the next fire times. |
+| POST | `/control/schedules/{schedule_id}/update` | Any subset of the create fields (except `schedule_id`/`workflow`/`args`); only the ones given change. |
 
 ### Top-level
 

@@ -16,9 +16,15 @@ from starlette.routing import Route
 
 from loomwork.server.console import errors as console_errors
 from loomwork.server.console.auth_views import home_view, login_view, logout_view
+from loomwork.server.console.batch_views import (
+    batch_cancel_view,
+    batch_terminate_view,
+    batch_view,
+)
 from loomwork.server.console.runs_views import (
     run_cancel_view,
     run_detail_view,
+    run_reset_view,
     run_signal_view,
     run_terminate_view,
     runs_list_view,
@@ -64,6 +70,10 @@ def build_console_app(state: ServerState) -> Starlette:
         Route(
             "/{namespace}/runs/{run_id}/terminate", run_terminate_view(runtime), methods=["POST"]
         ),
+        Route("/{namespace}/runs/{run_id}/reset", run_reset_view(runtime), methods=["POST"]),
+        Route("/{namespace}/batch", batch_view(runtime), methods=["GET"]),
+        Route("/{namespace}/batch/cancel", batch_cancel_view(runtime), methods=["POST"]),
+        Route("/{namespace}/batch/terminate", batch_terminate_view(runtime), methods=["POST"]),
         Route("/{namespace}/schedules", schedules_list_view(runtime), methods=["GET"]),
         Route(
             "/{namespace}/schedules/{schedule_id}", schedule_detail_view(runtime), methods=["GET"]

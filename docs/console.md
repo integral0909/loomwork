@@ -32,7 +32,7 @@ server is unaffected).
 | `enabled` | `true` | Mount the console at `/console`. |
 | `session_secret` | none | HMAC key that signs session cookies. Unset generates a random key per process (sessions do not survive a restart; fine for a single long-running server, set this explicitly if you restart often or run more than one server process behind a load balancer sharing the same key). |
 | `session_ttl_seconds` | `28800` (8h) | How long a signed-in session stays valid. |
-| `search_attributes` | `{}` | Display-only hint: `{name: type}` shown next to the runs-list query box so operators do not have to guess what search attributes exist. It does not change which attributes a query may reference -- that is controlled by the engine's own `EngineConfig.search_attributes` (see [visibility queries](visibility-queries.md)), which the console cannot set. |
+| `search_attributes` | `{}` | Display-only override: `{name: type}` shown next to the runs-list and batch query boxes, in place of the real schema, when set. Left unset (the default), the console shows and enforces the same schema: `[server.search_attributes]` (see [server mode](server.md)), which is what actually controls which attributes a query may reference. |
 
 ## Authentication and the session model
 
@@ -108,7 +108,8 @@ other long-lived credential.
   flash message carried in the redirect target's own query string, so reloading the
   result page never resubmits the form.
 - **Terminate requires an explicit confirmation checkbox** in addition to the reason
-  field, since it stops a run immediately without running any more workflow code.
+  field, since it stops a run immediately without running any more workflow code; the
+  batch page's terminate action requires the same checkbox, for every matched run.
 
 ## Pages
 
@@ -122,9 +123,19 @@ other long-lived credential.
 - **Run detail** (`/console/{namespace}/runs/{run_id}`): summary fields, decoded result
   or failure (with its full cause chain), search attributes, pending step jobs (attempt,
   lease owner and expiry, last failure), children, the parent link, the continue-as-new
-  chain in both directions, and a full history timeline (event id, time, kind, and every
-  other field of that event, decoded the same way results are). Below that, the
-  signal/cancel/terminate forms (`control_write` only).
+  chain in both directions, and the reset chain in both directions (`reset_from_run_id`
+  backwards, `continued_run_id` forwards -- a reset reuses the same field continue-as-new
+  does, see [recovery](operations/recovery.md#resetting-a-run)), and a full history
+  timeline (event id, time, kind, and every other field of that event, decoded the same
+  way results are). Below that, the signal/cancel/terminate/reset forms (`control_write`
+  only): reset picks a point (first tick, before the last tick, or after a given tick
+  number) and requires a reason, exactly like `loomwork workflow reset`.
+- **Batch** (`/console/{namespace}/batch`): enter a
+  [visibility query](visibility-queries.md), preview every run it matches (a plain read,
+  `control_read`), then cancel or terminate all of them in one action (`control_write`;
+  terminate needs the same confirmation checkbox as the single-run form). The preview
+  *is* the confirmation step: the query text carries through the action forms so what was
+  previewed is exactly what gets acted on.
 - **Schedules list** and **schedule detail** (`/console/{namespace}/schedules[/...]`):
   spec, policy, next fire time, upcoming fire times, currently running and recently
   completed actions, and pause/unpause/trigger forms.
@@ -134,5 +145,6 @@ other long-lived credential.
 The console only reads and controls what the engine and store already expose through
 `Engine`/`Store` (no new store methods were added to build it): it cannot run a workflow
 query handler (the control API cannot either -- the server never imports workflow code),
-edit search attribute schemas, or create/delete/update a schedule's spec (only pause,
-unpause and trigger). Use the [CLI](cli.md) or the Python client for those.
+edit search attribute schemas (declare them in `[server.search_attributes]` instead, see
+[server mode](server.md)), or create/delete/update a schedule's spec (only pause, unpause
+and trigger). Use the [CLI](cli.md) or the Python client for those.

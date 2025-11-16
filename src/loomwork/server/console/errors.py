@@ -24,6 +24,7 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
 from loomwork.errors import (
+    InvalidResetPointError,
     LoomworkError,
     NotFoundError,
     ScheduleConflictError,
@@ -50,6 +51,7 @@ _STATUS: dict[type[Exception], int] = {
     WorkflowAlreadyStartedError: 409,
     ScheduleExistsError: 409,
     ScheduleConflictError: 409,
+    InvalidResetPointError: 422,
     VisibilityQueryError: 400,
     ValueError: 400,
 }
@@ -86,6 +88,7 @@ def install(app: Starlette, runtime: ConsoleRuntime) -> None:
         WorkflowAlreadyStartedError,
         ScheduleExistsError,
         ScheduleConflictError,
+        InvalidResetPointError,
         VisibilityQueryError,
         ValueError,
     ):

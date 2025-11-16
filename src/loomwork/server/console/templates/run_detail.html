@@ -54,11 +54,14 @@
     {% if record.continued_run_id %}
     <li>Continued as: <a href="/console/{{ namespace }}/runs/{{ record.continued_run_id }}">{{ record.continued_run_id }}</a></li>
     {% endif %}
+    {% if record.reset_from_run_id %}
+    <li>Reset from: <a href="/console/{{ namespace }}/runs/{{ record.reset_from_run_id }}">{{ record.reset_from_run_id }}</a></li>
+    {% endif %}
     {% for child in children %}
     <li>Child: <a href="/console/{{ namespace }}/runs/{{ child.run_id }}">{{ child.workflow_id }}</a>
       (<span class="status-pill status-{{ child.status.value }}">{{ child.status.value }}</span>)</li>
     {% endfor %}
-    {% if not record.parent_run_id and not continued_from and not record.continued_run_id and not children %}
+    {% if not record.parent_run_id and not continued_from and not record.continued_run_id and not record.reset_from_run_id and not children %}
     <li class="muted">No parent, continuation or children.</li>
     {% endif %}
   </ul>
@@ -153,6 +156,29 @@
       I understand this stops the run immediately without running any more workflow code.
     </label>
     <button type="submit" class="danger">Terminate</button>
+  </form>
+
+  <form method="post" action="/console/{{ namespace }}/runs/{{ record.run_id }}/reset">
+    <h3>Reset</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted">
+      Truncates this run's history at a tick boundary and starts a new run of the same
+      workflow id from there. See <code>docs/operations/recovery.md</code>.
+    </p>
+    <label>
+      <input type="radio" name="reset_point" value="before_last_failure" checked>
+      Before the last tick (the common case: undo whatever the run's last tick decided)
+    </label>
+    <label>
+      <input type="radio" name="reset_point" value="first_tick">
+      First tick (replay from scratch, with the original arguments)
+    </label>
+    <label>
+      <input type="radio" name="reset_point" value="after_tick">
+      After tick number <input type="number" name="after_tick" min="0" step="1" size="6">
+    </label>
+    <label><span class="field-label">Reason</span><input type="text" name="reason" required></label>
+    <button type="submit" class="secondary">Reset</button>
   </form>
 </div>
 {% endif %}

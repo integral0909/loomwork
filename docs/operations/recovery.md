@@ -22,6 +22,15 @@ new_handle = await handle.reset(
 result = await new_handle.result()
 ```
 
+The same operation is available without writing Python: `loomwork workflow reset
+order-A-17 --to before-last-failure --reason "..."` (see the [CLI reference](../cli.md)),
+or from the operator console's run detail page (`/console/{namespace}/runs/{run_id}`),
+which also shows the reset chain (`reset_from_run_id` backwards, `continued_run_id`
+forwards) on both the old and new run's pages. All three -- Python, CLI and console --
+call the same `Engine.reset`; a CLI or console session with only an `operator` token
+(no `worker` role) still works, through the server's control API (see
+[server mode](../server.md)).
+
 ### Choosing a reset point
 
 `ResetPoint` names a tick boundary; the new run's history is everything up to and
@@ -130,6 +139,16 @@ keeps going. Raise the concurrency for large fleets, lower it if the store is a
 bottleneck; lower `page_size` if runs are closing quickly enough that a keyset page might
 otherwise skip one (an edge case only visible with pages in the tens of thousands and no
 `status = 'running'` filter to shrink the result set as you go).
+
+The CLI exposes the same three operations as `loomwork workflow batch signal|cancel|
+terminate --query Q [...]`, with `--dry-run` to preview matches before acting,
+`--page-size`/`--concurrency` matching the Python parameters above, and a confirmation
+guard (`--max-runs`, default 1000; pass `--yes` to act on more) since a broad query is
+easy to write by mistake and hard to undo. The operator console's batch page
+(`/console/{namespace}/batch`) gives the same preview-then-act flow for cancel and
+terminate (not signal, which needs a channel and value the console has no generic form
+for) with the query text carried through as the confirmation. See the
+[CLI reference](../cli.md) and [console](../console.md).
 
 ## History size limits
 

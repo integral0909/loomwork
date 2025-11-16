@@ -158,3 +158,35 @@ def test_limits_validate_positive() -> None:
                 "limits": {"long_poll_max_seconds": -1},
             }
         )
+
+
+def test_search_attributes_declared_per_namespace(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        """
+        [server]
+        [server.namespaces]
+        default = "memory://"
+        billing = "memory://"
+        [server.search_attributes.default]
+        tier = "string"
+        amount = "float"
+        [server.auth]
+        disabled = true
+        """,
+    )
+    config = load_config(path)
+    assert config.search_attributes["default"] == {"tier": "string", "amount": "float"}
+    # A namespace with no entry gets an empty schema (the historical default).
+    assert config.search_attributes.get("billing", {}) == {}
+
+
+def test_search_attributes_rejects_unknown_type() -> None:
+    with pytest.raises(ValidationError, match="unknown search attribute type"):
+        ServerConfig.model_validate(
+            {
+                "namespaces": {"default": "memory://"},
+                "auth": {"disabled": True},
+                "search_attributes": {"default": {"tier": "not-a-type"}},
+            }
+        )

@@ -59,5 +59,12 @@ def flash_from_request(request: Request) -> tuple[str, str] | None:
 
 
 def redirect_with_flash(path: str, *, level: str, message: str) -> RedirectResponse:
+    """Redirect to ``path``, carrying a flash message in its query string.
+
+    ``path`` may already have its own query string (the batch page keeps its query text
+    across the redirect this way); the flash parameters are appended with ``&`` rather
+    than assuming ``path`` is bare.
+    """
     query = urlencode({"flash": message, "level": level})
-    return RedirectResponse(url=f"{path}?{query}", status_code=303)
+    separator = "&" if "?" in path else "?"
+    return RedirectResponse(url=f"{path}{separator}{query}", status_code=303)

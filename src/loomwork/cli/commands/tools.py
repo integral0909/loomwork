@@ -28,8 +28,8 @@ from loomwork.cli.commands.common import (
     execution_fields,
     execution_json,
     execution_row,
-    handle_for,
     open_session,
+    store_handle_for,
 )
 from loomwork.cli.errors import CliError, ExitCode, UsageError
 from loomwork.cli.loader import load_app
@@ -220,7 +220,7 @@ async def replay(args: argparse.Namespace, console: Console) -> int:
         history = await CodecBoundary(app.converter.codec).decode(run.history)
     else:
         async with open_session(args, app) as active:
-            handle = handle_for(args, active)
+            handle = store_handle_for(args, active)
             history = await CodecBoundary(app.converter.codec).decode(await handle.history())
 
     try:
@@ -290,7 +290,7 @@ async def replay(args: argparse.Namespace, console: Console) -> int:
 
 async def workflow_graph(args: argparse.Namespace, console: Console) -> int:
     async with open_session(args) as active:
-        handle = handle_for(args, active)
+        handle = store_handle_for(args, active)
         record = await handle.describe()
         history = await handle.history()
     title = f"{record.workflow_id} ({record.workflow_name})"

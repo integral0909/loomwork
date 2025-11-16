@@ -112,3 +112,16 @@ def accessible_namespaces(runtime: ConsoleRuntime, record: TokenRecord) -> list[
 
 def can_write(record: TokenRecord, namespace: str) -> bool:
     return record.allows_namespace(namespace) and record.grants("control_write")
+
+
+def search_attribute_hint(runtime: ConsoleRuntime, namespace: str) -> dict[str, str]:
+    """Search attribute names and types to show next to a namespace's query box.
+
+    ``[server.console.search_attributes]`` overrides this display when set (it may show
+    a friendlier subset or relabelled types); otherwise it falls back to
+    ``[server.search_attributes]`` for the namespace, which is also what the engine
+    actually enforces -- so by default the hint and the real schema agree.
+    """
+    if runtime.config.console.search_attributes:
+        return runtime.config.console.search_attributes
+    return runtime.config.search_attributes.get(namespace, {})

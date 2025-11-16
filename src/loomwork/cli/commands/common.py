@@ -8,6 +8,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from loomwork.cli.backend import Operations, OperationsHandle
 from loomwork.cli.connection import ConnectionOptions, Session, add_connection_arguments, session
 from loomwork.cli.errors import UsageError
 from loomwork.cli.loader import AppSpec, load_app
@@ -47,7 +48,18 @@ def connected(parser: argparse.ArgumentParser, handler: Handler) -> None:
     parser.set_defaults(handler=handler)
 
 
-def handle_for(args: argparse.Namespace, active: Session) -> WorkflowHandle[Any]:
+def handle_for(args: argparse.Namespace, ops: Operations) -> OperationsHandle:
+    if not args.workflow_id and not args.run_id:
+        raise UsageError("give a workflow id or --run RUN_ID")
+    return ops.get_handle(args.workflow_id or None, run_id=args.run_id)
+
+
+def store_handle_for(args: argparse.Namespace, active: Session) -> WorkflowHandle[Any]:
+    """Like :func:`handle_for`, for the few commands (``query``, ``steps``) that always
+    need the real, store-backed handle -- because they use methods
+    (:meth:`~loomwork.client.handle.WorkflowHandle.query`,
+    :meth:`~loomwork.client.handle.WorkflowHandle.pending_steps`) the control API has no
+    way to answer, and so are not part of :class:`~loomwork.cli.backend.OperationsHandle`."""
     if not args.workflow_id and not args.run_id:
         raise UsageError("give a workflow id or --run RUN_ID")
     return active.client.get_handle(args.workflow_id or None, run_id=args.run_id)
@@ -156,6 +168,8 @@ def execution_fields(record: ExecutionRecord, converter: DataConverter) -> list[
         fields.append(("close reason", record.close_reason))
     if record.parent_run_id:
         fields.append(("parent run", record.parent_run_id))
+    if record.reset_from_run_id:
+        fields.append(("reset from", record.reset_from_run_id))
     if record.continued_run_id:
         fields.append(("continued as", record.continued_run_id))
     return fields

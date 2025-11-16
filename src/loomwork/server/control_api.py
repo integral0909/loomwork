@@ -9,6 +9,7 @@ the way an in-process :class:`~loomwork.client.client.Client` does.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -19,20 +20,40 @@ from starlette.routing import Route
 from loomwork.codec.converter import default_converter
 from loomwork.history.events import UpdateCompleted
 from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
+from loomwork.retry import RetryPolicy
+from loomwork.schedules.model import (
+    OverlapPolicy,
+    ScheduleAction,
+    SchedulePolicy,
+    ScheduleSpec,
+    ScheduleState,
+    validate_schedule_id,
+)
+from loomwork.schedules.service import ScheduleService
 from loomwork.server.auth import audit
 from loomwork.server.errors import bad_request
-from loomwork.server.responses import event_view, execution_view, failure_view, payload_view
+from loomwork.server.responses import (
+    event_view,
+    execution_view,
+    failure_view,
+    payload_view,
+    schedule_view,
+)
 from loomwork.server.schemas import (
+    BackfillRequest,
+    CreateScheduleRequest,
     ReasonRequest,
     RequestUpdateRequest,
     ResetWorkflowRequest,
+    ScheduleNoteRequest,
     SignalRequest,
     SignalWithStartRequest,
     StartWorkflowRequest,
+    UpdateScheduleRequest,
 )
 from loomwork.server.security import authenticate, server_state
 from loomwork.server.state import NamespaceState
-from loomwork.store.records import ExecutionStatus
+from loomwork.store.records import ExecutionRecord, ExecutionStatus
 
 _M = TypeVar("_M", bound=BaseModel)
 
@@ -70,10 +91,19 @@ async def start_workflow(request: Request) -> JSONResponse:
     ns = _namespace(request)
     body = await _model(request, StartWorkflowRequest)
     args = default_converter.encode_args(body.args)
+    retry = (
+        RetryPolicy(max_attempts=body.retry_max_attempts)
+        if body.retry_max_attempts is not None
+        else None
+    )
     record = await ns.engine.start_workflow(
         body.name,
         args,
         workflow_id=body.workflow_id,
+        search_attributes=body.search_attributes,
+        run_timeout=body.run_timeout,
+        execution_timeout=body.execution_timeout,
+        retry_policy=retry,
         id_reuse_policy=IdReusePolicy(body.id_reuse_policy),
         id_conflict_policy=IdConflictPolicy(body.id_conflict_policy),
     )
@@ -87,14 +117,25 @@ async def list_workflows(request: Request) -> JSONResponse:
     )
     ns = _namespace(request)
     params = request.query_params
-    status = ExecutionStatus(params["status"]) if "status" in params else None
-    records = await ns.engine.list_executions(
-        workflow_name=params.get("workflow_name"),
-        status=status,
-        limit=int(params.get("limit", 100)),
-    )
+    limit = int(params.get("limit", 100))
+    query_text = params.get("query")
+    if query_text:
+        if "workflow_name" in params or "status" in params:
+            raise bad_request("'query' cannot be combined with 'workflow_name' or 'status'")
+        records = await ns.engine.query_executions(query_text, limit)
+    else:
+        status = ExecutionStatus(params["status"]) if "status" in params else None
+        records = await ns.engine.list_executions(
+            workflow_name=params.get("workflow_name"), status=status, limit=limit
+        )
     _audit(request, token.id, "list_workflows")
     return JSONResponse({"executions": [execution_view(r) for r in records]})
+
+
+async def _describe_view(ns: NamespaceState, record: ExecutionRecord) -> dict[str, Any]:
+    body = execution_view(record)
+    body["search_attributes"] = await ns.engine.search_attributes(record.run_id)
+    return body
 
 
 async def describe_workflow(request: Request) -> JSONResponse:
@@ -104,7 +145,33 @@ async def describe_workflow(request: Request) -> JSONResponse:
     ns = _namespace(request)
     record = await ns.engine.resolve(run_id=request.path_params["run_id"])
     _audit(request, token.id, "describe_workflow", record.run_id)
-    return JSONResponse(execution_view(record))
+    return JSONResponse(await _describe_view(ns, record))
+
+
+async def describe_workflow_by_id(request: Request) -> JSONResponse:
+    """Resolve the *latest* run of a workflow id: the control-API counterpart of the
+    worker API's ``GET /workflows/{workflow_id}/latest``, needed so a caller that only
+    knows a workflow id (not one of its run ids) can reach every other ``{run_id}``-keyed
+    endpoint below."""
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    record = await ns.engine.resolve(workflow_id=request.path_params["workflow_id"])
+    _audit(request, token.id, "describe_workflow", record.run_id)
+    return JSONResponse(await _describe_view(ns, record))
+
+
+async def whoami(request: Request) -> JSONResponse:
+    """What the caller's token may do: its id and roles, in this namespace.
+
+    Lets a caller (in practice, the CLI) discover whether its token has ``worker`` role
+    (so it should use the worker API / ``HttpStore``) or only ``operator``/``reader``
+    (so it must use this control API instead) without already knowing which -- the one
+    endpoint any correctly-scoped token may call regardless of its role.
+    """
+    token = await authenticate(request, namespace=_namespace_name(request), capability=None)
+    return JSONResponse({"id": token.id, "roles": [r.value for r in token.roles]})
 
 
 async def workflow_history(request: Request) -> JSONResponse:
@@ -252,10 +319,201 @@ async def workflow_result(request: Request) -> JSONResponse:
     return JSONResponse(execution_view(record))
 
 
+# --------------------------------------------------------------------------- schedules
+
+
+def _parse_timestamp(text: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise bad_request(f"invalid timestamp {text!r}: {exc}") from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _schedule_service(ns: NamespaceState) -> ScheduleService:
+    return ScheduleService(ns.store, ns.engine.clock)
+
+
+async def create_schedule(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    body = await _model(request, CreateScheduleRequest)
+    if (body.cron is None) == (body.interval is None):
+        raise bad_request("give exactly one of 'cron' and 'interval'")
+    state = ScheduleState(
+        schedule_id=validate_schedule_id(body.schedule_id),
+        spec=ScheduleSpec(
+            cron=body.cron,
+            interval=body.interval,
+            timezone=body.timezone,
+            start_at=_parse_timestamp(body.start_at) if body.start_at else None,
+            end_at=_parse_timestamp(body.end_at) if body.end_at else None,
+            jitter=body.jitter,
+        ),
+        action=ScheduleAction(body.workflow, default_converter.encode_args(body.args)),
+        policy=SchedulePolicy(
+            OverlapPolicy(body.overlap), body.catchup_window, body.pause_on_failure
+        ),
+        paused=body.paused,
+        note=body.note,
+    )
+    saved = await _schedule_service(ns).create(state)
+    _audit(request, token.id, "create_schedule", saved.schedule_id)
+    return JSONResponse(schedule_view(saved), status_code=201)
+
+
+async def list_schedules(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    limit = int(request.query_params.get("limit", 100))
+    states = await ns.store.list_schedules(limit)
+    _audit(request, token.id, "list_schedules")
+    return JSONResponse({"schedules": [schedule_view(s) for s in states]})
+
+
+async def describe_schedule(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    schedule_id = request.path_params["schedule_id"]
+    state = await ns.store.get_schedule(schedule_id)
+    _audit(request, token.id, "describe_schedule", schedule_id)
+    return JSONResponse(schedule_view(state))
+
+
+async def _set_paused(request: Request, *, paused: bool, action: str) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    schedule_id = request.path_params["schedule_id"]
+    body = await _model(request, ScheduleNoteRequest)
+    state = await _schedule_service(ns).update(schedule_id, paused=paused, note=body.note)
+    _audit(request, token.id, action, schedule_id)
+    return JSONResponse(schedule_view(state))
+
+
+async def pause_schedule(request: Request) -> JSONResponse:
+    return await _set_paused(request, paused=True, action="pause_schedule")
+
+
+async def unpause_schedule(request: Request) -> JSONResponse:
+    return await _set_paused(request, paused=False, action="unpause_schedule")
+
+
+async def trigger_schedule(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    schedule_id = request.path_params["schedule_id"]
+    state = await _schedule_service(ns).trigger(schedule_id)
+    _audit(request, token.id, "trigger_schedule", schedule_id)
+    return JSONResponse(schedule_view(state))
+
+
+async def backfill_schedule(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    schedule_id = request.path_params["schedule_id"]
+    body = await _model(request, BackfillRequest)
+    start, end = _parse_timestamp(body.start), _parse_timestamp(body.end)
+    if end <= start:
+        raise bad_request("'end' must be after 'start'")
+    state = await _schedule_service(ns).backfill(schedule_id, start, end)
+    _audit(request, token.id, "backfill_schedule", schedule_id)
+    return JSONResponse(schedule_view(state))
+
+
+async def upcoming_schedule(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    schedule_id = request.path_params["schedule_id"]
+    count = int(request.query_params.get("count", 5))
+    times = await _schedule_service(ns).upcoming(schedule_id, count)
+    _audit(request, token.id, "upcoming_schedule", schedule_id)
+    return JSONResponse({"upcoming": [t.isoformat() for t in times]})
+
+
+async def update_schedule(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    schedule_id = request.path_params["schedule_id"]
+    body = await _model(request, UpdateScheduleRequest)
+    service = _schedule_service(ns)
+    current = await service.store.get_schedule(schedule_id)
+    changes: dict[str, Any] = {}
+    if any(v is not None for v in (body.cron, body.interval, body.timezone, body.jitter)):
+        old = current.spec
+        cron = (
+            body.cron
+            if body.cron is not None
+            else (None if body.interval is not None else old.cron)
+        )
+        interval = (
+            body.interval
+            if body.interval is not None
+            else (None if body.cron is not None else old.interval)
+        )
+        changes["spec"] = ScheduleSpec(
+            cron=cron,
+            interval=interval,
+            offset=old.offset if interval == old.interval else 0,
+            timezone=body.timezone or old.timezone,
+            start_at=old.start_at,
+            end_at=old.end_at,
+            jitter=body.jitter if body.jitter is not None else old.jitter,
+        )
+    if (
+        body.overlap is not None
+        or body.catchup_window is not None
+        or body.pause_on_failure is not None
+    ):
+        old_policy = current.policy
+        changes["policy"] = SchedulePolicy(
+            OverlapPolicy(body.overlap) if body.overlap is not None else old_policy.overlap,
+            body.catchup_window if body.catchup_window is not None else old_policy.catchup_window,
+            body.pause_on_failure
+            if body.pause_on_failure is not None
+            else old_policy.pause_on_failure,
+        )
+    if body.note is not None:
+        changes["note"] = body.note
+    if not changes:
+        raise bad_request("nothing to change")
+    state = await service.update(schedule_id, **changes)
+    _audit(request, token.id, "update_schedule", schedule_id)
+    return JSONResponse(schedule_view(state))
+
+
+async def delete_schedule(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    schedule_id = request.path_params["schedule_id"]
+    deleted = await ns.store.delete_schedule(schedule_id)
+    _audit(request, token.id, "delete_schedule", schedule_id)
+    return JSONResponse({"ok": deleted})
+
+
 routes = [
+    Route("/whoami", whoami, methods=["GET"]),
     Route("/workflows", start_workflow, methods=["POST"]),
     Route("/workflows", list_workflows, methods=["GET"]),
     Route("/workflows/signal-with-start", signal_with_start, methods=["POST"]),
+    Route("/workflows/by-id/{workflow_id}", describe_workflow_by_id, methods=["GET"]),
     Route("/workflows/{run_id}", describe_workflow, methods=["GET"]),
     Route("/workflows/{run_id}/history", workflow_history, methods=["GET"]),
     Route("/workflows/{run_id}/children", workflow_children, methods=["GET"]),
@@ -266,6 +524,16 @@ routes = [
     Route("/workflows/{run_id}/terminate", terminate_workflow, methods=["POST"]),
     Route("/workflows/{run_id}/reset", reset_workflow, methods=["POST"]),
     Route("/workflows/{run_id}/result", workflow_result, methods=["GET"]),
+    Route("/schedules", create_schedule, methods=["POST"]),
+    Route("/schedules", list_schedules, methods=["GET"]),
+    Route("/schedules/{schedule_id}", describe_schedule, methods=["GET"]),
+    Route("/schedules/{schedule_id}", delete_schedule, methods=["DELETE"]),
+    Route("/schedules/{schedule_id}/pause", pause_schedule, methods=["POST"]),
+    Route("/schedules/{schedule_id}/unpause", unpause_schedule, methods=["POST"]),
+    Route("/schedules/{schedule_id}/trigger", trigger_schedule, methods=["POST"]),
+    Route("/schedules/{schedule_id}/backfill", backfill_schedule, methods=["POST"]),
+    Route("/schedules/{schedule_id}/upcoming", upcoming_schedule, methods=["GET"]),
+    Route("/schedules/{schedule_id}/update", update_schedule, methods=["POST"]),
 ]
 
 

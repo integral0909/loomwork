@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Batch -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>Batch -- {{ namespace }}</h1>
+<p class="muted">
+  Enter a visibility query, preview the runs it matches, then cancel or terminate all
+  of them. See <a href="/console/{{ namespace }}/runs">runs</a> for a single run's
+  actions.
+</p>
+
+<form class="filters" method="get" action="/console/{{ namespace }}/batch">
+  <label class="query-field">
+    <span>Visibility query</span>
+    <input type="text" name="q" value="{{ query_text }}"
+           placeholder="status = 'running' AND workflow_name = 'orders.process'">
+  </label>
+  <button type="submit">Preview</button>
+</form>
+
+{% if query_error %}
+<div class="banner banner-error"><pre>{{ query_error }}</pre></div>
+{% endif %}
+
+{% if query_text %}
+<div class="card">
+  <h2>Matches</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Workflow id</th>
+        <th>Workflow name</th>
+        <th>Status</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for record in records %}
+      <tr>
+        <td><a href="/console/{{ namespace }}/runs/{{ record.run_id }}">{{ record.workflow_id }}</a></td>
+        <td>{{ record.workflow_name }}</td>
+        <td><span class="status-pill status-{{ record.status.value }}">{{ record.status.value }}</span></td>
+        <td>{{ record.created_at.isoformat() }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">No runs match.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if truncated %}
+  <p class="muted">Showing the first {{ preview_limit }} matches; more runs match this query.</p>
+  {% else %}
+  <p class="muted">{{ records | length }} run(s) match.</p>
+  {% endif %}
+</div>
+
+{% if can_write and records %}
+<div class="card actions">
+  <form method="post" action="/console/{{ namespace }}/batch/cancel">
+    <h3>Request cancellation</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="query" value="{{ query_text }}">
+    <label><span class="field-label">Reason</span><input type="text" name="reason"></label>
+    <button type="submit" class="secondary">Cancel every match</button>
+  </form>
+
+  <form method="post" action="/console/{{ namespace }}/batch/terminate">
+    <h3>Terminate</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="query" value="{{ query_text }}">
+    <label><span class="field-label">Reason</span><input type="text" name="reason" required></label>
+    <label>
+      <input type="checkbox" name="confirm" value="yes" required>
+      I understand this stops every matching run immediately, without running any more
+      workflow code.
+    </label>
+    <button type="submit" class="danger">Terminate every match</button>
+  </form>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

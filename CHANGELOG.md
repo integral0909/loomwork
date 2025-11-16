@@ -154,6 +154,14 @@ All notable changes to this project are documented here. The format follows
   plus `TracingClientInterceptor` for OpenTelemetry.
 - `CorrelationFilter` stamps workflow, run, step and trace ids on ordinary log records
   emitted from workflows and steps.
+- CLI: `workflow reset`, `workflow batch signal|cancel|terminate` (with dry run and a
+  confirmation guard) and id policies on `workflow start`. With `--server`, operator and
+  reader tokens now work through the control API (`loomwork.remote.ControlClient`).
+- Control API: schedule management, `whoami`, lookup by workflow id and visibility
+  queries. Server config gains per-namespace `[server.search_attributes]`, used by the
+  control API and the console.
+- Console: reset from the run page and a batch page to preview, cancel or terminate runs
+  matching a query.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

@@ -9,9 +9,10 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from loomwork.codec.converter import default_converter
-from loomwork.errors import PayloadError, WorkflowClosedError
+from loomwork.errors import InvalidResetPointError, PayloadError, WorkflowClosedError
 from loomwork.history.events import WorkflowStarted
 from loomwork.history.serde import event_to_dict
+from loomwork.options import ResetPoint
 from loomwork.server.auth import require
 from loomwork.server.console.formatting import describe_payload, failure_chain
 from loomwork.server.console.render import redirect_with_flash, render
@@ -21,6 +22,7 @@ from loomwork.server.console.runtime import (
     can_write,
     check_csrf,
     require_session,
+    search_attribute_hint,
 )
 from loomwork.server.console.util import parse_form, parse_int
 from loomwork.store.records import ExecutionStatus
@@ -82,7 +84,7 @@ def runs_list_view(runtime: ConsoleRuntime) -> View:
             query_error=query_error,
             limit=limit,
             statuses=[s.value for s in ExecutionStatus],
-            search_attributes=runtime.config.console.search_attributes,
+            search_attributes=search_attribute_hint(runtime, namespace),
             can_write=can_write(session.record, namespace),
             csrf_token=session.csrf,
         )
@@ -207,5 +209,44 @@ def run_terminate_view(runtime: ConsoleRuntime) -> View:
         if ok:
             return redirect_with_flash(path, level="success", message="Run terminated.")
         return redirect_with_flash(path, level="warning", message="Run was already closed.")
+
+    return view
+
+
+def _reset_point_from_form(form: dict[str, str]) -> ResetPoint:
+    point = form.get("reset_point", "")
+    if point == "first_tick":
+        return ResetPoint.first_tick()
+    if point == "before_last_failure":
+        return ResetPoint.before_last_failure()
+    if point == "after_tick":
+        try:
+            count = int(form.get("after_tick", ""))
+        except ValueError:
+            raise InvalidResetPointError("give a whole number of ticks to keep") from None
+        return ResetPoint.after_tick(count)
+    raise InvalidResetPointError(f"unknown reset point {point!r}")
+
+
+def run_reset_view(runtime: ConsoleRuntime) -> View:
+    async def view(request: Request) -> Response:
+        namespace, run_id, form = await _run_action(request, runtime)
+        ns = runtime.state.namespace(namespace)
+        path = _run_path(namespace, run_id)
+        try:
+            to = _reset_point_from_form(form)
+        except InvalidResetPointError as exc:
+            return redirect_with_flash(path, level="error", message=str(exc))
+        reason = form.get("reason", "")
+        if not reason.strip():
+            return redirect_with_flash(
+                path, level="error", message="A reason is required to reset a run."
+            )
+        new_record = await ns.engine.reset(run_id, to=to, reason=reason)
+        return redirect_with_flash(
+            _run_path(namespace, new_record.run_id),
+            level="success",
+            message=f"Reset: new run {new_record.workflow_id} (run {new_record.run_id}).",
+        )
 
     return view

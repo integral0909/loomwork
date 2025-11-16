@@ -300,3 +300,292 @@ async def test_reset_requires_exactly_one_of_to_or_after_tick(
     run_id = started.json()["run_id"]
     response = await control_client.post(f"/workflows/{run_id}/reset", json={"reason": "x"})
     assert response.status_code == 400
+
+
+async def test_whoami(control_client: httpx.AsyncClient) -> None:
+    # auth.disabled: every request is an anonymous administrator.
+    response = await control_client.get("/whoami")
+    assert response.status_code == 200
+    assert response.json() == {"id": "anonymous", "roles": ["admin"]}
+
+
+async def test_describe_by_workflow_id_resolves_the_latest_run(
+    control_client: httpx.AsyncClient,
+) -> None:
+    started = await control_client.post(
+        "/workflows", json={"name": "control.echo", "args": ["a"], "workflow_id": "by-id-1"}
+    )
+    run_id = started.json()["run_id"]
+    response = await control_client.get("/workflows/by-id/by-id-1")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == run_id
+    assert body["search_attributes"] == {}
+
+
+async def test_describe_includes_search_attributes(control_client: httpx.AsyncClient) -> None:
+    started = await control_client.post(
+        "/workflows",
+        json={
+            "name": "control.waits_for_signal",
+            "workflow_id": "sa-1",
+            "search_attributes": {},
+        },
+    )
+    run_id = started.json()["run_id"]
+    response = await control_client.get(f"/workflows/{run_id}")
+    assert response.status_code == 200
+    assert "search_attributes" in response.json()
+
+
+async def test_start_with_timeouts_and_retry(control_client: httpx.AsyncClient) -> None:
+    response = await control_client.post(
+        "/workflows",
+        json={
+            "name": "control.waits_for_signal",
+            "workflow_id": "opts-1",
+            "run_timeout": 3600,
+            "execution_timeout": 7200,
+            "retry_max_attempts": 3,
+        },
+    )
+    assert response.status_code == 201
+    run_id = response.json()["run_id"]
+    history = await control_client.get(f"/workflows/{run_id}/history")
+    started_event = history.json()["events"][0]
+    assert started_event["run_timeout"] == 3600
+    assert started_event["retry_policy"]["max_attempts"] == 3
+
+
+async def test_list_with_visibility_query(control_client: httpx.AsyncClient) -> None:
+    started = await control_client.post(
+        "/workflows", json={"name": "control.echo", "args": ["q"], "workflow_id": "query-list-1"}
+    )
+    run_id = started.json()["run_id"]
+    await _wait_status(control_client, run_id, "completed")
+
+    response = await control_client.get(
+        "/workflows", params={"query": "workflow_id = 'query-list-1'"}
+    )
+    assert response.status_code == 200
+    ids = [e["workflow_id"] for e in response.json()["executions"]]
+    assert ids == ["query-list-1"]
+
+
+async def test_list_query_cannot_combine_with_filters(control_client: httpx.AsyncClient) -> None:
+    response = await control_client.get(
+        "/workflows", params={"query": "status = 'running'", "status": "running"}
+    )
+    assert response.status_code == 400
+
+
+# --------------------------------------------------------------------------- schedules
+
+
+async def test_schedule_lifecycle(control_client: httpx.AsyncClient) -> None:
+    created = await control_client.post(
+        "/schedules",
+        json={
+            "schedule_id": "sched-1",
+            "workflow": "control.echo",
+            "args": ["hi"],
+            "cron": "0 3 * * *",
+        },
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["schedule_id"] == "sched-1"
+    assert body["action"]["args"] == ["hi"]
+    assert body["paused"] is False
+
+    listed = await control_client.get("/schedules")
+    assert listed.status_code == 200
+    assert any(s["schedule_id"] == "sched-1" for s in listed.json()["schedules"])
+
+    described = await control_client.get("/schedules/sched-1")
+    assert described.status_code == 200
+    assert described.json()["spec"]["cron"] == "0 3 * * *"
+
+    upcoming = await control_client.get("/schedules/sched-1/upcoming", params={"count": 3})
+    assert upcoming.status_code == 200
+    assert len(upcoming.json()["upcoming"]) == 3
+
+    paused = await control_client.post("/schedules/sched-1/pause", json={"note": "quiet time"})
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert paused.json()["note"] == "quiet time"
+
+    unpaused = await control_client.post("/schedules/sched-1/unpause", json={})
+    assert unpaused.status_code == 200
+    assert unpaused.json()["paused"] is False
+
+    updated = await control_client.post(
+        "/schedules/sched-1/update", json={"cron": "0 4 * * *", "pause_on_failure": True}
+    )
+    assert updated.status_code == 200
+    assert updated.json()["spec"]["cron"] == "0 4 * * *"
+    assert updated.json()["policy"]["pause_on_failure"] is True
+
+    triggered = await control_client.post("/schedules/sched-1/trigger")
+    assert triggered.status_code == 200
+    assert triggered.json()["total_started"] == 1
+
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    backfilled = await control_client.post(
+        "/schedules/sched-1/backfill",
+        json={"start": (now - timedelta(days=2)).isoformat(), "end": now.isoformat()},
+    )
+    assert backfilled.status_code == 200
+    assert backfilled.json()["total_started"] >= 1
+
+    deleted = await control_client.delete("/schedules/sched-1")
+    assert deleted.status_code == 200
+    assert deleted.json()["ok"] is True
+
+    gone = await control_client.get("/schedules/sched-1")
+    assert gone.status_code == 404
+
+
+async def test_create_schedule_requires_exactly_one_of_cron_and_interval(
+    control_client: httpx.AsyncClient,
+) -> None:
+    response = await control_client.post(
+        "/schedules",
+        json={"schedule_id": "bad-sched", "workflow": "control.echo", "args": []},
+    )
+    assert response.status_code == 400
+
+    response = await control_client.post(
+        "/schedules",
+        json={
+            "schedule_id": "bad-sched",
+            "workflow": "control.echo",
+            "args": [],
+            "cron": "0 3 * * *",
+            "interval": 60,
+        },
+    )
+    assert response.status_code == 400
+
+
+async def test_update_schedule_with_no_changes_is_400(control_client: httpx.AsyncClient) -> None:
+    await control_client.post(
+        "/schedules",
+        json={"schedule_id": "noop-sched", "workflow": "control.echo", "args": [], "interval": 60},
+    )
+    response = await control_client.post("/schedules/noop-sched/update", json={})
+    assert response.status_code == 400
+
+
+async def test_delete_unknown_schedule_reports_false(control_client: httpx.AsyncClient) -> None:
+    response = await control_client.delete("/schedules/does-not-exist")
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+
+
+# --------------------------------------------------------------------------- RBAC
+
+
+@pytest.fixture
+async def rbac_app() -> AsyncIterator[tuple[httpx.AsyncClient, str, str]]:
+    """A server with a real token file: one ``operator`` token, one ``reader`` token."""
+    from loomwork.server.auth import Role, TokenFile, generate_token
+
+    operator_token, operator_record = generate_token("op-1", [Role.OPERATOR], ["default"])
+    reader_token, reader_record = generate_token("rd-1", [Role.READER], ["default"])
+    tokens = TokenFile({operator_record.id: operator_record, reader_record.id: reader_record})
+    import tempfile
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    tokens_path = tmp_dir / "tokens.json"
+    tokens.save(tokens_path)
+    config = ServerConfig(
+        namespaces={"default": "memory://"}, auth=AuthConfig(tokens_file=tokens_path)
+    )
+    app = create_app(config, run_system_workers=True)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test/v1/namespaces/default/control"
+        ) as client:
+            yield client, operator_token, reader_token
+
+
+async def test_whoami_reports_the_tokens_roles(
+    rbac_app: tuple[httpx.AsyncClient, str, str],
+) -> None:
+    client, operator_token, reader_token = rbac_app
+    op_response = await client.get("/whoami", headers={"Authorization": f"Bearer {operator_token}"})
+    assert op_response.status_code == 200
+    assert op_response.json()["roles"] == ["operator"]
+
+    reader_response = await client.get(
+        "/whoami", headers={"Authorization": f"Bearer {reader_token}"}
+    )
+    assert reader_response.json()["roles"] == ["reader"]
+
+    unauthenticated = await client.get("/whoami")
+    assert unauthenticated.status_code == 401
+
+
+async def test_reader_can_list_schedules_but_not_create(
+    rbac_app: tuple[httpx.AsyncClient, str, str],
+) -> None:
+    client, operator_token, reader_token = rbac_app
+    created = await client.post(
+        "/schedules",
+        json={"schedule_id": "rbac-sched", "workflow": "wf.x", "args": [], "interval": 60},
+        headers={"Authorization": f"Bearer {operator_token}"},
+    )
+    assert created.status_code == 201
+
+    listed = await client.get("/schedules", headers={"Authorization": f"Bearer {reader_token}"})
+    assert listed.status_code == 200
+
+    forbidden = await client.post(
+        "/schedules/rbac-sched/pause",
+        json={},
+        headers={"Authorization": f"Bearer {reader_token}"},
+    )
+    assert forbidden.status_code == 403
+
+
+# --------------------------------------------------------------------------- search attributes
+
+
+async def test_query_can_reference_declared_search_attributes() -> None:
+    """``ServerConfig.search_attributes`` reaches the namespace's ``Engine``, so a
+    visibility query naming a declared attribute works through the control API's
+    ``?query=`` -- and one naming an *undeclared* attribute still fails, exactly as it
+    would locally with an empty schema."""
+    config = ServerConfig(
+        namespaces={"default": "memory://"},
+        auth=AuthConfig(disabled=True),
+        search_attributes={"default": {"tier": "string"}},
+    )
+    app = create_app(config, run_system_workers=False)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test/v1/namespaces/default/control"
+        ) as client:
+            started = await client.post(
+                "/workflows",
+                json={
+                    "name": "control.echo",
+                    "args": ["a"],
+                    "workflow_id": "sa-query-1",
+                    "search_attributes": {"tier": "gold"},
+                },
+            )
+            assert started.status_code == 201
+
+            declared = await client.get("/workflows", params={"query": "attr.tier = 'gold'"})
+            assert declared.status_code == 200
+            assert [e["workflow_id"] for e in declared.json()["executions"]] == ["sa-query-1"]
+
+            undeclared = await client.get("/workflows", params={"query": "attr.region = 'eu'"})
+            assert undeclared.status_code == 400
+            assert undeclared.json()["code"] == "query_type_error"

@@ -68,8 +68,19 @@ Commands that touch workflows need a store. Flags win over environment variables
 | `--timeout SECONDS` | | server request timeout (default 30) |
 
 There is deliberately no `--token` flag: command lines are visible in the process list and
-end up in shell history. Through a server the CLI uses the same API as remote workers, so
-its token needs the `worker` or `admin` role.
+end up in shell history.
+
+`loomwork workflow` and `loomwork schedule` pick which of the server's two APIs to use
+based on the token's role, so an operator never needs to be handed worker credentials
+just to run the CLI: a `worker` or `admin` token uses the same worker API as a remote
+worker (`HttpStore`), unchanged; an `operator` or `reader` token -- which cannot use the
+worker API at all -- uses the plain-JSON control API instead
+([server mode](server.md#two-apis-one-server)), automatically and without a flag to
+choose it. Both give identical output. A few commands always need the worker API
+regardless of token, because they need more than the control API can answer:
+`workflow query` (needs the workflow code, loaded with `--app`), `workflow steps`,
+`worker`, `store`, `replay` and `compat`; using one of these with an operator/reader
+token gets a clear "does not grant" error rather than a confusing one.
 
 Passwords in store URLs are never printed; error messages show the URL with the password
 replaced.
@@ -79,6 +90,7 @@ replaced.
 ```
 loomwork workflow start NAME [ARG ...] [--id ID] [--attr KEY=VALUE ...]
                         [--run-timeout D] [--execution-timeout D] [--retry-attempts N]
+                        [--id-reuse-policy POLICY] [--id-conflict-policy POLICY]
                         [--wait [--wait-timeout D]] [--raw]
 loomwork workflow list [--workflow NAME] [--status STATUS] [-q QUERY] [--limit N]
 loomwork workflow describe WORKFLOW_ID [--run RUN_ID]
@@ -89,6 +101,11 @@ loomwork workflow query    WORKFLOW_ID NAME [ARG ...] --app REF
 loomwork workflow update   WORKFLOW_ID NAME [ARG ...] [--update-id ID] [--wait-timeout D]
 loomwork workflow cancel   WORKFLOW_ID [--reason TEXT]
 loomwork workflow terminate WORKFLOW_ID --reason TEXT
+loomwork workflow reset    WORKFLOW_ID [--run RUN_ID] (--to POINT | --after-tick N)
+                        --reason TEXT [--wait [--wait-timeout D]]
+loomwork workflow batch signal|cancel|terminate --query Q [...]
+                        [--page-size N] [--concurrency N] [--dry-run]
+                        [--max-runs N] [--yes]
 loomwork workflow steps    WORKFLOW_ID          # pending step jobs, attempts, last failure
 loomwork workflow children WORKFLOW_ID
 loomwork workflow graph    WORKFLOW_ID [--run RUN_ID] --format mermaid|dot|text
@@ -96,6 +113,12 @@ loomwork workflow graph    WORKFLOW_ID [--run RUN_ID] --format mermaid|dot|text
 
 A workflow id refers to its latest run; `--run` picks a specific one (and can be used
 without the id).
+
+`--id-reuse-policy` (`allow_duplicate`, the default; `allow_duplicate_failed_only`;
+`reject_duplicate`) controls whether `--id` may be reused once its latest run has
+closed; `--id-conflict-policy` (`fail`, the default; `use_existing`;
+`terminate_existing`) controls what happens when it is *currently* running. See
+`loomwork.options.IdReusePolicy`/`IdConflictPolicy`.
 
 ```
 $ loomwork workflow start orders.checkout '{"order_id": "A-17"}' --id order-A-17 --attr tier=gold
@@ -127,6 +150,39 @@ way to reproduce a production problem locally.
 
 `graph` renders the run's steps, timers, children and waits as a diagram; see
 [debugging](debugging.md#history-graphs).
+
+`reset` truncates a run's history at a tick boundary and starts a new run of the same
+workflow id from there, printing the new run's id; see
+[recovering and operating on running fleets](operations/recovery.md#resetting-a-run) for
+what a reset does and does not change. `--to first-tick` replays from scratch;
+`--to before-last-failure` keeps everything except the run's last tick (the common case
+after a bug caused a bad decision); `--after-tick N` keeps exactly the first `N`
+completed ticks. `--wait` waits for the *new* run's result, like `start --wait`.
+
+```
+$ loomwork workflow reset order-A-17 --to before-last-failure --reason "fixed in deploy 214"
+reset to order-A-17 (run 01J1V808Z2Q8R0M3S7N5T9W1X)
+```
+
+`batch signal|cancel|terminate` applies one operation to every run a
+[visibility query](visibility-queries.md) matches (`--query`/`-q`; a plain filter, no
+`ORDER BY` or `LIMIT` of its own -- batch pages through matches itself). `--dry-run`
+lists what the query matches without acting on it. Since a broad query can match far
+more runs than intended, the command refuses to act on more than `--max-runs` (default
+1000) without `--yes`; pass it once you have checked the dry run, narrow `--query`, or
+raise `--max-runs`. `--page-size` and `--concurrency` control how many runs are fetched
+per query round trip and how many operations are in flight at once (see
+[batch operations](operations/recovery.md#batch-operations)). Prints the resulting
+`BatchResult` summary (`matched`, `succeeded`, `skipped_closed`, and any per-run
+`failed` errors) and exits 1 if any run failed:
+
+```
+$ loomwork workflow batch cancel -q "status = 'running' AND attr.region = 'eu-west'" --dry-run
+...
+12 run(s) match; dry run, nothing was done
+$ loomwork workflow batch cancel -q "status = 'running' AND attr.region = 'eu-west'" --yes
+matched 12, succeeded 12, skipped (already closed) 0, failed 0
+```
 
 ## `loomwork schedule`
 
