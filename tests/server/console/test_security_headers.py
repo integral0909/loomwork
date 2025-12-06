@@ -68,3 +68,22 @@ async def test_csp_forbids_inline_scripts_and_framing(console_env: ConsoleEnv) -
     assert "script-src" not in csp  # default-src 'none' already forbids every script
     assert "frame-ancestors 'none'" in csp
     assert "<script" not in response.text
+
+
+def test_templates_contain_no_inline_script() -> None:
+    """The CSP forbids inline script, so any handler attribute would be dead code at best,
+    and a value interpolated into one would be an injection point that HTML escaping does
+    not cover. Keep the console script-free."""
+    import re
+    from pathlib import Path
+
+    import loomwork.server.console as console
+
+    templates = Path(console.__file__).parent / "templates"
+    pattern = re.compile(r"<script|\son[a-z]+\s*=|javascript:", re.IGNORECASE)
+    offenders = [
+        f"{path.name}: {match.group(0)}"
+        for path in sorted(templates.glob("*.html"))
+        for match in pattern.finditer(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []

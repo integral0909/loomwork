@@ -1,5 +1,21 @@
 # Troubleshooting
 
+## Start with `loomwork doctor`
+
+Before digging into a specific symptom, run `loomwork doctor --store URL` (or
+`--server URL`) for a pass/warn/fail report covering most of the causes below in one
+pass: store reachability and schema version, outbox backlog, runs whose ticks keep
+failing, step jobs no worker is claiming, overdue timers, overdue schedules, runs
+approaching the history size limit, and (in `--server` mode) clock skew and the token's
+roles. Each failing check prints a remediation hint. See the
+[CLI reference](../cli.md#loomwork-doctor).
+
+```
+$ loomwork doctor --store sqlite:///loomwork.db
+[FAIL] timers  a timer is overdue by 612s (threshold 300s)
+       -> start a worker with run_timers=True
+```
+
 ## A run is not making progress
 
 Start with the execution record:

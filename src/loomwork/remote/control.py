@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 
+from loomwork.diagnostics import DiagnosticsSnapshot
 from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.remote.errors import ProblemDetail, exception_for
 
@@ -48,13 +49,22 @@ def _reset_point_to_wire(to: ResetPoint) -> dict[str, Any]:
 
 
 class WhoAmI:
-    """The identity and roles behind a bearer token, from ``GET .../control/whoami``."""
+    """The identity, roles, namespaces and server clock behind a bearer token, from
+    ``GET .../control/whoami``."""
 
-    __slots__ = ("id", "roles")
+    __slots__ = ("id", "namespaces", "roles", "server_time")
 
-    def __init__(self, id: str, roles: list[str]) -> None:
+    def __init__(
+        self,
+        id: str,
+        roles: list[str],
+        namespaces: list[str] | None = None,
+        server_time: datetime | None = None,
+    ) -> None:
         self.id = id
         self.roles = roles
+        self.namespaces = namespaces or []
+        self.server_time = server_time
 
     def has_any(self, *roles: str) -> bool:
         return any(role in self.roles for role in roles)
@@ -161,7 +171,35 @@ class ControlClient:
 
     async def whoami(self) -> WhoAmI:
         data = await self._request("GET", "/whoami")
-        return WhoAmI(str(data["id"]), [str(r) for r in data["roles"]])
+        server_time = data.get("server_time")
+        return WhoAmI(
+            str(data["id"]),
+            [str(r) for r in data["roles"]],
+            [str(n) for n in data.get("namespaces", [])],
+            datetime.fromisoformat(server_time) if server_time else None,
+        )
+
+    async def diagnostics(
+        self,
+        *,
+        tick_failure_threshold: int | None = None,
+        history_warning_fraction: float | None = None,
+        queues: list[str] | None = None,
+        limit: int | None = None,
+    ) -> DiagnosticsSnapshot:
+        """``GET .../control/diagnostics``: the facts behind ``loomwork doctor --server``
+        (see :mod:`loomwork.diagnostics`). Omitted arguments use the server's defaults."""
+        params: dict[str, Any] = {}
+        if tick_failure_threshold is not None:
+            params["tick_failure_threshold"] = tick_failure_threshold
+        if history_warning_fraction is not None:
+            params["history_warning_fraction"] = history_warning_fraction
+        if queues:
+            params["queue"] = queues
+        if limit is not None:
+            params["limit"] = limit
+        data = await self._request("GET", "/diagnostics", params=params)
+        return DiagnosticsSnapshot.from_dict(data)
 
     # ------------------------------------------------------------------ workflows
 

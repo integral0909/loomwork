@@ -3,6 +3,10 @@
 {% block content %}
 <h1>Schedules -- {{ namespace }}</h1>
 
+{% if can_write %}
+<p><a href="/console/{{ namespace }}/schedules/new">New schedule</a></p>
+{% endif %}
+
 <table>
   <thead>
     <tr>

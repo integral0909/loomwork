@@ -1,14 +1,39 @@
-"""Schedules list, schedule detail, and the pause/unpause/trigger action forms."""
+"""Schedules list, schedule detail, and the pause/unpause/trigger/create/edit/delete/
+backfill forms.
+
+Creating and editing a schedule can fail on input a person typed by hand (a malformed
+cron expression, an unknown IANA time zone, arguments that are not a JSON array): those
+failures come back as :class:`~loomwork.schedules.model.ScheduleError` from
+:class:`~loomwork.schedules.model.ScheduleSpec`/``SchedulePolicy`` themselves, and
+:class:`_FormError` covers the console's own input checks (a missing workflow name,
+non-numeric duration fields) the same way. Both are caught in the same place and re-render
+the form with the submitted values intact and the message next to the field that needs
+fixing, rather than the plain-text error page every other domain error in this console
+gets (see ``errors.py``) -- a person filling in a form should not lose their work over a
+typo.
+"""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import Response
 
-from loomwork.schedules.model import ScheduleSpec
+from loomwork.codec.converter import default_converter
+from loomwork.errors import ScheduleConflictError, ScheduleExistsError
+from loomwork.schedules.model import (
+    OverlapPolicy,
+    ScheduleAction,
+    ScheduleError,
+    SchedulePolicy,
+    ScheduleSpec,
+    ScheduleState,
+    validate_schedule_id,
+)
 from loomwork.schedules.service import ScheduleService
 from loomwork.server.auth import require
 from loomwork.server.console.render import redirect_with_flash, render
@@ -26,6 +51,11 @@ View = Callable[[Request], Awaitable[Response]]
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
 _UPCOMING_COUNT = 5
+_OVERLAP_POLICIES = [p.value for p in OverlapPolicy]
+
+
+class _FormError(ValueError):
+    """A schedule create/edit form field could not be understood."""
 
 
 def _schedules_path(namespace: str) -> str:
@@ -149,5 +179,283 @@ def schedule_trigger_view(runtime: ConsoleRuntime) -> View:
             else "Triggered."
         )
         return redirect_with_flash(path, level="success", message=message)
+
+    return view
+
+
+def schedule_backfill_view(runtime: ConsoleRuntime) -> View:
+    async def view(request: Request) -> Response:
+        namespace, schedule_id, form = await _schedule_action(request, runtime)
+        ns = runtime.state.namespace(namespace)
+        path = _schedule_path(namespace, schedule_id)
+        try:
+            start = _parse_form_timestamp(form.get("start", ""), "Start")
+            end = _parse_form_timestamp(form.get("end", ""), "End")
+            if end <= start:
+                raise _FormError("End must be after start.")
+        except _FormError as exc:
+            return redirect_with_flash(path, level="error", message=str(exc))
+        service = ScheduleService(ns.store, ns.engine.clock)
+        before = (await service.store.get_schedule(schedule_id)).total_started
+        state = await service.backfill(schedule_id, start, end)
+        started = state.total_started - before
+        return redirect_with_flash(
+            path, level="success", message=f"Backfill started {started} run(s)."
+        )
+
+    return view
+
+
+# --------------------------------------------------------------------------- create / edit
+
+
+def _parse_form_timestamp(text: str, label: str) -> datetime:
+    text = text.strip()
+    if not text:
+        raise _FormError(f"{label} is required.")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise _FormError(f"{label} is not a valid date/time.") from None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _parse_form_float(form: dict[str, str], field: str, *, default: float, label: str) -> float:
+    raw = form.get(field, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise _FormError(f"{label} must be a number.") from None
+
+
+def _spec_from_form(form: dict[str, str]) -> ScheduleSpec:
+    timezone = form.get("timezone", "").strip() or "UTC"
+    jitter = _parse_form_float(form, "jitter_seconds", default=0.0, label="Jitter")
+    try:
+        if form.get("kind") == "interval":
+            interval = _parse_form_float(form, "interval_seconds", default=0.0, label="Interval")
+            if interval <= 0:
+                raise _FormError("Interval must be a positive number of seconds.")
+            return ScheduleSpec(interval=interval, timezone=timezone, jitter=jitter)
+        cron = form.get("cron", "").strip()
+        if not cron:
+            raise _FormError("A cron expression is required.")
+        return ScheduleSpec(cron=cron, timezone=timezone, jitter=jitter)
+    except ScheduleError as exc:
+        raise _FormError(str(exc)) from exc
+
+
+def _policy_from_form(form: dict[str, str]) -> SchedulePolicy:
+    catchup = _parse_form_float(
+        form, "catchup_window_seconds", default=60.0, label="Catch-up window"
+    )
+    try:
+        return SchedulePolicy(
+            form.get("overlap", OverlapPolicy.SKIP.value),
+            catchup,
+            form.get("pause_on_failure") == "on",
+        )
+    except ScheduleError as exc:
+        raise _FormError(str(exc)) from exc
+
+
+def _args_from_form(form: dict[str, str]) -> list[Any]:
+    text = form.get("args", "").strip()
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _FormError(f"Arguments must be valid JSON: {exc.msg}.") from exc
+    if not isinstance(value, list):
+        raise _FormError('Arguments must be a JSON array, for example ["a", 2].')
+    return value
+
+
+def _spec_to_form(spec: ScheduleSpec) -> dict[str, str]:
+    return {
+        "kind": "interval" if spec.interval is not None else "cron",
+        "cron": spec.cron or "",
+        "interval_seconds": str(spec.interval.total_seconds()) if spec.interval else "",
+        "timezone": spec.timezone,
+        "jitter_seconds": str(spec.jitter.total_seconds()) if spec.jitter else "",
+    }
+
+
+def _policy_to_form(policy: SchedulePolicy) -> dict[str, str]:
+    return {
+        "overlap": policy.overlap.value,
+        "catchup_window_seconds": str(policy.catchup_window.total_seconds()),
+        "pause_on_failure": "on" if policy.pause_on_failure else "",
+    }
+
+
+def schedule_create_view(runtime: ConsoleRuntime) -> View:
+    async def view(request: Request) -> Response:
+        namespace = request.path_params["namespace"]
+        path = f"{_schedules_path(namespace)}/new"
+        session = await require_session(request, runtime, next_path=path)
+        require(session.record, capability="control_write", namespace=namespace)
+        ns = runtime.state.namespace(namespace)
+
+        if request.method == "GET":
+            return render(
+                runtime,
+                request,
+                "schedule_create.html",
+                namespace=namespace,
+                overlaps=_OVERLAP_POLICIES,
+                form={"kind": "cron", "timezone": "UTC"},
+                error=None,
+                csrf_token=session.csrf,
+            )
+
+        form = await parse_form(request)
+        check_csrf(session, form.get("csrf_token"))
+        try:
+            schedule_id = validate_schedule_id(form.get("schedule_id", "").strip())
+            workflow = form.get("workflow", "").strip()
+            if not workflow:
+                raise _FormError("Workflow name is required.")
+            args = _args_from_form(form)
+            spec = _spec_from_form(form)
+            policy = _policy_from_form(form)
+            encoded_args = await default_converter.encode_args_async(args)
+            state = ScheduleState(
+                schedule_id=schedule_id,
+                spec=spec,
+                action=ScheduleAction(workflow, encoded_args),
+                policy=policy,
+                paused=form.get("paused") == "on",
+                note=form.get("note", ""),
+            )
+            saved = await ScheduleService(ns.store, ns.engine.clock).create(state)
+        except (_FormError, ScheduleError) as exc:
+            return render(
+                runtime,
+                request,
+                "schedule_create.html",
+                status_code=422,
+                namespace=namespace,
+                overlaps=_OVERLAP_POLICIES,
+                form=form,
+                error=str(exc),
+                csrf_token=session.csrf,
+            )
+        except ScheduleExistsError as exc:
+            return render(
+                runtime,
+                request,
+                "schedule_create.html",
+                status_code=409,
+                namespace=namespace,
+                overlaps=_OVERLAP_POLICIES,
+                form=form,
+                error=str(exc),
+                csrf_token=session.csrf,
+            )
+        return redirect_with_flash(
+            _schedule_path(namespace, saved.schedule_id),
+            level="success",
+            message=f"Created schedule {saved.schedule_id}.",
+        )
+
+    return view
+
+
+def schedule_edit_view(runtime: ConsoleRuntime) -> View:
+    async def view(request: Request) -> Response:
+        namespace = request.path_params["namespace"]
+        schedule_id = request.path_params["schedule_id"]
+        path = f"{_schedule_path(namespace, schedule_id)}/edit"
+        session = await require_session(request, runtime, next_path=path)
+        require(session.record, capability="control_write", namespace=namespace)
+        ns = runtime.state.namespace(namespace)
+        service = ScheduleService(ns.store, ns.engine.clock)
+        current = await service.store.get_schedule(schedule_id)
+
+        if request.method == "GET":
+            form = {
+                **_spec_to_form(current.spec),
+                **_policy_to_form(current.policy),
+                "note": current.note,
+            }
+            return render(
+                runtime,
+                request,
+                "schedule_edit.html",
+                namespace=namespace,
+                state=current,
+                overlaps=_OVERLAP_POLICIES,
+                form=form,
+                error=None,
+                csrf_token=session.csrf,
+            )
+
+        form = await parse_form(request)
+        check_csrf(session, form.get("csrf_token"))
+        try:
+            spec = _spec_from_form(form)
+            policy = _policy_from_form(form)
+            saved = await service.update(
+                schedule_id, spec=spec, policy=policy, note=form.get("note", "")
+            )
+        except (_FormError, ScheduleError) as exc:
+            return render(
+                runtime,
+                request,
+                "schedule_edit.html",
+                status_code=422,
+                namespace=namespace,
+                state=current,
+                overlaps=_OVERLAP_POLICIES,
+                form=form,
+                error=str(exc),
+                csrf_token=session.csrf,
+            )
+        except ScheduleConflictError as exc:
+            return render(
+                runtime,
+                request,
+                "schedule_edit.html",
+                status_code=409,
+                namespace=namespace,
+                state=current,
+                overlaps=_OVERLAP_POLICIES,
+                form=form,
+                error=str(exc),
+                csrf_token=session.csrf,
+            )
+        return redirect_with_flash(
+            _schedule_path(namespace, saved.schedule_id), level="success", message="Saved."
+        )
+
+    return view
+
+
+def schedule_delete_view(runtime: ConsoleRuntime) -> View:
+    async def view(request: Request) -> Response:
+        namespace, schedule_id, form = await _schedule_action(request, runtime)
+        ns = runtime.state.namespace(namespace)
+        if form.get("confirm") != "yes":
+            return redirect_with_flash(
+                _schedule_path(namespace, schedule_id),
+                level="error",
+                message="Confirm the checkbox to delete a schedule.",
+            )
+        deleted = await ns.store.delete_schedule(schedule_id)
+        if not deleted:
+            return redirect_with_flash(
+                _schedule_path(namespace, schedule_id),
+                level="warning",
+                message="Schedule was already deleted.",
+            )
+        return redirect_with_flash(
+            _schedules_path(namespace),
+            level="success",
+            message=f"Deleted schedule {schedule_id}. Runs it already started keep running.",
+        )
 
     return view

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Diagnostics -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>Diagnostics -- {{ namespace }}</h1>
+<p class="muted">As of {{ snapshot.now.isoformat() }} -- the same report as <code>loomwork doctor</code>.</p>
+
+<table>
+  <thead>
+    <tr><th>Check</th><th>Status</th><th>Message</th></tr>
+  </thead>
+  <tbody>
+    {% for finding in findings %}
+    <tr>
+      <td>{{ finding.check }}</td>
+      <td><span class="status-pill status-{{ finding.status.value }}">{{ finding.status.value | upper }}</span></td>
+      <td>
+        {{ finding.message }}
+        {% if finding.hint %}<br><span class="muted">{{ finding.hint }}</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

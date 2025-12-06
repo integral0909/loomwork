@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from typing import TextIO
 
 from loomwork._version import __version__
-from loomwork.cli.commands import admin, runtime, schedule, token, tools, workflow
+from loomwork.cli.commands import admin, doctor, runtime, schedule, token, tools, workflow
 from loomwork.cli.errors import CliError, ExitCode
 from loomwork.cli.output import Console
 from loomwork.errors import (
@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     schedule.register(subparsers)
     runtime.register(subparsers)
     admin.register(subparsers)
+    doctor.register(subparsers)
     token.register(subparsers)
     tools.register(subparsers)
     return parser

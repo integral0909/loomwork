@@ -1,38 +1,44 @@
-"""The operations backend: what ``workflow`` commands need, however the CLI connects.
+"""The operations backend: what ``workflow`` and ``schedule`` commands need, however the
+CLI connects.
 
 ``--store`` (or `--server` with a ``worker``/``admin`` token) uses the same
 :class:`~loomwork.client.client.Client`/:class:`~loomwork.client.handle.WorkflowHandle`
+(and, for schedules, :class:`~loomwork.client.schedules.ScheduleClient`/``ScheduleHandle``)
 objects the rest of Loomwork uses -- unchanged from before this module existed. A
 ``--server`` connection whose token only has the ``operator`` or ``reader`` role cannot
 use those (they speak the worker API, see ``docs/server.md``), so it goes through
-:class:`ControlOperations`/:class:`ControlWorkflowHandle` instead, talking to the
+:class:`ControlOperations`/:class:`ControlWorkflowHandle` (or, for schedules,
+:class:`ControlScheduleOperations`/:class:`ControlScheduleHandle`) instead, talking to the
 server's control API through :class:`~loomwork.remote.control.ControlClient`.
 
-Both sides satisfy the same two structural protocols, :class:`Operations` and
-:class:`OperationsHandle`, which mirror ``Client``'s and ``WorkflowHandle``'s own public
-surface almost exactly (a real ``Client``/``WorkflowHandle`` needs no adapter at all --
-they already have the right methods). Command handlers in
-:mod:`loomwork.cli.commands.workflow` call this surface without caring which backend
-produced it; :func:`open_operations` is what decides, once per invocation, which one to
-build.
+Both sides of each pair satisfy the same structural protocols -- :class:`Operations` and
+:class:`OperationsHandle` for workflows, :class:`ScheduleOperations` and
+:class:`ScheduleHandleOps` for schedules -- which mirror the real client classes' own
+public surface almost exactly (a real ``Client``/``WorkflowHandle``/``ScheduleClient``
+needs no adapter at all -- they already have the right methods). Command handlers in
+:mod:`loomwork.cli.commands.workflow` and :mod:`loomwork.cli.commands.schedule` call this
+surface without caring which backend produced it; :func:`open_operations` and
+:func:`open_schedule_operations` are what decide, once per invocation, which one to build.
 
 Reconstructing typed values from the control API's plain JSON (``execution_record_from_view``,
-``event_from_view``) is what lets the exact same rendering code
-(:mod:`loomwork.cli.commands.common`) serve both backends: the control API already
-decodes every payload it can with the default converter, and these functions re-encode
-that decoded value into a real :class:`~loomwork.codec.payload.Payload` (or, for a value
-the server could not decode, reconstruct the original wire-form payload byte for byte),
-so a reconstructed :class:`~loomwork.store.records.ExecutionRecord` or
-:class:`~loomwork.history.events.Event` is indistinguishable from one loaded straight
-from a store.
+``event_from_view``, ``schedule_state_from_view``) is what lets the exact same rendering
+code (:mod:`loomwork.cli.commands.common`, :mod:`loomwork.cli.commands.schedule`) serve
+both backends: the control API already decodes every payload it can with the default
+converter, and these functions re-encode that decoded value into a real
+:class:`~loomwork.codec.payload.Payload` (or, for a value the server could not decode,
+reconstruct the original wire-form payload byte for byte), so a reconstructed
+:class:`~loomwork.store.records.ExecutionRecord`, :class:`~loomwork.history.events.Event`
+or :class:`~loomwork.schedules.model.ScheduleState` is indistinguishable from one loaded
+straight from a store.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -54,6 +60,12 @@ from loomwork.history.events import Event
 from loomwork.history.serde import event_from_dict
 from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.retry import RetryPolicy
+from loomwork.schedules.model import (
+    OverlapPolicy,
+    SchedulePolicy,
+    ScheduleSpec,
+    ScheduleState,
+)
 from loomwork.store.records import ExecutionRecord, ExecutionStatus
 
 if TYPE_CHECKING:
@@ -167,6 +179,36 @@ def _seconds(value: timedelta | float | None) -> float | None:
     return value.total_seconds() if isinstance(value, timedelta) else float(value)
 
 
+def _schedule_args_from_view(values: list[Any], converter: DataConverter) -> list[Payload]:
+    """Like :func:`_payload_from_view`, but for a schedule action's argument list, where
+    every entry is always a payload (unlike an optional field such as a result): a
+    decoded JSON ``null`` argument must round-trip as an encoded ``None``, not vanish."""
+    payloads = []
+    for value in values:
+        if isinstance(value, dict) and {"data", "metadata"} <= set(value):
+            payloads.append(Payload.from_dict(value))
+        else:
+            payloads.append(converter.encode(value))
+    return payloads
+
+
+def schedule_state_from_view(data: dict[str, Any], converter: DataConverter) -> ScheduleState:
+    """The inverse of ``loomwork.server.responses.schedule_view``.
+
+    Everything but the action's arguments round-trips through
+    :meth:`~loomwork.schedules.model.ScheduleState.from_dict` unchanged; the arguments are
+    decoded JSON in the view (like any other payload the control API returns) rather than
+    wire-form payload dicts, so they are re-encoded first.
+    """
+    action = data["action"]
+    patched = dict(data)
+    patched["action"] = {
+        "workflow_name": action["workflow_name"],
+        "args": [p.to_dict() for p in _schedule_args_from_view(action.get("args", []), converter)],
+    }
+    return ScheduleState.from_dict(patched)
+
+
 # --------------------------------------------------------------------------- protocols
 
 
@@ -243,6 +285,64 @@ class Operations(Protocol):
     async def batch_terminate(
         self, query: str, reason: str = "", *, page_size: int = 100, concurrency: int = 10
     ) -> BatchResult: ...
+
+
+class ScheduleHandleOps(Protocol):
+    """What a command needs from a handle to one schedule: the common surface of
+    :class:`~loomwork.client.schedules.ScheduleHandle` and :class:`ControlScheduleHandle`."""
+
+    schedule_id: str
+
+    async def describe(self) -> ScheduleState: ...
+    async def pause(self, note: str = "") -> ScheduleState: ...
+    async def unpause(self, note: str = "") -> ScheduleState: ...
+    async def trigger(self) -> ScheduleState: ...
+    async def backfill(self, start: datetime, end: datetime) -> ScheduleState: ...
+    async def update(
+        self,
+        *,
+        spec: ScheduleSpec | None = None,
+        policy: SchedulePolicy | None = None,
+        note: str | None = None,
+    ) -> ScheduleState: ...
+    async def upcoming(self, count: int = 5) -> Sequence[datetime]: ...
+    async def delete(self) -> bool: ...
+
+
+class ScheduleOperations(Protocol):
+    """What a command needs to create and find schedules: the common surface of
+    :class:`~loomwork.client.schedules.ScheduleClient` and :class:`ControlScheduleOperations`."""
+
+    async def create(
+        self,
+        schedule_id: str,
+        workflow: str,
+        *args: Any,
+        cron: str | None = None,
+        interval: timedelta | float | None = None,
+        timezone: str = "UTC",
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        jitter: timedelta | float = 0,
+        overlap: OverlapPolicy | str = OverlapPolicy.SKIP,
+        catchup_window: timedelta | float = timedelta(minutes=1),
+        pause_on_failure: bool = False,
+        paused: bool = False,
+        note: str = "",
+    ) -> ScheduleHandleOps: ...
+    def get(self, schedule_id: str) -> ScheduleHandleOps: ...
+    async def list(self, limit: int = 100) -> list[ScheduleState]: ...
+
+
+@dataclass(slots=True)
+class ScheduleSession:
+    """What ``schedule`` commands need, however the CLI connects: a
+    :class:`ScheduleOperations` plus the converter used to decode a schedule action's
+    arguments for display (mirroring :attr:`~loomwork.cli.connection.Session.converter`,
+    which :class:`~loomwork.client.schedules.ScheduleClient` does not itself expose)."""
+
+    schedules: ScheduleOperations
+    converter: DataConverter
 
 
 # --------------------------------------------------------------------------- control-backed
@@ -520,6 +620,118 @@ class ControlOperations:
         return await self._batch(query, apply, page_size=page_size, concurrency=concurrency)
 
 
+class ControlScheduleHandle:
+    """:class:`ScheduleHandleOps` backed by the control API."""
+
+    def __init__(self, client: ControlClient, converter: DataConverter, schedule_id: str) -> None:
+        self._client = client
+        self._converter = converter
+        self.schedule_id = schedule_id
+
+    def __repr__(self) -> str:
+        return f"ControlScheduleHandle({self.schedule_id!r})"
+
+    def _state(self, data: dict[str, Any]) -> ScheduleState:
+        return schedule_state_from_view(data, self._converter)
+
+    async def describe(self) -> ScheduleState:
+        return self._state(await self._client.describe_schedule(self.schedule_id))
+
+    async def pause(self, note: str = "") -> ScheduleState:
+        return self._state(await self._client.pause_schedule(self.schedule_id, note))
+
+    async def unpause(self, note: str = "") -> ScheduleState:
+        return self._state(await self._client.unpause_schedule(self.schedule_id, note))
+
+    async def trigger(self) -> ScheduleState:
+        return self._state(await self._client.trigger_schedule(self.schedule_id))
+
+    async def backfill(self, start: datetime, end: datetime) -> ScheduleState:
+        return self._state(await self._client.backfill_schedule(self.schedule_id, start, end))
+
+    async def update(
+        self,
+        *,
+        spec: ScheduleSpec | None = None,
+        policy: SchedulePolicy | None = None,
+        note: str | None = None,
+    ) -> ScheduleState:
+        # Every field of a given `spec`/`policy` is sent, not only the ones that changed:
+        # the caller (``loomwork.cli.commands.schedule``) always passes a fully resolved
+        # object (old values merged with new ones), so this has the same effect as the
+        # store-backed path's `ScheduleHandle.update`, which replaces the field outright.
+        # ``offset`` has no wire field: the control API recomputes it itself (0 unless the
+        # interval is unchanged), exactly like `ScheduleHandle.update` does locally.
+        data = await self._client.update_schedule(
+            self.schedule_id,
+            cron=spec.cron if spec is not None else None,
+            interval=spec.interval.total_seconds() if spec is not None and spec.interval else None,
+            timezone=spec.timezone if spec is not None else None,
+            jitter=spec.jitter.total_seconds() if spec is not None else None,
+            overlap=policy.overlap.value if policy is not None else None,
+            catchup_window=policy.catchup_window.total_seconds() if policy is not None else None,
+            pause_on_failure=policy.pause_on_failure if policy is not None else None,
+            note=note,
+        )
+        return self._state(data)
+
+    async def upcoming(self, count: int = 5) -> Sequence[datetime]:
+        return await self._client.upcoming_schedule(self.schedule_id, count)
+
+    async def delete(self) -> bool:
+        return await self._client.delete_schedule(self.schedule_id)
+
+
+class ControlScheduleOperations:
+    """:class:`ScheduleOperations` backed by the control API."""
+
+    def __init__(self, client: ControlClient, converter: DataConverter | None = None) -> None:
+        self._client = client
+        self.converter = converter or default_converter
+
+    async def create(
+        self,
+        schedule_id: str,
+        workflow: str,
+        *args: Any,
+        cron: str | None = None,
+        interval: timedelta | float | None = None,
+        timezone: str = "UTC",
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        jitter: timedelta | float = 0,
+        overlap: OverlapPolicy | str = OverlapPolicy.SKIP,
+        catchup_window: timedelta | float = timedelta(minutes=1),
+        pause_on_failure: bool = False,
+        paused: bool = False,
+        note: str = "",
+    ) -> ControlScheduleHandle:
+        await self._client.create_schedule(
+            schedule_id,
+            workflow,
+            list(args),
+            cron=cron,
+            interval=_seconds(interval),
+            timezone=timezone,
+            start_at=start_at,
+            end_at=end_at,
+            jitter=_seconds(jitter) or 0,
+            overlap=OverlapPolicy(overlap).value,
+            catchup_window=_seconds(catchup_window) or 0,
+            pause_on_failure=pause_on_failure,
+            paused=paused,
+            note=note,
+        )
+        return ControlScheduleHandle(self._client, self.converter, schedule_id)
+
+    def get(self, schedule_id: str) -> ControlScheduleHandle:
+        return ControlScheduleHandle(self._client, self.converter, schedule_id)
+
+    async def list(self, limit: int = 100) -> list[ScheduleState]:
+        data = await self._client.list_schedules(limit)
+        return [schedule_state_from_view(s, self.converter) for s in data]
+
+
 # --------------------------------------------------------------------------- backend selection
 
 
@@ -585,12 +797,69 @@ async def open_operations(args: argparse.Namespace) -> AsyncIterator[Operations]
         await control.close()
 
 
+@asynccontextmanager
+async def open_schedule_operations(args: argparse.Namespace) -> AsyncIterator[ScheduleSession]:
+    """Open whatever backend the ``schedule`` commands should use.
+
+    Mirrors :func:`open_operations` exactly (same probing, same roles, same fallback to
+    the store-backed path for ``worker``/``admin`` tokens) but for schedules: the two are
+    kept as separate functions, each self-contained, rather than sharing a generic
+    "dispatch" helper, so that neither has to thread the other's return type through it.
+    """
+    options = ConnectionOptions.from_args(args)
+    if options.server_url is None:
+        async with session(options) as active:
+            yield ScheduleSession(active.client.schedules, active.converter)
+        return
+    from loomwork.remote.control import ControlClient
+
+    control = ControlClient(
+        options.server_url,
+        options.token,
+        options.namespace,
+        timeout=options.timeout,
+        transport=_test_transports.get(options.server_url),
+    )
+    try:
+        await control.open()
+        who = await control.whoami()
+    except OSError as exc:
+        await control.close()
+        raise StoreUnavailableError(f"cannot reach server {options.server_url}: {exc}") from None
+    except BaseException:
+        await control.close()
+        raise
+    if who.has_any("worker", "admin"):
+        await control.close()
+        async with session(options) as active:
+            yield ScheduleSession(active.client.schedules, active.converter)
+        return
+    if not who.has_any("operator", "reader"):
+        await control.close()
+        raise UsageError(
+            f"token {who.id!r} has no role usable for schedule commands "
+            f"(has {', '.join(who.roles) or 'none'}; need worker, admin, operator or reader)"
+        )
+    try:
+        control_schedules = ControlScheduleOperations(control, default_converter)
+        yield ScheduleSession(control_schedules, default_converter)
+    finally:
+        await control.close()
+
+
 __all__ = [
     "ControlOperations",
+    "ControlScheduleHandle",
+    "ControlScheduleOperations",
     "ControlWorkflowHandle",
     "Operations",
     "OperationsHandle",
+    "ScheduleHandleOps",
+    "ScheduleOperations",
+    "ScheduleSession",
     "execution_record_from_view",
     "event_from_view",
     "open_operations",
+    "open_schedule_operations",
+    "schedule_state_from_view",
 ]

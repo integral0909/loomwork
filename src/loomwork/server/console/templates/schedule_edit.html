@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ state.schedule_id }} -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>Edit {{ state.schedule_id }}</h1>
+<p class="muted">{{ state.action.workflow_name }} -- the workflow and its arguments cannot be
+changed; delete and recreate the schedule for that.</p>
+
+{% if error %}<div class="form-error">{{ error }}</div>{% endif %}
+
+<form class="stacked" method="post" action="/console/{{ namespace }}/schedules/{{ state.schedule_id }}/edit">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <fieldset>
+    <legend class="field-label">When</legend>
+    <label>
+      <input type="radio" name="kind" value="cron" {{ "checked" if form.get("kind", "cron") == "cron" }}>
+      Cron expression
+    </label>
+    <input type="text" name="cron" value="{{ form.get('cron', '') }}" placeholder="0 3 * * *">
+    <label>
+      <input type="radio" name="kind" value="interval" {{ "checked" if form.get("kind") == "interval" }}>
+      Fixed interval (seconds)
+    </label>
+    <input type="number" name="interval_seconds" value="{{ form.get('interval_seconds', '') }}" min="1" step="1">
+  </fieldset>
+
+  <label><span class="field-label">Time zone (for the cron expression)</span>
+    <input type="text" name="timezone" value="{{ form.get('timezone', 'UTC') }}">
+  </label>
+
+  <label><span class="field-label">Jitter (seconds)</span>
+    <input type="number" name="jitter_seconds" value="{{ form.get('jitter_seconds', '0') }}" min="0" step="1">
+  </label>
+
+  <label><span class="field-label">Overlap policy</span>
+    <select name="overlap">
+      {% for policy in overlaps %}
+      <option value="{{ policy }}" {{ "selected" if form.get("overlap") == policy }}>{{ policy }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <label><span class="field-label">Catch-up window (seconds)</span>
+    <input type="number" name="catchup_window_seconds" value="{{ form.get('catchup_window_seconds', '60') }}" min="0" step="1">
+  </label>
+
+  <label>
+    <input type="checkbox" name="pause_on_failure" {{ "checked" if form.get("pause_on_failure") == "on" }}>
+    Pause the schedule when a run fails
+  </label>
+
+  <label><span class="field-label">Note</span>
+    <input type="text" name="note" value="{{ form.get('note', '') }}">
+  </label>
+
+  <button type="submit">Save</button>
+</form>
+
+<p><a href="/console/{{ namespace }}/schedules/{{ state.schedule_id }}">Back to {{ state.schedule_id }}</a></p>
+{% endblock %}

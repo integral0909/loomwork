@@ -333,7 +333,8 @@ All worker-API paths are under `/v1/namespaces/{namespace}`; control-API paths a
 
 | Method | Path | Effect |
 | ------ | ---- | ------ |
-| GET | `/control/whoami` | The caller's own token id and roles; any correctly-scoped token, no specific role required. |
+| GET | `/control/whoami` | The caller's own token id, roles, namespaces and the server's current time (for clock skew checks); any correctly-scoped token, no specific role required. |
+| GET | `/control/diagnostics` | Aggregate health facts for `loomwork doctor --server`: `?tick_failure_threshold=&history_warning_fraction=&queue=&limit=` (`queue` repeatable). Requires `control_read`. |
 | POST | `/control/workflows` | Start a workflow: `{name, args: [...], workflow_id?, search_attributes?, run_timeout?, execution_timeout?, retry_max_attempts?, id_reuse_policy?, id_conflict_policy?}` → `201` with the execution. |
 | GET | `/control/workflows` | List: `?workflow_name=&status=&limit=`, or `?query=<visibility query>&limit=` for a full query (not combinable with `workflow_name`/`status`). |
 | POST | `/control/workflows/signal-with-start` | `{name, args, workflow_id, channel, value, message_id?}`. |

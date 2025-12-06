@@ -15,6 +15,7 @@ loomwork [--json] [--log-level LEVEL] COMMAND ...
 | [`worker`](#loomwork-worker) | run a worker for your workflow code |
 | [`server`](#loomwork-server) | run the HTTP server |
 | [`store`](#loomwork-store) | migrate, inspect and prune a store |
+| [`doctor`](#loomwork-doctor) | check a deployment's health and print a pass/warn/fail report |
 | [`archive`](#loomwork-archive) | write closed runs to long-term storage, and read them back |
 | [`replay`](#loomwork-replay) | step through a history tick by tick against workflow code |
 | [`compat`](#loomwork-compat) | replay recorded histories with new workflow code |
@@ -262,6 +263,44 @@ loomwork store prune --older-than 30d [--dry-run] [--batch N] [--once]
 
 `prune` deletes closed runs (records, histories and search attributes) in batches, one
 transaction per batch, until none older than the cutoff remain.
+
+## `loomwork doctor`
+
+```
+loomwork doctor [--tick-failure-threshold N] [--timer-overdue D] [--step-stall D]
+                [--schedule-overdue D] [--outbox-backlog-threshold N]
+                [--history-warning-fraction F] [--queue NAME ...] [--limit N]
+```
+
+Checks a store or server and prints one `[PASS]`/`[WARN]`/`[FAIL]` line per check, with a
+remediation hint under any that did not pass. Exits 1 if any check failed -- start here
+when a deployment looks unhealthy (see
+[troubleshooting](operations/troubleshooting.md#start-with-loomwork-doctor)):
+
+```
+$ loomwork doctor --store sqlite:///loomwork.db
+[PASS] schema            schema at version 9, up to date
+[PASS] outbox backlog    empty
+[FAIL] tick failures     1 run(s) with >= 3 consecutive tick failures: order-42 (5x: NondeterminismError: ...)
+       -> see `loomwork workflow describe`/`history`; a NondeterminismError needs a code fix or loomwork.patched(), see docs/guides/versioning.md
+[PASS] step job backlog  no ready step jobs waiting
+[PASS] timers            no outstanding timers
+[PASS] schedules         no schedule is overdue
+[PASS] history size      no run is near its history limit
+```
+
+Checks: store reachability and schema version (against the newest migration this
+release knows); outbox backlog; runs whose ticks keep failing (`--tick-failure-threshold`
+consecutive failures); the oldest unclaimed, ready-to-run step job, store-wide and (with
+`--queue`, repeatable) for specific queues, against `--step-stall`; the next timer's
+overdue time against `--timer-overdue`; schedules whose next fire time is overdue by
+`--schedule-overdue`; and running runs approaching the history size limit
+(`--history-warning-fraction` of it). `--server` adds two checks a local `--store`
+connection cannot make: clock skew between this machine and the server, and the token's
+own roles and namespaces. Every query is capped by `--limit` (default 100), so `doctor`
+is safe to run against a large production store. `--json` prints
+`{"ok": bool, "findings": [{"check", "status", "message", "hint"}, ...]}` for monitoring
+integrations.
 
 ## `loomwork archive`
 

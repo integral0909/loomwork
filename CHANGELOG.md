@@ -162,6 +162,13 @@ All notable changes to this project are documented here. The format follows
   control API and the console.
 - Console: reset from the run page and a batch page to preview, cancel or terminate runs
   matching a query.
+- `loomwork doctor`: checks schema version, clock skew, outbox backlog, failing ticks,
+  unserved step queues, overdue timers and schedules, and runs near the history limit,
+  locally or through the server (`GET /control/diagnostics`), with remediation hints.
+  The console shows the same report.
+- `loomwork schedule` works through the control API with operator and reader tokens.
+- Console schedule management: create, edit, delete and backfill schedules, with
+  validation errors shown in the form.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

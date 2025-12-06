@@ -9,6 +9,7 @@ non-Python caller would.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -306,7 +307,11 @@ async def test_whoami(control_client: httpx.AsyncClient) -> None:
     # auth.disabled: every request is an anonymous administrator.
     response = await control_client.get("/whoami")
     assert response.status_code == 200
-    assert response.json() == {"id": "anonymous", "roles": ["admin"]}
+    body = response.json()
+    assert body["id"] == "anonymous"
+    assert body["roles"] == ["admin"]
+    assert body["namespaces"] == ["*"]
+    datetime.fromisoformat(body["server_time"])  # does not raise
 
 
 async def test_describe_by_workflow_id_resolves_the_latest_run(
@@ -520,6 +525,7 @@ async def test_whoami_reports_the_tokens_roles(
     op_response = await client.get("/whoami", headers={"Authorization": f"Bearer {operator_token}"})
     assert op_response.status_code == 200
     assert op_response.json()["roles"] == ["operator"]
+    assert op_response.json()["namespaces"] == ["default"]
 
     reader_response = await client.get(
         "/whoami", headers={"Authorization": f"Bearer {reader_token}"}

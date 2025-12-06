@@ -21,6 +21,7 @@ from loomwork.server.console.batch_views import (
     batch_terminate_view,
     batch_view,
 )
+from loomwork.server.console.diagnostics_views import diagnostics_view
 from loomwork.server.console.runs_views import (
     run_cancel_view,
     run_detail_view,
@@ -31,7 +32,11 @@ from loomwork.server.console.runs_views import (
 )
 from loomwork.server.console.runtime import ConsoleRuntime, new_session_secret
 from loomwork.server.console.schedules_views import (
+    schedule_backfill_view,
+    schedule_create_view,
+    schedule_delete_view,
     schedule_detail_view,
+    schedule_edit_view,
     schedule_pause_view,
     schedule_trigger_view,
     schedule_unpause_view,
@@ -75,8 +80,16 @@ def build_console_app(state: ServerState) -> Starlette:
         Route("/{namespace}/batch/cancel", batch_cancel_view(runtime), methods=["POST"]),
         Route("/{namespace}/batch/terminate", batch_terminate_view(runtime), methods=["POST"]),
         Route("/{namespace}/schedules", schedules_list_view(runtime), methods=["GET"]),
+        # "/new" must be listed before the "{schedule_id}" routes below: Starlette takes
+        # the first pattern that matches, and "{schedule_id}" would otherwise swallow it.
+        Route("/{namespace}/schedules/new", schedule_create_view(runtime), methods=["GET", "POST"]),
         Route(
             "/{namespace}/schedules/{schedule_id}", schedule_detail_view(runtime), methods=["GET"]
+        ),
+        Route(
+            "/{namespace}/schedules/{schedule_id}/edit",
+            schedule_edit_view(runtime),
+            methods=["GET", "POST"],
         ),
         Route(
             "/{namespace}/schedules/{schedule_id}/pause",
@@ -93,6 +106,17 @@ def build_console_app(state: ServerState) -> Starlette:
             schedule_trigger_view(runtime),
             methods=["POST"],
         ),
+        Route(
+            "/{namespace}/schedules/{schedule_id}/backfill",
+            schedule_backfill_view(runtime),
+            methods=["POST"],
+        ),
+        Route(
+            "/{namespace}/schedules/{schedule_id}/delete",
+            schedule_delete_view(runtime),
+            methods=["POST"],
+        ),
+        Route("/{namespace}/diagnostics", diagnostics_view(runtime), methods=["GET"]),
     ]
     app = Starlette(routes=routes, middleware=[Middleware(SecurityHeadersMiddleware)])
     console_errors.install(app, runtime)

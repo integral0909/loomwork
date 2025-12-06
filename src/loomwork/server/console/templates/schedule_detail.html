@@ -73,6 +73,8 @@
 </div>
 
 {% if can_write %}
+<p><a href="/console/{{ namespace }}/schedules/{{ state.schedule_id }}/edit">Edit spec, policy or note</a></p>
+
 <div class="card actions">
   <form method="post" action="/console/{{ namespace }}/schedules/{{ state.schedule_id }}/{{ 'unpause' if state.paused else 'pause' }}">
     <h3>{{ "Unpause" if state.paused else "Pause" }}</h3>
@@ -86,6 +88,23 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <p class="muted">Starts one run immediately, ignoring the overlap policy.</p>
     <button type="submit">Trigger</button>
+  </form>
+
+  <form method="post" action="/console/{{ namespace }}/schedules/{{ state.schedule_id }}/backfill">
+    <h3>Backfill</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted">Start a run for every fire time in a past range.</p>
+    <label><span class="field-label">From</span><input type="datetime-local" name="start" required></label>
+    <label><span class="field-label">To</span><input type="datetime-local" name="end" required></label>
+    <button type="submit" class="secondary">Backfill</button>
+  </form>
+
+  <form method="post" action="/console/{{ namespace }}/schedules/{{ state.schedule_id }}/delete">
+    <h3>Delete</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted">The schedule stops firing; runs it already started are unaffected.</p>
+    <label><input type="checkbox" name="confirm" value="yes" required> I understand this cannot be undone</label>
+    <button type="submit" class="danger">Delete</button>
   </form>
 </div>
 {% endif %}

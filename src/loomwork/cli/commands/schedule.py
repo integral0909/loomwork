@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from loomwork.cli.commands.common import connected, decode_payload, open_session
+from loomwork.cli.backend import open_schedule_operations
+from loomwork.cli.commands.common import connected, decode_payload
 from loomwork.cli.errors import ExitCode, UsageError
 from loomwork.cli.output import Console
 from loomwork.cli.parsing import format_duration, parse_arguments, parse_duration, parse_timestamp
@@ -85,8 +86,8 @@ async def create(args: argparse.Namespace, console: Console) -> int:
         raise UsageError("give exactly one of --cron and --every")
     stdin_text = console.read_stdin() if "@-" in args.args else None
     positional = parse_arguments(list(args.args), raw_strings=args.raw, stdin_text=stdin_text)
-    async with open_session(args) as active:
-        handle = await active.client.schedules.create(
+    async with open_schedule_operations(args) as sched:
+        handle = await sched.schedules.create(
             args.schedule_id,
             args.workflow,
             *positional,
@@ -111,36 +112,36 @@ async def create(args: argparse.Namespace, console: Console) -> int:
 
 
 async def list_schedules(args: argparse.Namespace, console: Console) -> int:
-    async with open_session(args) as active:
-        states = await active.client.schedules.list(limit=args.limit)
+    async with open_schedule_operations(args) as sched:
+        states = await sched.schedules.list(limit=args.limit)
     console.table(_HEADERS, [_row(s) for s in states], records=states, empty="no schedules")
     return ExitCode.OK
 
 
 async def describe(args: argparse.Namespace, console: Console) -> int:
-    async with open_session(args) as active:
-        state = await active.client.schedules.get(args.schedule_id).describe()
-        _show(console, state, active.converter)
+    async with open_schedule_operations(args) as sched:
+        state = await sched.schedules.get(args.schedule_id).describe()
+        _show(console, state, sched.converter)
     return ExitCode.OK
 
 
 async def pause(args: argparse.Namespace, console: Console) -> int:
-    async with open_session(args) as active:
-        state = await active.client.schedules.get(args.schedule_id).pause(args.note)
-        _show(console, state, active.converter)
+    async with open_schedule_operations(args) as sched:
+        state = await sched.schedules.get(args.schedule_id).pause(args.note)
+        _show(console, state, sched.converter)
     return ExitCode.OK
 
 
 async def unpause(args: argparse.Namespace, console: Console) -> int:
-    async with open_session(args) as active:
-        state = await active.client.schedules.get(args.schedule_id).unpause(args.note)
-        _show(console, state, active.converter)
+    async with open_schedule_operations(args) as sched:
+        state = await sched.schedules.get(args.schedule_id).unpause(args.note)
+        _show(console, state, sched.converter)
     return ExitCode.OK
 
 
 async def trigger(args: argparse.Namespace, console: Console) -> int:
-    async with open_session(args) as active:
-        state = await active.client.schedules.get(args.schedule_id).trigger()
+    async with open_schedule_operations(args) as sched:
+        state = await sched.schedules.get(args.schedule_id).trigger()
     latest = state.recent[-1] if state.recent else None
     if console.json_output:
         console.json(latest)
@@ -154,8 +155,8 @@ async def backfill(args: argparse.Namespace, console: Console) -> int:
     end = parse_timestamp(args.end)
     if end <= start:
         raise UsageError("--to must be after --from")
-    async with open_session(args) as active:
-        handle = active.client.schedules.get(args.schedule_id)
+    async with open_schedule_operations(args) as sched:
+        handle = sched.schedules.get(args.schedule_id)
         before = (await handle.describe()).total_started
         state = await handle.backfill(start, end)
     started = state.total_started - before
@@ -167,8 +168,8 @@ async def backfill(args: argparse.Namespace, console: Console) -> int:
 
 
 async def upcoming(args: argparse.Namespace, console: Console) -> int:
-    async with open_session(args) as active:
-        times = await active.client.schedules.get(args.schedule_id).upcoming(args.count)
+    async with open_schedule_operations(args) as sched:
+        times = await sched.schedules.get(args.schedule_id).upcoming(args.count)
     console.table(
         ["fire time"], [[t] for t in times], records=list(times), empty="no upcoming fire times"
     )
@@ -178,8 +179,8 @@ async def upcoming(args: argparse.Namespace, console: Console) -> int:
 async def update(args: argparse.Namespace, console: Console) -> int:
     if args.cron is not None and args.every is not None:
         raise UsageError("give at most one of --cron and --every")
-    async with open_session(args) as active:
-        handle = active.client.schedules.get(args.schedule_id)
+    async with open_schedule_operations(args) as sched:
+        handle = sched.schedules.get(args.schedule_id)
         current = await handle.describe()
         spec = None
         if any(v is not None for v in (args.cron, args.every, args.timezone, args.jitter)):
@@ -218,13 +219,13 @@ async def update(args: argparse.Namespace, console: Console) -> int:
         if spec is None and policy is None and args.note is None:
             raise UsageError("nothing to change")
         state = await handle.update(spec=spec, policy=policy, note=args.note)
-        _show(console, state, active.converter)
+        _show(console, state, sched.converter)
     return ExitCode.OK
 
 
 async def delete(args: argparse.Namespace, console: Console) -> int:
-    async with open_session(args) as active:
-        deleted = await active.client.schedules.get(args.schedule_id).delete()
+    async with open_schedule_operations(args) as sched:
+        deleted = await sched.schedules.get(args.schedule_id).delete()
     if not deleted:
         raise UsageError(f"schedule {args.schedule_id!r} does not exist")
     console.note(f"deleted schedule {args.schedule_id}")

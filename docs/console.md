@@ -2,8 +2,9 @@
 
 A server-rendered web UI for operating workflows in server mode: browsing and filtering
 runs, inspecting one run's full history and pending work, sending it a signal, cancelling
-or terminating it, and viewing and controlling schedules. It lives at `/console`,
-alongside the worker and control APIs (see [server mode](server.md)).
+or terminating it, creating, editing, backfilling and deleting schedules, and checking a
+namespace's health at a glance. It lives at `/console`, alongside the worker and control
+APIs (see [server mode](server.md)).
 
 The console is a plain multi-page app: every page is rendered on the server and every
 action is an ordinary HTML form POST with a redirect back to a GET. There is no
@@ -138,13 +139,23 @@ other long-lived credential.
   previewed is exactly what gets acted on.
 - **Schedules list** and **schedule detail** (`/console/{namespace}/schedules[/...]`):
   spec, policy, next fire time, upcoming fire times, currently running and recently
-  completed actions, and pause/unpause/trigger forms.
+  completed actions, and pause/unpause/trigger/backfill/delete forms (`control_write`).
+  **New schedule** (`/console/{namespace}/schedules/new`) and **edit** (`.../{schedule_id}
+  /edit`, spec/policy/note only -- the workflow and its arguments cannot be changed after
+  creation) validate cron expressions, time zones and the JSON arguments array
+  server-side and, on a problem, re-render the same form with the message next to what
+  needs fixing and every other field exactly as submitted, rather than an error page.
+  Delete requires the same explicit confirmation checkbox as terminating a run; the runs
+  a schedule already started keep running.
+- **Diagnostics** (`/console/{namespace}/diagnostics`): the same pass/warn/fail report as
+  [`loomwork doctor`](cli.md#loomwork-doctor) -- store schema, outbox backlog, tick
+  failures, step and timer backlogs, overdue schedules and history size -- read-only,
+  `control_read`.
 
 ## What it does not do
 
 The console only reads and controls what the engine and store already expose through
 `Engine`/`Store` (no new store methods were added to build it): it cannot run a workflow
 query handler (the control API cannot either -- the server never imports workflow code),
-edit search attribute schemas (declare them in `[server.search_attributes]` instead, see
-[server mode](server.md)), or create/delete/update a schedule's spec (only pause, unpause
-and trigger). Use the [CLI](cli.md) or the Python client for those.
+or edit search attribute schemas (declare them in `[server.search_attributes]` instead,
+see [server mode](server.md)). Use the [CLI](cli.md) or the Python client for those.

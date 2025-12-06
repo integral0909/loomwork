@@ -18,6 +18,12 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from loomwork.codec.converter import default_converter
+from loomwork.diagnostics import (
+    DEFAULT_HISTORY_WARNING_FRACTION,
+    DEFAULT_LIMIT,
+    DEFAULT_TICK_FAILURE_THRESHOLD,
+    collect_diagnostics,
+)
 from loomwork.history.events import UpdateCompleted
 from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
 from loomwork.retry import RetryPolicy
@@ -163,15 +169,59 @@ async def describe_workflow_by_id(request: Request) -> JSONResponse:
 
 
 async def whoami(request: Request) -> JSONResponse:
-    """What the caller's token may do: its id and roles, in this namespace.
+    """What the caller's token may do: its id, roles and namespaces, plus the server's own
+    clock.
 
     Lets a caller (in practice, the CLI) discover whether its token has ``worker`` role
     (so it should use the worker API / ``HttpStore``) or only ``operator``/``reader``
     (so it must use this control API instead) without already knowing which -- the one
-    endpoint any correctly-scoped token may call regardless of its role.
+    endpoint any correctly-scoped token may call regardless of its role. ``server_time``
+    additionally lets ``loomwork doctor`` report the clock skew between the machine it
+    runs on and the server, a common cause of confusing timestamps and premature timeouts.
     """
     token = await authenticate(request, namespace=_namespace_name(request), capability=None)
-    return JSONResponse({"id": token.id, "roles": [r.value for r in token.roles]})
+    now = server_state(request).clock.now()
+    return JSONResponse(
+        {
+            "id": token.id,
+            "roles": [r.value for r in token.roles],
+            "namespaces": list(token.namespaces),
+            "server_time": now.isoformat(),
+        }
+    )
+
+
+async def diagnostics(request: Request) -> JSONResponse:
+    """Aggregate health facts about this namespace's store, for ``loomwork doctor
+    --server`` (see :mod:`loomwork.diagnostics`): the same checks the CLI runs directly
+    against a local store, computed here since a ``--server`` connection has no store
+    access of its own.
+    """
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    params = request.query_params
+    limit = int(params.get("limit", DEFAULT_LIMIT))
+    tick_failure_threshold = int(
+        params.get("tick_failure_threshold", DEFAULT_TICK_FAILURE_THRESHOLD)
+    )
+    history_warning_fraction = float(
+        params.get("history_warning_fraction", DEFAULT_HISTORY_WARNING_FRACTION)
+    )
+    queues = params.getlist("queue")
+    now = server_state(request).clock.now()
+    snapshot = await collect_diagnostics(
+        ns.store,
+        ns.engine,
+        now,
+        tick_failure_threshold=tick_failure_threshold,
+        history_warning_fraction=history_warning_fraction,
+        queues=queues,
+        limit=limit,
+    )
+    _audit(request, token.id, "diagnostics")
+    return JSONResponse(snapshot.to_dict())
 
 
 async def workflow_history(request: Request) -> JSONResponse:
@@ -510,6 +560,7 @@ async def delete_schedule(request: Request) -> JSONResponse:
 
 routes = [
     Route("/whoami", whoami, methods=["GET"]),
+    Route("/diagnostics", diagnostics, methods=["GET"]),
     Route("/workflows", start_workflow, methods=["POST"]),
     Route("/workflows", list_workflows, methods=["GET"]),
     Route("/workflows/signal-with-start", signal_with_start, methods=["POST"]),
