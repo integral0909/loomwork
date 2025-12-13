@@ -227,6 +227,7 @@ async def claim_tick(request: Request) -> JSONResponse:
     worker_id = str(body["worker_id"])
     lease = timedelta(seconds=float(body["lease_seconds"]))
     workflow_names = body.get("workflow_names")
+    build_id = body.get("build_id")
     now_offset = float(body.get("now", 0.0))
     wait = _long_poll_wait(request, body)
     notifier = ns.store.notifier
@@ -235,7 +236,7 @@ async def claim_tick(request: Request) -> JSONResponse:
     while True:
         token_seq = notifier.token(TOPIC_TICKS)
         current_now = wire.apply_offset(ns.engine.clock.now(), now_offset)
-        claimed = await ns.store.claim_tick(worker_id, current_now, lease, workflow_names)
+        claimed = await ns.store.claim_tick(worker_id, current_now, lease, workflow_names, build_id)
         if claimed is not None:
             _audit(request, token.id, "claim_tick", claimed.run_id)
             return JSONResponse({"record": wire.execution_record_to_wire(claimed)})
@@ -287,6 +288,7 @@ async def claim_step(request: Request) -> JSONResponse:
     lease = timedelta(seconds=float(body["lease_seconds"]))
     step_names = body.get("step_names")
     queues = body.get("queues")
+    build_id = body.get("build_id")
     now_offset = float(body.get("now", 0.0))
     wait = _long_poll_wait(request, body)
     notifier = ns.store.notifier
@@ -295,7 +297,9 @@ async def claim_step(request: Request) -> JSONResponse:
     while True:
         token_seq = notifier.token(TOPIC_STEPS)
         current_now = wire.apply_offset(ns.engine.clock.now(), now_offset)
-        claimed = await ns.store.claim_step(worker_id, current_now, lease, step_names, queues)
+        claimed = await ns.store.claim_step(
+            worker_id, current_now, lease, step_names, queues, build_id
+        )
         if claimed is not None:
             _audit(request, token.id, "claim_step", claimed.job_id)
             return JSONResponse({"job": wire.step_job_to_wire(claimed)})
@@ -401,6 +405,79 @@ async def get_step_jobs(request: Request) -> JSONResponse:
     ns = _namespace(request)
     jobs = await ns.store.get_step_jobs(request.path_params["run_id"])
     return JSONResponse({"jobs": wire.step_jobs_to_wire(jobs)})
+
+
+# --------------------------------------------------------------------------- worker builds
+
+
+async def repin_run(request: Request) -> JSONResponse:
+    token = await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    body = await _body(request)
+    server_now = ns.engine.clock.now()
+    run_id = request.path_params["run_id"]
+    record = await ns.store.repin_run(run_id, body.get("build_id"), _now(server_now, body))
+    _audit(request, token.id, "repin_run", run_id)
+    return JSONResponse({"record": wire.execution_record_to_wire(record)})
+
+
+async def declare_build_compatible(request: Request) -> JSONResponse:
+    token = await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    body = await _body(request)
+    server_now = ns.engine.clock.now()
+    build_id = str(body["build_id"])
+    compatible_with = str(body["compatible_with"])
+    await ns.store.declare_build_compatible(build_id, compatible_with, _now(server_now, body))
+    _audit(request, token.id, "declare_build_compatible", build_id)
+    return JSONResponse({"ok": True})
+
+
+async def revoke_build_compatibility(request: Request) -> JSONResponse:
+    token = await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    body = await _body(request)
+    build_id = str(body["build_id"])
+    compatible_with = str(body["compatible_with"])
+    ok = await ns.store.revoke_build_compatibility(build_id, compatible_with)
+    _audit(request, token.id, "revoke_build_compatibility", build_id)
+    return JSONResponse({"ok": ok})
+
+
+async def list_build_compatibility(request: Request) -> JSONResponse:
+    await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    items = await ns.store.list_build_compatibility()
+    return JSONResponse({"items": [wire.build_compatibility_to_wire(i) for i in items]})
+
+
+async def heartbeat_worker(request: Request) -> JSONResponse:
+    token = await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    body = await _body(request)
+    server_now = ns.engine.clock.now()
+    worker_id = str(body["worker_id"])
+    expires_at = wire.apply_offset(server_now, float(body["expires_at"]))
+    await ns.store.heartbeat_worker(
+        worker_id, str(body["build_id"]), _now(server_now, body), expires_at
+    )
+    _audit(request, token.id, "heartbeat_worker", worker_id)
+    return JSONResponse({"ok": True})
+
+
+async def list_worker_builds(request: Request) -> JSONResponse:
+    await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    body = await _body(request)
+    server_now = ns.engine.clock.now()
+    presence = await ns.store.list_worker_builds(_now(server_now, body))
+    return JSONResponse({"presence": [wire.worker_presence_to_wire(p) for p in presence]})
+
+
+async def count_pinned_runs(request: Request) -> JSONResponse:
+    await authenticate(request, namespace=_namespace_name(request), capability="worker")
+    ns = _namespace(request)
+    return JSONResponse({"counts": await ns.store.count_pinned_runs()})
 
 
 # --------------------------------------------------------------------------- outbox / children
@@ -568,6 +645,13 @@ routes = [
     Route("/steps/{job_id}/lease", renew_step_lease, methods=["POST"]),
     Route("/steps/{job_id}/heartbeat", heartbeat_step, methods=["POST"]),
     Route("/steps/{job_id}/release", release_step, methods=["POST"]),
+    Route("/executions/{run_id}/repin", repin_run, methods=["POST"]),
+    Route("/builds/compatibility", declare_build_compatible, methods=["POST"]),
+    Route("/builds/compatibility", list_build_compatibility, methods=["GET"]),
+    Route("/builds/compatibility/revoke", revoke_build_compatibility, methods=["POST"]),
+    Route("/builds/heartbeat", heartbeat_worker, methods=["POST"]),
+    Route("/builds/workers", list_worker_builds, methods=["POST"]),
+    Route("/builds/pinned-counts", count_pinned_runs, methods=["GET"]),
     Route("/outbox/relay", relay_outbox, methods=["POST"]),
     Route("/outbox/size", outbox_size, methods=["GET"]),
     Route("/retention/delete-closed", delete_closed_before, methods=["POST"]),

@@ -23,6 +23,8 @@ TABLES = (
     "lw_outbox",
     "lw_schedules",
     "lw_search_attributes",
+    "lw_build_compatibility",
+    "lw_worker_presence",
     "lw_executions",
 )
 

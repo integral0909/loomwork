@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from datetime import timedelta
+from typing import Any
 
 import pytest
 
@@ -20,6 +21,7 @@ from loomwork.errors import (
     ScheduleConflictError,
     ScheduleExistsError,
     WorkflowAlreadyStartedError,
+    WorkflowClosedError,
     WorkflowIdReuseRejectedError,
 )
 from loomwork.failure import FailureInfo
@@ -39,7 +41,13 @@ from loomwork.history.events import (
     WorkflowStarted,
     WorkflowTerminated,
 )
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, StepOptions
+from loomwork.options import (
+    IdConflictPolicy,
+    IdReusePolicy,
+    ResetPoint,
+    StepOptions,
+    VersioningPolicy,
+)
 from loomwork.schedules.model import (
     ScheduleAction,
     ScheduledRun,
@@ -67,13 +75,20 @@ LEASE = timedelta(seconds=30)
 PAYLOAD = default_converter.encode("x")
 
 
-def record(run_id: str, workflow_id: str | None = None, name: str = "wf") -> ExecutionRecord:
+def record(
+    run_id: str,
+    workflow_id: str | None = None,
+    name: str = "wf",
+    *,
+    versioning_policy: VersioningPolicy = VersioningPolicy.AUTO_UPGRADE,
+) -> ExecutionRecord:
     return ExecutionRecord(
         run_id=run_id,
         workflow_id=workflow_id or f"wid-{run_id}",
         workflow_name=name,
         status=ExecutionStatus.RUNNING,
         created_at=T0,
+        versioning_policy=versioning_policy,
     )
 
 
@@ -94,6 +109,7 @@ def job(
     *,
     job_id: str | None = None,
     headers: dict[str, str] | None = None,
+    pinned_build_id: str | None = None,
 ) -> StepJob:
     return StepJob(
         job_id=job_id or f"job-{run_id}-{seq}",
@@ -107,21 +123,27 @@ def job(
         scheduled_at=T0,
         ready_at=T0,
         headers=headers or {},
+        pinned_build_id=pinned_build_id,
     )
 
 
 class StoreConformance:
     """Mix-in test class; subclasses provide the ``store`` fixture."""
 
-    async def create(self, store: Store, run_id: str = "r1", **kwargs: str) -> ExecutionRecord:
+    async def create(self, store: Store, run_id: str = "r1", **kwargs: Any) -> ExecutionRecord:
         rec = record(run_id, **kwargs)
         created, _ = await store.create_execution(rec, started(rec), T0)
         return created
 
     async def claim(
-        self, store: Store, worker: str = "w1", at: timedelta = timedelta(0)
+        self,
+        store: Store,
+        worker: str = "w1",
+        at: timedelta = timedelta(0),
+        *,
+        build_id: str | None = None,
     ) -> ExecutionRecord:
-        claimed = await store.claim_tick(worker, T0 + at, LEASE)
+        claimed = await store.claim_tick(worker, T0 + at, LEASE, build_id=build_id)
         assert claimed is not None
         return claimed
 
@@ -633,6 +655,173 @@ class StoreConformance:
         assert await store.next_timer_at() == T0 + timedelta(hours=1)
         assert await store.claim_step("w2", T0 + LEASE, LEASE) is None
         assert await store.get_step_jobs("r1") == []  # abandoned + cancelled job cleaned up
+
+    # ------------------------------------------------------------------ worker builds
+
+    async def test_unversioned_worker_claims_pinned_run(self, store: Store) -> None:
+        """``build_id=None`` (an unversioned worker) is eligible for every run, pinned
+        or not: today's behaviour, unaffected by this feature (ADR-0006)."""
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        claimed = await store.claim_tick("w1", T0, LEASE, build_id=None)
+        assert claimed is not None and claimed.run_id == "r1"
+
+    async def test_first_tick_pins_a_pinned_run(self, store: Store) -> None:
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        claimed = await self.claim(store, build_id="build-a")
+        assert claimed.pinned_build_id is None  # not pinned until this tick commits
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        rec = await store.get_execution("r1")
+        assert rec.pinned_build_id == "build-a"
+        history = await store.load_history("r1")
+        tick = next(e for e in history if isinstance(e, TickCompleted))
+        assert tick.build_id == "build-a"
+
+    async def test_auto_upgrade_run_never_pins(self, store: Store) -> None:
+        await self.create(store)  # versioning_policy defaults to AUTO_UPGRADE
+        await self.claim(store, build_id="build-a")
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        rec = await store.get_execution("r1")
+        assert rec.pinned_build_id is None
+
+    async def test_pinned_build_id_is_set_only_once(self, store: Store) -> None:
+        """A later tick's ``build_id`` never overrides an already-set pin."""
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        await self.claim(store, build_id="build-a")
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        await store.append_input("r1", TimerFired(seq=1), T0)
+        claimed = await self.claim(store, worker="build-a-worker", build_id="build-a")
+        await self.commit(store, "r1", consumed=2, worker="build-a-worker", build_id="build-b")
+        assert claimed.pinned_build_id == "build-a"
+        assert (await store.get_execution("r1")).pinned_build_id == "build-a"
+
+    async def test_claim_tick_excludes_mismatched_build(self, store: Store) -> None:
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        await self.claim(store, build_id="build-a")
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        await store.append_input("r1", TimerFired(seq=1), T0)
+        assert await store.claim_tick("w2", T0, LEASE, build_id="build-b") is None
+        claimed = await store.claim_tick("w2", T0, LEASE, build_id="build-a")
+        assert claimed is not None and claimed.run_id == "r1"
+
+    async def test_claim_tick_honours_declared_compatibility(self, store: Store) -> None:
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        await self.claim(store, build_id="build-a")
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        await store.append_input("r1", TimerFired(seq=1), T0)
+        assert await store.claim_tick("w2", T0, LEASE, build_id="build-b") is None
+        await store.declare_build_compatible("build-b", "build-a", T0)
+        claimed = await store.claim_tick("w2", T0, LEASE, build_id="build-b")
+        assert claimed is not None and claimed.run_id == "r1"
+
+    async def test_declare_build_compatible_is_idempotent(self, store: Store) -> None:
+        await store.declare_build_compatible("b", "a", T0)
+        await store.declare_build_compatible("b", "a", T0 + timedelta(seconds=5))
+        items = await store.list_build_compatibility()
+        assert [(i.build_id, i.compatible_with) for i in items] == [("b", "a")]
+        assert items[0].created_at == T0  # kept the first declaration's timestamp
+
+    async def test_build_compatibility_is_directed(self, store: Store) -> None:
+        # "b" compatible with "a" lets b claim runs pinned to a, but not the reverse.
+        await store.declare_build_compatible("build-b", "build-a", T0)
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        await self.claim(store, build_id="build-b")
+        await self.commit(store, "r1", consumed=1, build_id="build-b")
+        await store.append_input("r1", TimerFired(seq=1), T0)
+        assert await store.claim_tick("w1", T0, LEASE, build_id="build-a") is None
+        claimed = await store.claim_tick("w1", T0, LEASE, build_id="build-b")
+        assert claimed is not None
+
+    async def test_revoke_build_compatibility(self, store: Store) -> None:
+        await store.declare_build_compatible("b", "a", T0)
+        assert await store.revoke_build_compatibility("b", "a")
+        assert await store.list_build_compatibility() == []
+        assert not await store.revoke_build_compatibility("b", "a")
+
+    async def test_repin_run(self, store: Store) -> None:
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        await self.claim(store, build_id="build-a")
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        updated = await store.repin_run("r1", "build-b", T0)
+        assert updated.pinned_build_id == "build-b"
+        assert (await store.get_execution("r1")).pinned_build_id == "build-b"
+        await store.append_input("r1", TimerFired(seq=1), T0)
+        assert await store.claim_tick("w1", T0, LEASE, build_id="build-a") is None
+        claimed = await store.claim_tick("w1", T0, LEASE, build_id="build-b")
+        assert claimed is not None
+
+    async def test_repin_to_none_unpins(self, store: Store) -> None:
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        await self.claim(store, build_id="build-a")
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        await store.repin_run("r1", None, T0)
+        assert (await store.get_execution("r1")).pinned_build_id is None
+        await store.append_input("r1", TimerFired(seq=1), T0)
+        # Unpinned again: the next tick pins fresh, to whichever build claims it.
+        claimed = await store.claim_tick("w1", T0, LEASE, build_id="build-c")
+        assert claimed is not None
+        await self.commit(store, "r1", consumed=2, build_id="build-c")
+        assert (await store.get_execution("r1")).pinned_build_id == "build-c"
+
+    async def test_repin_missing_run(self, store: Store) -> None:
+        with pytest.raises(NotFoundError):
+            await store.repin_run("nope", "build-a", T0)
+
+    async def test_repin_closed_run(self, store: Store) -> None:
+        await self.create(store)
+        await store.terminate("r1", "done", T0)
+        with pytest.raises(WorkflowClosedError):
+            await store.repin_run("r1", "build-a", T0)
+
+    async def test_heartbeat_worker_and_list_live_builds(self, store: Store) -> None:
+        await store.heartbeat_worker("w1", "build-a", T0, T0 + timedelta(seconds=30))
+        await store.heartbeat_worker("w2", "build-b", T0, T0 + timedelta(seconds=30))
+        live = await store.list_worker_builds(T0)
+        assert {(p.worker_id, p.build_id) for p in live} == {
+            ("w1", "build-a"),
+            ("w2", "build-b"),
+        }
+        # Expired presence drops out without needing to be deleted.
+        assert await store.list_worker_builds(T0 + timedelta(seconds=31)) == []
+
+    async def test_heartbeat_worker_overwrites_previous_build(self, store: Store) -> None:
+        await store.heartbeat_worker("w1", "build-a", T0, T0 + timedelta(seconds=30))
+        await store.heartbeat_worker(
+            "w1", "build-b", T0 + timedelta(seconds=1), T0 + timedelta(seconds=31)
+        )
+        live = await store.list_worker_builds(T0 + timedelta(seconds=1))
+        assert [(p.worker_id, p.build_id) for p in live] == [("w1", "build-b")]
+
+    async def test_count_pinned_runs(self, store: Store) -> None:
+        await self.create(store, "r1", versioning_policy=VersioningPolicy.PINNED)
+        await self.create(store, "r2", versioning_policy=VersioningPolicy.PINNED)
+        await self.create(store, "r3")  # AUTO_UPGRADE: never pins
+        await self.claim(store, build_id="build-a")
+        await self.commit(store, "r1", consumed=1, build_id="build-a")
+        claimed2 = await store.claim_tick("w1", T0, LEASE, build_id="build-a")
+        assert claimed2 is not None and claimed2.run_id == "r2"
+        await self.commit(store, "r2", consumed=1, build_id="build-a")
+        assert await store.count_pinned_runs() == {"build-a": 2}
+        await store.terminate("r1", "done", T0)
+        assert await store.count_pinned_runs() == {"build-a": 1}
+
+    async def test_pinned_queue_step_is_filtered_by_build(self, store: Store) -> None:
+        await self.create(store, versioning_policy=VersioningPolicy.PINNED)
+        await self.claim(store, build_id="build-a")
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            build_id="build-a",
+            new_steps=[job("r1", 1, pinned_build_id="build-a")],
+        )
+        assert await store.claim_step("w1", T0, LEASE, build_id="build-b") is None
+        claimed = await store.claim_step("w1", T0, LEASE, build_id="build-a")
+        assert claimed is not None and claimed.seq == 1
+
+    async def test_unpinned_step_is_claimable_by_any_build(self, store: Store) -> None:
+        await self._with_jobs(store, job("r1", 1))  # pinned_build_id defaults to None
+        claimed = await store.claim_step("w1", T0, LEASE, build_id="build-anything")
+        assert claimed is not None and claimed.seq == 1
 
     # ------------------------------------------------------------------ steps
 

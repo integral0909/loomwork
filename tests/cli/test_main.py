@@ -156,6 +156,9 @@ def test_worker_options_from_flags() -> None:
     assert options.run_schedules is False
     assert options.run_timers is True
     assert options.shutdown_grace == 30
+    assert options.build_id is None
+    args = parser.parse_args(["worker", "--app", "m", "--build-id", "2024.10.1"])
+    assert worker_options(args).build_id == "2024.10.1"
 
 
 def test_queue_limits_imply_queues() -> None:

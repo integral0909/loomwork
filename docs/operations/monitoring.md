@@ -18,6 +18,8 @@ renders the Prometheus text format:
 | `loomwork_schedule_runs_total` | counter | `result` | `skipped` rising: overlap policy or outages |
 | `loomwork_outbox_messages_total` | counter | | cross-run traffic |
 | `loomwork_worker_errors_total` | counter | `loop` | any value: check logs |
+| `loomwork_history_size_warnings_total` | counter | `workflow`, `unit` | runs that should call `continue_as_new()` |
+| `loomwork_pinned_runs_waiting` | gauge | `build_id` | nonzero: a pinned build has runs waiting with no live or compatible worker ([worker build versioning](../adr/0006-worker-build-versioning.md)) |
 
 `loomwork worker --metrics-port 9464` serves them at `http://127.0.0.1:9464/metrics`, with
 a `/healthz` readiness probe next to it. In your own process, `MetricsServer` does the same

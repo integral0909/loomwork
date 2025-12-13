@@ -53,5 +53,6 @@ Architecture decision records:
 - [ADR-0004](adr/0004-cross-run-outbox.md): cross-run effects through a transactional outbox
 - [ADR-0005](adr/0005-class-based-workflows.md): class-based workflows as a layer over
   function workflows
+- [ADR-0006](adr/0006-worker-build-versioning.md): worker build versioning (pinned runs)
 
 [Internals](internals.md) explains how the pieces fit, for people changing Loomwork.

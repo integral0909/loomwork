@@ -108,3 +108,14 @@ class TestWorkerOptions:
     def test_limits_need_explicit_queues(self) -> None:
         with pytest.raises(ValueError, match="explicit task_queues"):
             WorkerOptions(queue_limits={"a": QueueLimit(rate=1)})
+
+    def test_build_id_defaults_to_unversioned(self) -> None:
+        assert WorkerOptions().build_id is None
+
+    def test_blank_build_id_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="blank"):
+            WorkerOptions(build_id="   ")
+
+    def test_build_heartbeat_interval_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="build_heartbeat_interval"):
+            WorkerOptions(build_heartbeat_interval=0)

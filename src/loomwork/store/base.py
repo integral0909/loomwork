@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from loomwork.visibility.schema import SearchAttributes
 from loomwork.store.notify import Notifier
 from loomwork.store.records import (
+    BuildCompatibility,
     ChildSpec,
     ExecutionRecord,
     ExecutionStatus,
@@ -32,6 +33,7 @@ from loomwork.store.records import (
     OutboxMessage,
     StepJob,
     TickOutcome,
+    WorkerPresence,
 )
 
 #: Statuses that satisfy IdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY: the latest run did
@@ -211,11 +213,20 @@ class Store(abc.ABC):
         now: datetime,
         lease: timedelta,
         workflow_names: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> ExecutionRecord | None:
         """Lease a running execution with a pending, ready tick.
 
         Executions whose lease has expired are eligible again. Among eligible executions
         the one that has been ready the longest is chosen.
+
+        ``build_id`` is this worker's declared build (see :class:`~loomwork.worker.
+        worker.WorkerOptions`). ``None`` means the worker is unversioned: it is eligible
+        for every execution, pinned or not (today's behaviour, unchanged). A worker that
+        declares a build is only eligible for an execution whose ``pinned_build_id`` is
+        ``None`` (not yet pinned), equal to ``build_id``, or declared compatible with
+        ``build_id`` (see :meth:`declare_build_compatible`); see
+        ``docs/adr/0006-worker-build-versioning.md``.
         """
 
     @abc.abstractmethod
@@ -261,12 +272,17 @@ class Store(abc.ABC):
         lease: timedelta,
         step_names: Collection[str] | None = None,
         queues: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> StepJob | None:
         """Lease a ready step job and increment its attempt counter.
 
         Only jobs whose step name is in ``step_names`` and whose queue is in ``queues``
         are considered (``None`` means no restriction). Higher priorities are claimed
         first, then older ``ready_at``.
+
+        ``build_id`` filters exactly as in :meth:`claim_tick`, against the job's own
+        ``pinned_build_id`` (set only for queues opted into pinning; see
+        :attr:`~loomwork.engine.config.EngineConfig.pinned_queues`).
         """
 
     @abc.abstractmethod
@@ -335,6 +351,63 @@ class Store(abc.ABC):
     @abc.abstractmethod
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
         """Outstanding step jobs of a run, ordered by sequence number."""
+
+    # ------------------------------------------------------------------ worker builds
+
+    @abc.abstractmethod
+    async def repin_run(self, run_id: str, build_id: str | None, now: datetime) -> ExecutionRecord:
+        """Set ``run_id``'s ``pinned_build_id`` to ``build_id`` (``None`` unpins it, so
+        the next tick pins to whichever build processes it, exactly as an unpinned run
+        that has never ticked).
+
+        Moves a stuck run off a build with no live workers, or onto one made compatible
+        after the fact. Does not touch the run's ``versioning_policy``: a run repinned
+        while ``AUTO_UPGRADE`` accepts the new value but it has no effect on claiming
+        until the run is also switched to ``PINNED``.
+
+        Raises:
+            NotFoundError: ``run_id`` does not exist.
+            WorkflowClosedError: ``run_id`` has already closed.
+        """
+
+    @abc.abstractmethod
+    async def declare_build_compatible(
+        self, build_id: str, compatible_with: str, now: datetime
+    ) -> None:
+        """Declare that workers of ``build_id`` may claim ticks and pinned-queue steps
+        pinned to ``compatible_with`` (directed; the reverse is not implied). Idempotent."""
+
+    @abc.abstractmethod
+    async def revoke_build_compatibility(self, build_id: str, compatible_with: str) -> bool:
+        """Undo :meth:`declare_build_compatible`. Returns ``False`` if it was not set."""
+
+    @abc.abstractmethod
+    async def list_build_compatibility(self) -> list[BuildCompatibility]:
+        """Every declared compatibility, newest first."""
+
+    @abc.abstractmethod
+    async def heartbeat_worker(
+        self, worker_id: str, build_id: str, now: datetime, expires_at: datetime
+    ) -> None:
+        """Record that ``worker_id`` (running ``build_id``) is alive until ``expires_at``.
+
+        Cheap by design: one upsert on a primary key, called at a low frequency (see
+        :attr:`~loomwork.worker.worker.WorkerOptions.build_heartbeat_interval`) --
+        presence is only used to warn operators, never to gate claiming.
+        """
+
+    @abc.abstractmethod
+    async def list_worker_builds(self, now: datetime) -> list[WorkerPresence]:
+        """Live worker presence rows (``expires_at > now``), most recent first."""
+
+    @abc.abstractmethod
+    async def count_pinned_runs(self) -> dict[str, int]:
+        """Number of currently running executions pinned to each build id.
+
+        Excludes runs whose policy is ``PINNED`` but that have not ticked yet (their
+        ``pinned_build_id`` is still ``None``). Used to tell operators which builds still
+        have work and are therefore not yet safe to retire.
+        """
 
     # ------------------------------------------------------------------ visibility
 

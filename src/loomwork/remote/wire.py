@@ -35,9 +35,16 @@ from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event
 from loomwork.history.serde import HistoryFormatError, event_from_dict, event_to_dict
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, StepOptions
+from loomwork.options import (
+    IdConflictPolicy,
+    IdReusePolicy,
+    ResetPoint,
+    StepOptions,
+    VersioningPolicy,
+)
 from loomwork.schedules.model import ScheduleState
 from loomwork.store.records import (
+    BuildCompatibility,
     ChildSpec,
     CloseOutcome,
     ExecutionRecord,
@@ -48,6 +55,7 @@ from loomwork.store.records import (
     StepJob,
     TickOutcome,
     TimerRecord,
+    WorkerPresence,
 )
 from loomwork.visibility.schema import AttributeType, SearchAttributes
 
@@ -232,6 +240,8 @@ def execution_record_to_wire(
         "continued_run_id": record.continued_run_id,
         "reset_from_run_id": record.reset_from_run_id,
         "history_bytes": record.history_bytes,
+        "versioning_policy": record.versioning_policy.value,
+        "pinned_build_id": record.pinned_build_id,
     }
 
 
@@ -272,6 +282,10 @@ def execution_record_from_wire(
             continued_run_id=data.get("continued_run_id"),
             reset_from_run_id=data.get("reset_from_run_id"),
             history_bytes=int(data.get("history_bytes", 0)),
+            versioning_policy=VersioningPolicy(
+                data.get("versioning_policy", VersioningPolicy.AUTO_UPGRADE.value)
+            ),
+            pinned_build_id=data.get("pinned_build_id"),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise WireFormatError(f"malformed execution record: {exc}") from exc
@@ -304,6 +318,13 @@ def id_conflict_policy_from_wire(value: str) -> IdConflictPolicy:
         return IdConflictPolicy(value)
     except ValueError as exc:
         raise WireFormatError(f"unknown id conflict policy {value!r}") from exc
+
+
+def versioning_policy_from_wire(value: str) -> VersioningPolicy:
+    try:
+        return VersioningPolicy(value)
+    except ValueError as exc:
+        raise WireFormatError(f"unknown versioning policy {value!r}") from exc
 
 
 # --------------------------------------------------------------------------- reset point
@@ -360,6 +381,7 @@ def step_job_to_wire(job: StepJob, *, encode_dt: DtEncoder = iso_encode) -> dict
             None if job.last_heartbeat_at is None else encode_dt(job.last_heartbeat_at)
         ),
         "headers": dict(job.headers),
+        "pinned_build_id": job.pinned_build_id,
     }
 
 
@@ -395,6 +417,7 @@ def step_job_from_wire(data: dict[str, Any], *, decode_dt: DtDecoder = iso_decod
                 else decode_dt(data["last_heartbeat_at"])
             ),
             headers=dict(data.get("headers") or {}),
+            pinned_build_id=data.get("pinned_build_id"),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise WireFormatError(f"malformed step job: {exc}") from exc
@@ -548,6 +571,7 @@ def tick_outcome_to_request(outcome: TickOutcome, ref: datetime) -> dict[str, An
         "outbox": [outbox_message_to_request(m) for m in outcome.outbox],
         "close": None if outcome.close is None else close_outcome_to_request(outcome.close),
         "code_version": outcome.code_version,
+        "build_id": outcome.build_id,
         "search_attributes": search_attributes_values_to_wire(outcome.search_attributes),
         "continuation": (
             None
@@ -577,6 +601,7 @@ def tick_outcome_from_request(data: dict[str, Any], server_now: datetime) -> Tic
             outbox=[outbox_message_from_request(m) for m in data.get("outbox", [])],
             close=None if close is None else close_outcome_from_request(close),
             code_version=str(data.get("code_version", "")),
+            build_id=data.get("build_id"),
             search_attributes=search_attributes_values_from_wire(data.get("search_attributes")),
             continuation=(
                 None if continuation is None else child_spec_from_request(continuation, server_now)
@@ -585,6 +610,54 @@ def tick_outcome_from_request(data: dict[str, Any], server_now: datetime) -> Tic
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise WireFormatError(f"malformed tick outcome: {exc}") from exc
+
+
+# --------------------------------------------------------------------------- worker builds
+
+
+#: Both of these are plain data returned *to* the client (like ``schedule_state_to_wire``),
+#: never a deadline the client asserts to the server, so they use absolute ISO timestamps
+#: rather than the request/offset convention.
+
+
+def build_compatibility_to_wire(item: BuildCompatibility) -> dict[str, Any]:
+    return {
+        "build_id": item.build_id,
+        "compatible_with": item.compatible_with,
+        "created_at": iso_encode(item.created_at),
+    }
+
+
+def build_compatibility_from_wire(data: dict[str, Any]) -> BuildCompatibility:
+    try:
+        return BuildCompatibility(
+            build_id=str(_require(data, "build_id")),
+            compatible_with=str(_require(data, "compatible_with")),
+            created_at=iso_decode(_require(data, "created_at")),
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        raise WireFormatError(f"malformed build compatibility: {exc}") from exc
+
+
+def worker_presence_to_wire(presence: WorkerPresence) -> dict[str, Any]:
+    return {
+        "worker_id": presence.worker_id,
+        "build_id": presence.build_id,
+        "last_seen_at": iso_encode(presence.last_seen_at),
+        "expires_at": iso_encode(presence.expires_at),
+    }
+
+
+def worker_presence_from_wire(data: dict[str, Any]) -> WorkerPresence:
+    try:
+        return WorkerPresence(
+            worker_id=str(_require(data, "worker_id")),
+            build_id=str(_require(data, "build_id")),
+            last_seen_at=iso_decode(_require(data, "last_seen_at")),
+            expires_at=iso_decode(_require(data, "expires_at")),
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        raise WireFormatError(f"malformed worker presence: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- search attributes

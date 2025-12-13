@@ -202,6 +202,11 @@ class TickCompleted(Event):
     time: datetime
     worker_id: str = ""
     code_version: str = ""
+    build_id: str = ""
+    """The processing worker's build id (see ``docs/adr/0006-worker-build-versioning.md``);
+    empty when the worker declared none. Recorded on every tick, whether or not the run
+    is pinned, so ``loomwork.versioning.builds`` questions ("which builds touched this
+    run?") can be answered from history alone."""
 
 
 # --------------------------------------------------------------------------- decisions

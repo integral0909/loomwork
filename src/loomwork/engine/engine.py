@@ -30,12 +30,14 @@ from loomwork.options import (
     IdConflictPolicy,
     IdReusePolicy,
     ResetPoint,
+    VersioningPolicy,
     as_timedelta,
 )
 from loomwork.retry import RetryPolicy
 from loomwork.store.base import Store
 from loomwork.store.notify import closed_topic, run_topic
 from loomwork.store.records import ExecutionRecord, ExecutionStatus, StepJob
+from loomwork.versioning.builds import BuildVersioning
 
 _MAX_ID_LENGTH = 256
 #: Waiting callers rely on store notifications; polling is only a fallback (for example
@@ -70,6 +72,7 @@ class Engine:
         self.store = store
         self.clock = clock or SystemClock()
         self.config = config or EngineConfig()
+        self.versioning = BuildVersioning(store, self.clock)
 
     # ------------------------------------------------------------------ starting
 
@@ -86,6 +89,7 @@ class Engine:
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
         headers: dict[str, str] | None = None,
+        versioning_policy: VersioningPolicy | None = None,
     ) -> ExecutionRecord:
         """Create a new run of ``workflow_name``.
 
@@ -105,6 +109,11 @@ class Engine:
         ``docs/guides/interceptors.md``). Usually set by a client interceptor rather
         than by hand.
 
+        ``versioning_policy`` overrides :attr:`~loomwork.engine.config.EngineConfig.
+        workflow_versioning_policy`/``default_versioning_policy`` for this run only; see
+        :meth:`~loomwork.engine.config.EngineConfig.resolve_versioning_policy` and
+        ``docs/adr/0006-worker-build-versioning.md``.
+
         Raises:
             WorkflowAlreadyStartedError: ``id_conflict_policy`` is ``FAIL`` (the
                 default) and a run with this workflow id is running.
@@ -112,6 +121,9 @@ class Engine:
                 given its latest (closed) run.
         """
         record, started = self._new_run(workflow_name, args, workflow_id, headers)
+        record.versioning_policy = self.config.resolve_versioning_policy(
+            workflow_name, versioning_policy
+        )
         run_td = as_timedelta(run_timeout)
         execution_td = as_timedelta(execution_timeout)
         for name, value in (("run_timeout", run_td), ("execution_timeout", execution_td)):

@@ -201,7 +201,7 @@ SAMPLE_EVENTS = [
     StepFailed(seq=2, failure=F, attempts=1),
     TimerFired(seq=4),
     CancelRequested(reason="user"),
-    TickCompleted(consumed_through=5, time=T, worker_id="w1"),
+    TickCompleted(consumed_through=5, time=T, worker_id="w1", build_id="build-x"),
     StepScheduled(
         seq=1,
         step_name="charge",

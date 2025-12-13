@@ -46,6 +46,7 @@ from loomwork.schedules.model import ScheduleState
 from loomwork.store.base import Store
 from loomwork.store.notify import TOPIC_STEPS, TOPIC_TICKS, TOPIC_TIMERS, closed_topic, run_topic
 from loomwork.store.records import (
+    BuildCompatibility,
     ChildSpec,
     ExecutionRecord,
     ExecutionStatus,
@@ -53,6 +54,7 @@ from loomwork.store.records import (
     OutboxMessage,
     StepJob,
     TickOutcome,
+    WorkerPresence,
 )
 from loomwork.visibility.schema import SearchAttributes
 
@@ -319,6 +321,7 @@ class HttpStore(Store):
         now: datetime,
         lease: timedelta,
         workflow_names: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> ExecutionRecord | None:
         ref = self.clock.now()
         body = {
@@ -326,6 +329,7 @@ class HttpStore(Store):
             "now": wire.offset_seconds(ref, now),
             "lease_seconds": lease.total_seconds(),
             "workflow_names": list(workflow_names) if workflow_names is not None else None,
+            "build_id": build_id,
             "wait": self.long_poll,
         }
         data = await self._request("POST", "/ticks/claim", json=body)
@@ -381,6 +385,7 @@ class HttpStore(Store):
         lease: timedelta,
         step_names: Collection[str] | None = None,
         queues: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> StepJob | None:
         ref = self.clock.now()
         body = {
@@ -389,6 +394,7 @@ class HttpStore(Store):
             "lease_seconds": lease.total_seconds(),
             "step_names": list(step_names) if step_names is not None else None,
             "queues": list(queues) if queues is not None else None,
+            "build_id": build_id,
             "wait": self.long_poll,
         }
         data = await self._request("POST", "/steps/claim", json=body)
@@ -513,6 +519,58 @@ class HttpStore(Store):
     async def list_children(self, run_id: str) -> list[ExecutionRecord]:
         data = await self._request("GET", f"/executions/{run_id}/children")
         return [wire.execution_record_from_wire(c) for c in data["children"]]
+
+    # ------------------------------------------------------------------ worker builds
+
+    async def repin_run(self, run_id: str, build_id: str | None, now: datetime) -> ExecutionRecord:
+        ref = self.clock.now()
+        body = {"build_id": build_id, "now": wire.offset_seconds(ref, now)}
+        data = await self._request("POST", f"/executions/{run_id}/repin", json=body)
+        record = wire.execution_record_from_wire(data["record"])
+        self.notifier.publish(run_topic(run_id))
+        return record
+
+    async def declare_build_compatible(
+        self, build_id: str, compatible_with: str, now: datetime
+    ) -> None:
+        ref = self.clock.now()
+        body = {
+            "build_id": build_id,
+            "compatible_with": compatible_with,
+            "now": wire.offset_seconds(ref, now),
+        }
+        await self._request("POST", "/builds/compatibility", json=body)
+
+    async def revoke_build_compatibility(self, build_id: str, compatible_with: str) -> bool:
+        body = {"build_id": build_id, "compatible_with": compatible_with}
+        data = await self._request("POST", "/builds/compatibility/revoke", json=body)
+        return bool(data["ok"])
+
+    async def list_build_compatibility(self) -> list[BuildCompatibility]:
+        data = await self._request("GET", "/builds/compatibility")
+        return [wire.build_compatibility_from_wire(i) for i in data["items"]]
+
+    async def heartbeat_worker(
+        self, worker_id: str, build_id: str, now: datetime, expires_at: datetime
+    ) -> None:
+        ref = self.clock.now()
+        body = {
+            "worker_id": worker_id,
+            "build_id": build_id,
+            "now": wire.offset_seconds(ref, now),
+            "expires_at": wire.offset_seconds(ref, expires_at),
+        }
+        await self._request("POST", "/builds/heartbeat", json=body)
+
+    async def list_worker_builds(self, now: datetime) -> list[WorkerPresence]:
+        ref = self.clock.now()
+        body = {"now": wire.offset_seconds(ref, now)}
+        data = await self._request("POST", "/builds/workers", json=body)
+        return [wire.worker_presence_from_wire(p) for p in data["presence"]]
+
+    async def count_pinned_runs(self) -> dict[str, int]:
+        data = await self._request("GET", "/builds/pinned-counts")
+        return {str(k): int(v) for k, v in data["counts"].items()}
 
     # ------------------------------------------------------------------ retention
 

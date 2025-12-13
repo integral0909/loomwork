@@ -31,7 +31,7 @@ from loomwork.history.events import (
     WorkflowFailed,
     WorkflowStarted,
 )
-from loomwork.options import StepOptions
+from loomwork.options import StepOptions, VersioningPolicy
 from loomwork.remote import wire
 from loomwork.retry import RetryPolicy
 from loomwork.schedules.model import (
@@ -43,6 +43,7 @@ from loomwork.schedules.model import (
     ScheduleState,
 )
 from loomwork.store.records import (
+    BuildCompatibility,
     ChildSpec,
     CloseOutcome,
     ExecutionRecord,
@@ -53,6 +54,7 @@ from loomwork.store.records import (
     StepJob,
     TickOutcome,
     TimerRecord,
+    WorkerPresence,
 )
 from loomwork.visibility.schema import AttributeType, SearchAttributes
 
@@ -231,6 +233,11 @@ def test_execution_record_round_trip() -> None:
     assert wire.execution_record_from_wire(wire.execution_record_to_wire(closed)) == closed
 
 
+def test_execution_record_round_trip_pinned() -> None:
+    record = make_record(versioning_policy=VersioningPolicy.PINNED, pinned_build_id="build-a")
+    assert wire.execution_record_from_wire(wire.execution_record_to_wire(record)) == record
+
+
 def test_execution_record_request_round_trip() -> None:
     record = make_record()
     ref = T0 + timedelta(days=1)
@@ -297,6 +304,11 @@ def test_step_job_round_trip() -> None:
         last_heartbeat_at=None,
     )
     assert wire.step_job_from_wire(wire.step_job_to_wire(bare)) == bare
+
+
+def test_step_job_round_trip_pinned() -> None:
+    job = make_job(pinned_build_id="build-a")
+    assert wire.step_job_from_wire(wire.step_job_to_wire(job)) == job
 
 
 def test_step_job_request_round_trip() -> None:
@@ -400,6 +412,7 @@ def test_tick_outcome_round_trip_full() -> None:
         ],
         close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD),
         code_version="abc123",
+        build_id="build-7",
         search_attributes={"tier": "gold", "count": 3, "seen_at": T0},
         continuation=child,
         continuation_ready_at=T0 + timedelta(seconds=30),
@@ -407,6 +420,21 @@ def test_tick_outcome_round_trip_full() -> None:
     ref = T0 - timedelta(minutes=10)
     wire_form = wire.tick_outcome_to_request(outcome, ref)
     assert wire.tick_outcome_from_request(wire_form, ref) == outcome
+
+
+# --------------------------------------------------------------------------- worker builds
+
+
+def test_build_compatibility_round_trip() -> None:
+    item = BuildCompatibility(build_id="build-b", compatible_with="build-a", created_at=T0)
+    assert wire.build_compatibility_from_wire(wire.build_compatibility_to_wire(item)) == item
+
+
+def test_worker_presence_round_trip() -> None:
+    presence = WorkerPresence(
+        worker_id="w1", build_id="build-a", last_seen_at=T0, expires_at=T0 + timedelta(seconds=30)
+    )
+    assert wire.worker_presence_from_wire(wire.worker_presence_to_wire(presence)) == presence
 
 
 # --------------------------------------------------------------------------- search attributes

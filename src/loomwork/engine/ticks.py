@@ -31,6 +31,7 @@ from loomwork.history.events import (
 )
 from loomwork.ids import new_id
 from loomwork.observability.telemetry import NoopTelemetry, Telemetry, TickReport
+from loomwork.options import VersioningPolicy
 from loomwork.retry import RetryPolicy
 from loomwork.runtime.commands import (
     CancelTimer,
@@ -79,6 +80,7 @@ class TickProcessor:
         config: EngineConfig,
         worker_id: str,
         telemetry: Telemetry | None = None,
+        build_id: str | None = None,
     ) -> None:
         self.telemetry: Telemetry = telemetry or NoopTelemetry()
         self.store = store
@@ -87,6 +89,10 @@ class TickProcessor:
         self.converter = converter
         self.config = config
         self.worker_id = worker_id
+        self.build_id = build_id
+        """This worker's declared build id (see :class:`~loomwork.worker.worker.
+        WorkerOptions`), or ``None`` if it declared none. See ``docs/adr/
+        0006-worker-build-versioning.md``."""
         self.cache = ReplayerCache(config.replay_cache_size)
         self.boundary = CodecBoundary(converter.codec)
         self._rng = random.Random()
@@ -109,7 +115,7 @@ class TickProcessor:
         if not names:
             return None
         return await self.store.claim_tick(
-            self.worker_id, self.clock.now(), self.config.tick_lease, names
+            self.worker_id, self.clock.now(), self.config.tick_lease, names, self.build_id
         )
 
     async def run_once(self) -> bool:
@@ -280,7 +286,15 @@ class TickProcessor:
             consumed_through=live.consumed_through,
             time=live.time,
             code_version=self._code_version(record.workflow_name),
+            build_id=self.build_id,
         )
+        # What this run is (or is about to become) pinned to: already pinned, or -- if
+        # this is the tick that pins it -- this worker's own build. Mirrors exactly what
+        # the store computes in the same commit (see SQLStore.complete_tick), so a step
+        # scheduled in the run's very first tick gets the same pin as the run itself.
+        run_pin = record.pinned_build_id
+        if run_pin is None and record.versioning_policy is VersioningPolicy.PINNED:
+            run_pin = self.build_id
         new_steps: dict[int, StepJob] = {}
         new_timers: dict[int, TimerRecord] = {}
         for issued in live.commands:
@@ -308,6 +322,11 @@ class TickProcessor:
                         queue=options.effective_queue,
                         priority=options.effective_priority,
                         headers=dict(command.headers),
+                        pinned_build_id=(
+                            run_pin
+                            if options.effective_queue in self.config.pinned_queues
+                            else None
+                        ),
                     )
                 case RequestCancelStep():
                     # Scheduled and cancelled within the same tick: never enqueue it.
@@ -369,8 +388,10 @@ class TickProcessor:
             return ""
         return self.registry.workflow(workflow_name).fingerprint
 
-    @staticmethod
-    def _child_spec(parent: ExecutionRecord, command: ScheduleChild, now: Any) -> ChildSpec:
+    def _child_spec(self, parent: ExecutionRecord, command: ScheduleChild, now: Any) -> ChildSpec:
+        # A child is its own workflow type with its own policy (not inherited from the
+        # parent): resolved fresh from engine configuration, exactly as a top-level
+        # start_workflow call would resolve it. See docs/adr/0006-worker-build-versioning.md.
         child = ExecutionRecord(
             run_id=command.run_id,
             workflow_id=command.workflow_id,
@@ -380,6 +401,7 @@ class TickProcessor:
             parent_run_id=parent.run_id,
             parent_seq=command.seq,
             parent_close_policy=command.parent_close_policy,
+            versioning_policy=self.config.resolve_versioning_policy(command.workflow_name),
         )
         started = WorkflowStarted(
             workflow_name=command.workflow_name,
@@ -459,6 +481,12 @@ class TickProcessor:
             parent_run_id=record.parent_run_id,
             parent_seq=record.parent_seq,
             parent_close_policy=record.parent_close_policy,
+            versioning_policy=record.versioning_policy,
+            # pinned_build_id is deliberately not carried over: a continuation (whether
+            # continue-as-new or a workflow retry) starts unpinned and pins fresh to
+            # whichever build processes its first tick -- "new build by default", so a
+            # long chain of continuations keeps draining forward onto current code
+            # rather than getting stuck re-pinning itself to a retiring build.
         )
         started = WorkflowStarted(
             workflow_name=command.workflow_name,

@@ -29,6 +29,7 @@ from loomwork.errors import (
     LeaseLostError,
     NotFoundError,
     WorkflowAlreadyStartedError,
+    WorkflowClosedError,
     WorkflowIdReuseRejectedError,
 )
 from loomwork.failure import FailureInfo
@@ -41,16 +42,24 @@ from loomwork.history.events import (
     WorkflowCompleted,
     WorkflowStarted,
 )
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, StepOptions
+from loomwork.options import (
+    IdConflictPolicy,
+    IdReusePolicy,
+    ResetPoint,
+    StepOptions,
+    VersioningPolicy,
+)
 from loomwork.store.base import Store
 from loomwork.store.memory import MemoryStore
 from loomwork.store.records import (
+    BuildCompatibility,
     CloseOutcome,
     ExecutionRecord,
     ExecutionStatus,
     StepJob,
     TickOutcome,
     TimerRecord,
+    WorkerPresence,
 )
 from loomwork.store.sqlite import SQLiteStore
 from tests.helpers import T0
@@ -61,6 +70,9 @@ LEASE = timedelta(seconds=30)
 PAYLOAD = default_converter.encode("v")
 WORKFLOW_IDS = ["alpha", "beta", "gamma"]
 WORKERS = ["w1", "w2"]
+#: A small, fixed pool so compatibility declarations and worker build ids actually
+#: overlap often enough to be interesting (see docs/adr/0006-worker-build-versioning.md).
+BUILDS = ["b1", "b2", "b3"]
 
 
 def normalize(value: Any) -> Any:
@@ -81,6 +93,8 @@ def normalize(value: Any) -> Any:
             value.close_reason,
             value.continued_run_id,
             value.reset_from_run_id,
+            value.versioning_policy.value,
+            value.pinned_build_id,
         )
     if isinstance(value, StepJob):
         return (
@@ -90,7 +104,14 @@ def normalize(value: Any) -> Any:
             value.attempt,
             value.lease_owner,
             value.ready_at,
+            value.pinned_build_id,
         )
+    if isinstance(value, BuildCompatibility):
+        return (value.build_id, value.compatible_with)
+    if isinstance(value, WorkerPresence):
+        return (value.worker_id, value.build_id)
+    if isinstance(value, dict):
+        return sorted(value.items())
     if isinstance(value, list):
         return [normalize(v) for v in value]
     if isinstance(value, tuple):
@@ -137,6 +158,7 @@ class StoreEquivalence(RuleBasedStateMachine):
                 NotFoundError,
                 WorkflowAlreadyStartedError,
                 WorkflowIdReuseRejectedError,
+                WorkflowClosedError,
                 InvalidResetPointError,
                 ValueError,
             ) as exc:
@@ -152,10 +174,13 @@ class StoreEquivalence(RuleBasedStateMachine):
 
     @initialize()
     def start(self) -> None:
-        self.create_run(0)
+        self.create_run(0, VersioningPolicy.AUTO_UPGRADE)
 
-    @rule(index=st.integers(0, len(WORKFLOW_IDS) - 1))
-    def create_run(self, index: int) -> None:
+    @rule(
+        index=st.integers(0, len(WORKFLOW_IDS) - 1),
+        policy=st.sampled_from(list(VersioningPolicy)),
+    )
+    def create_run(self, index: int, policy: VersioningPolicy) -> None:
         run_id = self.next_id("run")
         workflow_id = WORKFLOW_IDS[index]
         record = ExecutionRecord(
@@ -164,6 +189,7 @@ class StoreEquivalence(RuleBasedStateMachine):
             workflow_name="wf",
             status=ExecutionStatus.RUNNING,
             created_at=self.now,
+            versioning_policy=policy,
         )
         started = WorkflowStarted(
             workflow_name="wf", workflow_id=workflow_id, run_id=run_id, args=[PAYLOAD]
@@ -243,9 +269,11 @@ class StoreEquivalence(RuleBasedStateMachine):
         else:
             self.both(lambda s: s.terminate(run_id, "test", self.now))
 
-    @rule(worker=st.sampled_from(WORKERS), data=st.data())
-    def tick(self, worker: str, data: st.DataObject) -> None:
-        claimed = self.both(lambda s: s.claim_tick(worker, self.now, LEASE))
+    @rule(
+        worker=st.sampled_from(WORKERS), data=st.data(), build_id=st.sampled_from([None, *BUILDS])
+    )
+    def tick(self, worker: str, data: st.DataObject, build_id: str | None) -> None:
+        claimed = self.both(lambda s: s.claim_tick(worker, self.now, LEASE, build_id=build_id))
         if claimed.value is None:
             return
         run_id = claimed.value[0]
@@ -260,8 +288,11 @@ class StoreEquivalence(RuleBasedStateMachine):
             return
         seq = self.counter + 1
         self.counter += 1
-        outcome = TickOutcome(worker_id=worker, consumed_through=consumed, time=self.now)
+        outcome = TickOutcome(
+            worker_id=worker, consumed_through=consumed, time=self.now, build_id=build_id
+        )
         if action == "step":
+            step_pin = data.draw(st.sampled_from([None, *BUILDS]))
             outcome.decisions.append(StepScheduled(seq=seq, step_name="step"))
             outcome.new_steps.append(
                 StepJob(
@@ -275,6 +306,7 @@ class StoreEquivalence(RuleBasedStateMachine):
                     options=StepOptions(timeout=10),
                     scheduled_at=self.now,
                     ready_at=self.now,
+                    pinned_build_id=step_pin,
                 )
             )
         elif action == "timer":
@@ -286,9 +318,13 @@ class StoreEquivalence(RuleBasedStateMachine):
             outcome.close = CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD)
         self.both(lambda s: s.complete_tick(run_id, worker, outcome, self.now))
 
-    @rule(worker=st.sampled_from(WORKERS), result=st.sampled_from(["ok", "fail", "retry"]))
-    def step_attempt(self, worker: str, result: str) -> None:
-        claimed = self.both(lambda s: s.claim_step(worker, self.now, LEASE))
+    @rule(
+        worker=st.sampled_from(WORKERS),
+        result=st.sampled_from(["ok", "fail", "retry"]),
+        build_id=st.sampled_from([None, *BUILDS]),
+    )
+    def step_attempt(self, worker: str, result: str, build_id: str | None) -> None:
+        claimed = self.both(lambda s: s.claim_step(worker, self.now, LEASE, build_id=build_id))
         if claimed.value is None:
             return
         job_id, _, seq, attempt = claimed.value[:4]
@@ -306,6 +342,33 @@ class StoreEquivalence(RuleBasedStateMachine):
             failure = FailureInfo(message="flaky", type="Flaky")
             ready = self.now + timedelta(seconds=3)
             self.both(lambda s: s.retry_step(job_id, worker, ready, failure, self.now))
+
+    @precondition(lambda self: self.run_ids)
+    @rule(data=st.data(), build_id=st.sampled_from([None, *BUILDS]))
+    def repin(self, data: st.DataObject, build_id: str | None) -> None:
+        run_id = data.draw(st.sampled_from(self.run_ids))
+        self.both(lambda s: s.repin_run(run_id, build_id, self.now))
+
+    @rule(data=st.data())
+    def declare_compat(self, data: st.DataObject) -> None:
+        build_id, compatible_with = data.draw(
+            st.tuples(st.sampled_from(BUILDS), st.sampled_from(BUILDS)).filter(
+                lambda pair: pair[0] != pair[1]
+            )
+        )
+        self.both(lambda s: s.declare_build_compatible(build_id, compatible_with, self.now))
+
+    @rule(data=st.data())
+    def revoke_compat(self, data: st.DataObject) -> None:
+        build_id, compatible_with = data.draw(
+            st.tuples(st.sampled_from(BUILDS), st.sampled_from(BUILDS))
+        )
+        self.both(lambda s: s.revoke_build_compatibility(build_id, compatible_with))
+
+    @rule(worker=st.sampled_from(WORKERS), build_id=st.sampled_from(BUILDS))
+    def heartbeat(self, worker: str, build_id: str) -> None:
+        expires_at = self.now + timedelta(seconds=90)
+        self.both(lambda s: s.heartbeat_worker(worker, build_id, self.now, expires_at))
 
     @rule(seconds=st.integers(1, 90))
     def advance(self, seconds: int) -> None:
@@ -334,6 +397,18 @@ class StoreEquivalence(RuleBasedStateMachine):
     @invariant()
     def same_timers(self) -> None:
         self.both(lambda s: s.next_timer_at())
+
+    @invariant()
+    def same_pinned_counts(self) -> None:
+        self.both(lambda s: s.count_pinned_runs())
+
+    @invariant()
+    def same_build_compatibility(self) -> None:
+        self.both(lambda s: s.list_build_compatibility())
+
+    @invariant()
+    def same_worker_builds(self) -> None:
+        self.both(lambda s: s.list_worker_builds(self.now))
 
 
 def _store_type(store: Store) -> str:  # pragma: no cover - debugging aid

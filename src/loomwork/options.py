@@ -44,6 +44,28 @@ class IdReusePolicy(enum.StrEnum):
     :class:`~loomwork.errors.WorkflowIdReuseRejectedError`."""
 
 
+class VersioningPolicy(enum.StrEnum):
+    """How a run's ticks are routed to workers declaring a build id (see
+    ``docs/adr/0006-worker-build-versioning.md``).
+
+    Orthogonal to :func:`loomwork.patched`: a policy decides *which worker* may run a
+    tick, while a patch decides what the *same* worker's code does differently for old
+    and new histories. Ignored entirely when no worker in the deployment sets
+    :attr:`~loomwork.worker.worker.WorkerOptions.build_id` -- with no build ids in play,
+    every run behaves exactly as before this feature existed.
+    """
+
+    AUTO_UPGRADE = "auto_upgrade"
+    """Any worker may process any tick of the run, on whatever build happens to claim
+    it (today's behaviour, and the default). Safe only for changes ``patched()`` (or a
+    compatibility check) already establishes are safe for every in-flight run."""
+
+    PINNED = "pinned"
+    """The run's ticks are handed only to a worker whose build matches the build that
+    ran its first tick, or one declared compatible with it. Lets incompatible code ship
+    side by side with the build still draining old runs, with no patch required."""
+
+
 class IdConflictPolicy(enum.StrEnum):
     """What starting a workflow id should do when it is *currently running*."""
 

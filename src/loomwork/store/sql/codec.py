@@ -16,7 +16,7 @@ from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event
 from loomwork.history.serde import event_from_dict, event_to_dict
-from loomwork.options import StepOptions
+from loomwork.options import StepOptions, VersioningPolicy
 from loomwork.store.records import ExecutionRecord, ExecutionStatus, StepJob
 
 Row = Mapping[str, Any]
@@ -127,6 +127,8 @@ EXECUTION_COLUMNS = (
     "continued_run_id",
     "reset_from_run_id",
     "history_bytes",
+    "versioning_policy",
+    "pinned_build_id",
 )
 
 STEP_JOB_COLUMNS = (
@@ -151,6 +153,7 @@ STEP_JOB_COLUMNS = (
     "heartbeat_details",
     "last_heartbeat_at",
     "headers",
+    "pinned_build_id",
 )
 
 
@@ -182,6 +185,8 @@ def execution_from_row(row: Row, ts: Any) -> ExecutionRecord:
         continued_run_id=row["continued_run_id"],
         reset_from_run_id=row["reset_from_run_id"],
         history_bytes=int(row["history_bytes"]),
+        versioning_policy=VersioningPolicy(row["versioning_policy"]),
+        pinned_build_id=row["pinned_build_id"],
     )
 
 
@@ -208,4 +213,5 @@ def step_job_from_row(row: Row, ts: Any) -> StepJob:
         heartbeat_details=payload_from_json(row["heartbeat_details"]),
         last_heartbeat_at=ts(row["last_heartbeat_at"]),
         headers=headers_from_json(row["headers"]),
+        pinned_build_id=row["pinned_build_id"],
     )

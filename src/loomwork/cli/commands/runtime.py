@@ -96,6 +96,7 @@ def worker_options(args: argparse.Namespace) -> WorkerOptions:
             shutdown_grace=parse_duration(args.shutdown_grace).total_seconds(),
             task_queues=queues,
             queue_limits=limits,
+            build_id=args.build_id,
         )
     except ValueError as exc:
         raise UsageError(str(exc)) from None
@@ -183,6 +184,12 @@ def register(subparsers: Any) -> None:
     )
     add_app_argument(p, required=True)
     p.add_argument("--worker-id", help="identifies this worker in leases and logs")
+    p.add_argument(
+        "--build-id",
+        metavar="ID",
+        help="this worker's build: pinned runs are only processed by matching or declared "
+        "compatible builds (default: unversioned; see docs/guides/versioning.md)",
+    )
     p.add_argument("--workflow-concurrency", type=int, default=4, metavar="N")
     p.add_argument("--step-concurrency", type=int, default=16, metavar="N")
     p.add_argument(

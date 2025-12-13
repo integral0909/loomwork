@@ -137,6 +137,7 @@ def _events(draw: st.DrawFn) -> list[Event]:
                     consumed_through=draw(st.integers(min_value=0, max_value=event_id)),
                     time=timestamp,
                     code_version=draw(_SHORT_TEXT),
+                    build_id=draw(_SHORT_TEXT),
                 )
             )
         elif kind == "workflow_completed":

@@ -216,7 +216,7 @@ backfill started 3 run(s)
 ## `loomwork worker`
 
 ```
-loomwork worker --app REF [--worker-id ID]
+loomwork worker --app REF [--worker-id ID] [--build-id ID]
                 [--workflow-concurrency N] [--step-concurrency N]
                 [--queue NAME ...] [--queue-limit QUEUE:rate=R,burst=B,concurrency=C ...]
                 [--no-timers] [--no-outbox] [--no-schedules] [--shutdown-grace D]

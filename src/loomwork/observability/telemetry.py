@@ -80,6 +80,18 @@ class Telemetry(Protocol):
         """
         ...
 
+    def pinned_runs_waiting(self, build_id: str, count: int) -> None:
+        """``count`` runs are pinned to ``build_id`` but no live worker -- of that build,
+        or of one declared compatible with it -- could claim them (see
+        :class:`~loomwork.versioning.builds.BuildSummary`). Reported on a worker's
+        build-presence loop, at :attr:`~loomwork.worker.worker.WorkerOptions.
+        build_heartbeat_interval`, for as long as the condition holds: unlike
+        ``history_size_warning`` this is not a one-shot, since the fix (a worker joining,
+        or an operator repinning the runs) is meant to make it stop firing rather than
+        be acknowledged once.
+        """
+        ...
+
 
 class NoopTelemetry:
     """Records nothing. The default."""
@@ -104,6 +116,9 @@ class NoopTelemetry:
         return None
 
     def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
+        return None
+
+    def pinned_runs_waiting(self, build_id: str, count: int) -> None:
         return None
 
 
@@ -143,6 +158,10 @@ class CompositeTelemetry:
     def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
         for part in self.parts:
             part.history_size_warning(run_id, workflow_name, size, unit)
+
+    def pinned_runs_waiting(self, build_id: str, count: int) -> None:
+        for part in self.parts:
+            part.pinned_runs_waiting(build_id, count)
 
 
 class MetricsTelemetry(NoopTelemetry):
@@ -195,6 +214,11 @@ class MetricsTelemetry(NoopTelemetry):
             "Runs whose history crossed the configured warning threshold.",
             ["workflow", "unit"],
         )
+        self.pinned_waiting = r.gauge(
+            "loomwork_pinned_runs_waiting",
+            "Runs pinned to a build with no live or compatible worker.",
+            ["build_id"],
+        )
 
     def tick_finished(self, report: TickReport) -> None:
         self.ticks.inc(workflow=report.workflow_name, outcome=report.outcome)
@@ -232,6 +256,9 @@ class MetricsTelemetry(NoopTelemetry):
 
     def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
         self.history_warnings.inc(workflow=workflow_name, unit=unit)
+
+    def pinned_runs_waiting(self, build_id: str, count: int) -> None:
+        self.pinned_waiting.set(count, build_id=build_id)
 
 
 class LoggingTelemetry(NoopTelemetry):
@@ -296,4 +323,12 @@ class LoggingTelemetry(NoopTelemetry):
                 "history_size": size,
                 "history_size_unit": unit,
             },
+        )
+
+    def pinned_runs_waiting(self, build_id: str, count: int) -> None:
+        self.logger.warning(
+            "%d run(s) pinned to build %s have no live or compatible worker",
+            count,
+            build_id,
+            extra={"build_id": build_id, "pinned_runs_waiting": count},
         )

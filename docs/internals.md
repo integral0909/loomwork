@@ -83,6 +83,16 @@ correctness bug, however small it looks.
   history. Signals to other workflows and child results reach their target when the
   outbox relay appends them, in a transaction of their own.
 - **Lock order** in SQL stores is the execution row first, then its jobs and timers.
+- **A worker with no build id is eligible for every run and step, pinned or not.**
+  `claim_tick`/`claim_step`'s `build_id` filter is additive: passing `None` reproduces
+  the exact query that existed before worker build versioning, so an unversioned
+  deployment cannot be affected by this feature (see [ADR-0006](
+  adr/0006-worker-build-versioning.md)). A versioned worker's eligibility for a pinned
+  run or a pinned-queue step is exactly "unpinned, matches, or declared compatible" --
+  never anything looser.
+- **A run's pin, once set, only changes through `repin_run`.** `complete_tick` sets
+  `pinned_build_id` at most once per run (the first tick of a `PINNED` run processed by
+  a worker with a build id); every later tick's commit leaves it untouched.
 
 ## Stores
 

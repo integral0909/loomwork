@@ -14,7 +14,7 @@ from typing import Any
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event
-from loomwork.options import StepOptions
+from loomwork.options import StepOptions, VersioningPolicy
 
 
 class ExecutionStatus(enum.StrEnum):
@@ -78,6 +78,17 @@ class ExecutionRecord:
     history_bytes: int = 0
     """Running total of encoded event body bytes, maintained by the store as events are
     appended. Used for :attr:`~loomwork.engine.config.EngineConfig.history_limit_bytes`."""
+    versioning_policy: VersioningPolicy = VersioningPolicy.AUTO_UPGRADE
+    """Set once, at creation, from the workflow's configured policy (see
+    :meth:`~loomwork.engine.config.EngineConfig.resolve_versioning_policy`). Decides
+    whether :attr:`pinned_build_id` is ever populated; see ``docs/adr/
+    0006-worker-build-versioning.md``."""
+    pinned_build_id: str | None = None
+    """For a :attr:`versioning_policy` of ``PINNED``: the build id of the worker that
+    committed this run's first tick, set atomically in that tick's commit and never
+    changed afterwards except by an explicit :meth:`~loomwork.store.base.Store.repin_run`.
+    ``None`` until pinned (a policy of ``PINNED`` whose first tick has not run yet, or
+    ran on a worker with no build id), and always ``None`` under ``AUTO_UPGRADE``."""
 
     @property
     def is_closed(self) -> bool:
@@ -120,6 +131,13 @@ class StepJob:
     headers: dict[str, str] = field(default_factory=dict)
     """Copied from the ``StepScheduled`` decision that created this job (propagated
     trace context; see :mod:`loomwork.observability.propagation`)."""
+    pinned_build_id: str | None = None
+    """Set when this job's queue is one of :attr:`~loomwork.engine.config.EngineConfig.
+    pinned_queues` and its run is pinned (see :attr:`ExecutionRecord.pinned_build_id`);
+    ``None`` otherwise, meaning any worker may claim it. Steps are not replayed, so
+    pinning them is never required for correctness -- only for keeping a step's side
+    effects on the same build as the workflow that scheduled it (credentials, binaries
+    or drivers a queue's workers hold that a new build changed incompatibly)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +188,32 @@ class OutboxMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class BuildCompatibility:
+    """An operator declaration: workers of ``build_id`` may process runs and steps
+    pinned to ``compatible_with`` (see :meth:`~loomwork.store.base.Store.
+    declare_build_compatible`). Directed: declaring B compatible with A lets B drain A's
+    pinned work, not the reverse."""
+
+    build_id: str
+    compatible_with: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerPresence:
+    """A worker's most recent build-id heartbeat (see :meth:`~loomwork.store.base.
+    Store.heartbeat_worker`). Expired rows (``expires_at <= now``) are not returned by
+    :meth:`~loomwork.store.base.Store.list_worker_builds`; they are cheap to leave in
+    place and are overwritten or reaped opportunistically rather than needing their own
+    cleanup loop."""
+
+    worker_id: str
+    build_id: str
+    last_seen_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ChildSpec:
     """A child execution to create atomically with the parent's tick."""
 
@@ -203,6 +247,10 @@ class TickOutcome:
     close: CloseOutcome | None = None
     code_version: str = ""
     """Fingerprint of the workflow code that executed the tick."""
+    build_id: str | None = None
+    """The processing worker's build id, or ``None`` if it declared none. Stamped onto
+    the committed ``TickCompleted`` unconditionally; additionally becomes the run's
+    ``pinned_build_id`` if its policy is ``PINNED`` and it was not pinned already."""
     search_attributes: dict[str, Any] | None = None
     """Encoded search attribute changes made during the tick (``None`` removes)."""
     continuation: ChildSpec | None = None

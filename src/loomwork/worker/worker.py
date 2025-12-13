@@ -43,6 +43,7 @@ from loomwork.store.notify import (
     TOPIC_TIMERS,
     Notifier,
 )
+from loomwork.versioning.builds import BuildVersioning
 from loomwork.worker.limits import QueueGate, QueueLimit
 
 logger = logging.getLogger("loomwork.worker")
@@ -76,6 +77,24 @@ class WorkerOptions:
             limited queue must be listed in ``task_queues``.
         step_interceptors: middleware wrapped around every step attempt, outermost
             first (see :mod:`loomwork.interceptors`).
+        build_id: this worker's build, used to route ``PINNED`` runs (see
+            :class:`~loomwork.options.VersioningPolicy` and ``docs/adr/
+            0006-worker-build-versioning.md``). ``None`` (the default) means
+            unversioned: this worker claims every tick and step it otherwise could,
+            pinned or not, exactly as if this feature did not exist. Set it with
+            ``loomwork worker --build-id`` or directly here; typically a short git SHA
+            or an image tag.
+        build_heartbeat_interval: seconds between presence heartbeats while
+            ``build_id`` is set (ignored otherwise). Heartbeats are one cheap upsert
+            each and are purely informational -- they never gate claiming -- so a long
+            interval is fine; it only affects how quickly a dashboard notices a build
+            has no workers left.
+        report_build_drain: while ``build_id`` is set, also check on the same interval
+            whether any pinned build has runs waiting but no live (or compatible)
+            worker, and report each one found through
+            :meth:`~loomwork.observability.telemetry.Telemetry.pinned_runs_waiting`.
+            Redundant work if several workers all do it; harmless, since the check is a
+            handful of indexed reads.
     """
 
     workflow_concurrency: int = 4
@@ -87,6 +106,9 @@ class WorkerOptions:
     task_queues: tuple[str, ...] | None = None
     queue_limits: Mapping[str, QueueLimit] = field(default_factory=dict)
     step_interceptors: Sequence[StepInterceptor] = ()
+    build_id: str | None = None
+    build_heartbeat_interval: float = 30.0
+    report_build_drain: bool = True
 
     def __post_init__(self) -> None:
         if self.workflow_concurrency < 0 or self.step_concurrency < 0:
@@ -100,6 +122,10 @@ class WorkerOptions:
                 validate_queue(queue)
         if self.queue_limits and self.task_queues is None:
             raise ValueError("queue_limits require an explicit task_queues list")
+        if self.build_heartbeat_interval <= 0:
+            raise ValueError("build_heartbeat_interval must be positive")
+        if self.build_id is not None and not self.build_id.strip():
+            raise ValueError("build_id must not be blank")
 
 
 class Worker:
@@ -133,6 +159,7 @@ class Worker:
             config=self.config,
             worker_id=self.worker_id,
             telemetry=self.telemetry,
+            build_id=self.options.build_id,
         )
         self.steps = StepExecutor(
             store,
@@ -143,8 +170,10 @@ class Worker:
             worker_id=self.worker_id,
             telemetry=self.telemetry,
             interceptors=self.options.step_interceptors,
+            build_id=self.options.build_id,
         )
         self.schedules = ScheduleService(store, self.clock, self.telemetry)
+        self.versioning = BuildVersioning(store, self.clock)
         self._gate = QueueGate(self.options.task_queues, self.options.queue_limits)
         self._local = Notifier()
         self._tasks: list[asyncio.Task[None]] = []
@@ -172,6 +201,11 @@ class Worker:
             self._spawn("outbox", self._outbox_loop())
         if self.options.run_schedules:
             self._spawn("schedules", self._schedule_loop())
+        if self.options.build_id is not None:
+            # Gated on build_id, not on report_build_drain: with no build id set
+            # anywhere in the deployment, nothing can ever be pinned or orphaned, so an
+            # unversioned worker does none of this -- no new store calls, no new loop.
+            self._spawn("build-presence", self._build_presence_loop())
         logger.info(
             "worker %s started (%d workflows, %d steps registered)",
             self.worker_id,
@@ -384,6 +418,34 @@ class Worker:
             if next_at is not None:
                 waits.append(self.clock.sleep_until(next_at))
             await self._idle(*waits)
+
+    async def _build_presence_loop(self) -> None:
+        """Heartbeat this worker's build id (if any) and, less importantly, warn about
+        pinned runs stuck on a build with nobody left to process them.
+
+        Both checks are cheap (one upsert, a handful of indexed reads) and purely
+        informational: nothing here ever affects claiming. Several workers all doing
+        this is harmless duplication, not a correctness concern, so there is no
+        election or single-worker restriction.
+        """
+        interval = self.options.build_heartbeat_interval
+        ttl_seconds = interval * 3
+        while not self._stopping.is_set():
+            try:
+                if self.options.build_id is not None:
+                    await self.versioning.heartbeat(
+                        self.worker_id, self.options.build_id, ttl_seconds
+                    )
+                if self.options.report_build_drain:
+                    for summary in await self.versioning.builds_summary():
+                        if summary.orphaned:
+                            self.telemetry.pinned_runs_waiting(
+                                summary.build_id, summary.pinned_running_runs
+                            )
+            except Exception:
+                logger.exception("error while reporting worker build presence")
+                self.telemetry.worker_error("build-presence")
+            await self._idle(self._sleep(interval))
 
     @staticmethod
     async def _sleep(seconds: float) -> None:

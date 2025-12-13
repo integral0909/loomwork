@@ -85,6 +85,43 @@ Stopping a worker (`SIGTERM` in your process manager should call `worker.stop()`
 claiming work, lets in-flight ticks and step attempts finish within `shutdown_grace`, and
 hands back any attempt that is still running so another worker starts it immediately.
 
+### Rolling deploys with build ids
+
+For a change too large to express with `patched()` ([comparison](../guides/versioning.md#patching-vs-pinning-which-to-use)),
+run the old and new code as two builds side by side instead of one fleet replacing
+itself in place:
+
+1. Mark the workflow (or the specific run) `PINNED` before the change ships:
+   `EngineConfig(workflow_versioning_policy={"orders.process": VersioningPolicy.PINNED})`.
+   Existing `AUTO_UPGRADE` runs are unaffected; this only affects runs started from now on.
+2. Deploy the new code as a **new build id**, alongside the old workers, rather than
+   replacing them:
+   `loomwork worker --app myapp.workflows --build-id "$(git rev-parse --short HEAD)"`.
+   Give the old workers their own build id too if they do not already have one (any
+   stable string identifies a build; a git SHA or an image tag both work).
+3. New runs pin to whichever build's worker processes their first tick -- normally the
+   new build, if it has spare capacity, since both are eligible until a run is pinned.
+   Running `PINNED` runs stay on the old build until they finish; both builds keep
+   working the whole time.
+4. Watch drain progress:
+   ```python
+   for build in await client.versioning.builds_summary():
+       print(build.build_id, "pinned:", build.pinned_running_runs, "workers:", build.live_workers)
+   ```
+   Retire the old build's workers once `pinned_running_runs` reaches zero.
+5. If a build must be retired before it fully drains (a hotfix that changed no workflow
+   code, or an operator decision to force old runs onto new code), either
+   `declare_build_compatible(new_build, old_build)` so the new build's workers pick up
+   the old build's remaining runs, or `client.versioning.repin(run_id, new_build)` case
+   by case. A build with runs pinned to it and no live or compatible worker shows up as
+   `orphaned=True` in `builds_summary()` and is reported through
+   `Telemetry.pinned_runs_waiting` -- alert on it.
+
+Unversioned workers (no `--build-id`) are unaffected by any of this and keep claiming
+every run, pinned or not, exactly as before; build ids are opt-in per worker, not a
+cluster-wide switch. See [ADR-0006](../adr/0006-worker-build-versioning.md) for the
+full design.
+
 ## Database migrations
 
 Stores apply their schema migrations when opened; `loomwork store migrate` does just that

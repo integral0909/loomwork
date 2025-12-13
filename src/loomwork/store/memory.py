@@ -23,6 +23,7 @@ from loomwork.errors import (
     ScheduleConflictError,
     ScheduleExistsError,
     WorkflowAlreadyStartedError,
+    WorkflowClosedError,
     WorkflowIdReuseRejectedError,
 )
 from loomwork.failure import FailureInfo
@@ -38,7 +39,7 @@ from loomwork.history.events import (
     WorkflowTimedOut,
 )
 from loomwork.history.serde import event_to_dict
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, VersioningPolicy
 from loomwork.schedules.model import ScheduleState
 from loomwork.visibility.attributes import decode_attributes, merge
 
@@ -62,6 +63,7 @@ from loomwork.store.notify import (
     run_topic,
 )
 from loomwork.store.records import (
+    BuildCompatibility,
     ChildSpec,
     CloseOutcome,
     ExecutionRecord,
@@ -72,6 +74,7 @@ from loomwork.store.records import (
     StepJob,
     TickOutcome,
     TimerRecord,
+    WorkerPresence,
 )
 from loomwork.store.reset import plan_reset, reconstruct_step_job, reconstruct_timer
 
@@ -100,6 +103,19 @@ class MemoryStore(Store):
         self._schedules: dict[str, ScheduleState] = {}
         self._attributes: dict[str, dict[str, Any]] = {}
         self._outbox: deque[OutboxMessage] = deque()
+        self._build_compat: dict[tuple[str, str], datetime] = {}
+        self._worker_presence: dict[str, WorkerPresence] = {}
+
+    def _build_eligible(self, pinned_build_id: str | None, worker_build_id: str | None) -> bool:
+        """Mirrors the SQL stores' claim filter (see ``store/base.py``): an unversioned
+        worker (``worker_build_id is None``) is eligible for everything, unchanged from
+        before this feature; a versioned worker needs a matching or declared-compatible
+        pin, or no pin at all."""
+        if worker_build_id is None or pinned_build_id is None:
+            return True
+        if pinned_build_id == worker_build_id:
+            return True
+        return (worker_build_id, pinned_build_id) in self._build_compat
 
     # ------------------------------------------------------------------ helpers
 
@@ -365,6 +381,10 @@ class MemoryStore(Store):
             parent_seq=old.record.parent_seq,
             parent_close_policy=old.record.parent_close_policy,
             reset_from_run_id=run_id,
+            versioning_policy=old.record.versioning_policy,
+            # pinned_build_id is deliberately not carried over: a reset run starts
+            # unpinned and pins to whichever build processes its first tick, exactly
+            # like continue-as-new (see docs/adr/0006-worker-build-versioning.md).
         )
         new_run = _Run(record=new_record)
         self._runs[new_run_id] = new_run
@@ -419,6 +439,7 @@ class MemoryStore(Store):
         now: datetime,
         lease: timedelta,
         workflow_names: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> ExecutionRecord | None:
         best: ExecutionRecord | None = None
         for run_id in self._tick_candidates:
@@ -428,6 +449,8 @@ class MemoryStore(Store):
             if not self._lease_free(record.lease_owner, record.lease_expires_at, now):
                 continue
             if workflow_names is not None and record.workflow_name not in workflow_names:
+                continue
+            if not self._build_eligible(record.pinned_build_id, build_id):
                 continue
             if best is None or (record.tick_ready_at, record.run_id) < (
                 best.tick_ready_at or now,
@@ -452,12 +475,14 @@ class MemoryStore(Store):
 
         appended: list[Event] = []
         consumed_new_input = outcome.consumed_through > record.consumed_through
+        _maybe_pin(record, outcome.build_id)
         if consumed_new_input or outcome.decisions:
             tick = TickCompleted(
                 consumed_through=max(outcome.consumed_through, record.consumed_through),
                 time=outcome.time,
                 worker_id=worker_id,
                 code_version=outcome.code_version,
+                build_id=outcome.build_id or "",
             )
             appended.append(self._append(run, tick, now))
             appended.extend(self._append(run, decision, now) for decision in outcome.decisions)
@@ -592,6 +617,7 @@ class MemoryStore(Store):
         lease: timedelta,
         step_names: Collection[str] | None = None,
         queues: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> StepJob | None:
         best: StepJob | None = None
         abandoned: list[StepJob] = []
@@ -606,6 +632,8 @@ class MemoryStore(Store):
             if step_names is not None and job.step_name not in step_names:
                 continue
             if queues is not None and job.queue not in queues:
+                continue
+            if not self._build_eligible(job.pinned_build_id, build_id):
                 continue
             if best is None or _claim_order(job) < _claim_order(best):
                 best = job
@@ -730,6 +758,56 @@ class MemoryStore(Store):
     async def get_step_jobs(self, run_id: str) -> list[StepJob]:
         run = self._run(run_id)
         return [copy.copy(self._jobs[job_id]) for _, job_id in sorted(run.step_jobs.items())]
+
+    # ------------------------------------------------------------------ worker builds
+
+    async def repin_run(self, run_id: str, build_id: str | None, now: datetime) -> ExecutionRecord:
+        run = self._run(run_id)
+        if run.record.is_closed:
+            raise WorkflowClosedError(f"run {run_id} is closed; it cannot be repinned")
+        run.record.pinned_build_id = build_id
+        return copy.copy(run.record)
+
+    async def declare_build_compatible(
+        self, build_id: str, compatible_with: str, now: datetime
+    ) -> None:
+        # Idempotent: a declaration that already exists keeps its original created_at,
+        # matching the SQL stores (whose INSERT is skipped once the row is there).
+        self._build_compat.setdefault((build_id, compatible_with), now)
+
+    async def revoke_build_compatibility(self, build_id: str, compatible_with: str) -> bool:
+        return self._build_compat.pop((build_id, compatible_with), None) is not None
+
+    async def list_build_compatibility(self) -> list[BuildCompatibility]:
+        # Matches the SQL stores' `ORDER BY created_at DESC, build_id, compatible_with`
+        # exactly, including the tiebreaker, so ties (a common case in tests that share
+        # one clock) sort identically on every backend.
+        ordered = sorted(
+            self._build_compat.items(), key=lambda item: (-item[1].timestamp(), *item[0])
+        )
+        return [
+            BuildCompatibility(build_id=b, compatible_with=c, created_at=at)
+            for (b, c), at in ordered
+        ]
+
+    async def heartbeat_worker(
+        self, worker_id: str, build_id: str, now: datetime, expires_at: datetime
+    ) -> None:
+        self._worker_presence[worker_id] = WorkerPresence(
+            worker_id=worker_id, build_id=build_id, last_seen_at=now, expires_at=expires_at
+        )
+
+    async def list_worker_builds(self, now: datetime) -> list[WorkerPresence]:
+        live = [p for p in self._worker_presence.values() if p.expires_at > now]
+        return sorted(live, key=lambda p: (-p.last_seen_at.timestamp(), p.worker_id))
+
+    async def count_pinned_runs(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for run in self._runs.values():
+            record = run.record
+            if not record.is_closed and record.pinned_build_id is not None:
+                counts[record.pinned_build_id] = counts.get(record.pinned_build_id, 0) + 1
+        return counts
 
     # ------------------------------------------------------------------ timers
 
@@ -954,6 +1032,17 @@ class MemoryStore(Store):
 
 def _claim_order(job: StepJob) -> tuple[int, datetime, str]:
     return (-job.priority, job.ready_at, job.job_id)
+
+
+def _maybe_pin(record: ExecutionRecord, build_id: str | None) -> None:
+    """Set ``record.pinned_build_id`` in the same commit as its first tick, mirroring
+    ``SQLStore.complete_tick`` (see ``docs/adr/0006-worker-build-versioning.md``)."""
+    if (
+        record.versioning_policy is VersioningPolicy.PINNED
+        and record.pinned_build_id is None
+        and build_id
+    ):
+        record.pinned_build_id = build_id
 
 
 def _event_size(event: Event) -> int:

@@ -87,6 +87,7 @@ class Client:
             QueryRunner(engine.store, registry, self.converter) if registry is not None else None
         )
         self.schedules = ScheduleClient(ScheduleService(engine.store, engine.clock), self.converter)
+        self.versioning = engine.versioning
 
     @overload
     async def start(

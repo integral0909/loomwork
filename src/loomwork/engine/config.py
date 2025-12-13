@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from loomwork.options import StepOptions
+from loomwork.options import StepOptions, VersioningPolicy
 from loomwork.retry import RetryPolicy
 from loomwork.visibility.schema import SearchAttributes
 
@@ -42,6 +43,20 @@ class EngineConfig:
             against the store's running total of encoded event bytes rather than event
             count. ``None`` (the default) disables the byte-size checks; the event-count
             ones above are always active.
+        default_versioning_policy: :class:`~loomwork.options.VersioningPolicy` a new run
+            gets when neither :meth:`~loomwork.engine.engine.Engine.start_workflow`'s
+            ``versioning_policy`` argument nor ``workflow_versioning_policy`` says
+            otherwise. ``AUTO_UPGRADE`` (today's behaviour) unless changed.
+        workflow_versioning_policy: per-workflow-name override of the default, for
+            declaring "this workflow type always pins" without every caller of
+            ``start_workflow`` repeating it. See ``docs/adr/
+            0006-worker-build-versioning.md``.
+        pinned_queues: task queues whose step jobs are pinned to a ``PINNED`` run's
+            build, alongside its ticks (see :attr:`~loomwork.store.records.StepJob.
+            pinned_build_id`). Steps are never replayed, so pinning a queue is a
+            deployment choice (workers holding build-specific credentials, binaries or
+            drivers), not a correctness requirement; queues not listed here are always
+            claimable by any worker, matching today's behaviour.
     """
 
     tick_lease: timedelta = timedelta(seconds=30)
@@ -66,6 +81,9 @@ class EngineConfig:
     history_limit_events: int = 50_000
     history_warning_bytes: int | None = None
     history_limit_bytes: int | None = None
+    default_versioning_policy: VersioningPolicy = VersioningPolicy.AUTO_UPGRADE
+    workflow_versioning_policy: Mapping[str, VersioningPolicy] = field(default_factory=dict)
+    pinned_queues: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.tick_lease <= timedelta(0):
@@ -100,6 +118,16 @@ class EngineConfig:
     def resolve_step_options(self, requested: StepOptions) -> StepOptions:
         """Fill every unset field of ``requested`` from the engine defaults."""
         return self.default_step_options.merged(requested)
+
+    def resolve_versioning_policy(
+        self, workflow_name: str, requested: VersioningPolicy | None = None
+    ) -> VersioningPolicy:
+        """The policy a new run of ``workflow_name`` gets: ``requested`` if given
+        (an explicit ``start_workflow`` argument), else the per-workflow override, else
+        :attr:`default_versioning_policy`."""
+        if requested is not None:
+            return requested
+        return self.workflow_versioning_policy.get(workflow_name, self.default_versioning_policy)
 
     def step_lease(self, options: StepOptions) -> timedelta:
         """How long a claimed attempt may go without renewing its lease.

@@ -169,6 +169,12 @@ All notable changes to this project are documented here. The format follows
 - `loomwork schedule` works through the control API with operator and reader tokens.
 - Console schedule management: create, edit, delete and backfill schedules, with
   validation errors shown in the form.
+- Worker build versioning (ADR-0006): workers declare a build id (`WorkerOptions.build_id`,
+  `loomwork worker --build-id`); runs with `VersioningPolicy.PINNED` stay on the build that
+  ran their first tick, so incompatible workflow code can be deployed side by side
+  without patches. Operators declare compatible builds, repin runs and see which builds
+  still have pinned runs (`client.versioning`); workers report pinned runs waiting for a
+  build with no live workers.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

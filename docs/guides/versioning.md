@@ -107,6 +107,53 @@ def test_order_code_replays_golden_histories() -> None:
         assert check_history_file(path, Registry(workflows=[order])).ok, path
 ```
 
+## Patching vs. pinning: which to use
+
+`patched()` is not the only way to deploy incompatible workflow code. **Worker build
+versioning** (see [ADR-0006](../adr/0006-worker-build-versioning.md)) lets you run two
+builds of your worker fleet side by side: old runs keep going to the old build, new runs
+go to the new build, and no run ever sees a decision from code it cannot safely replay.
+
+```python
+from loomwork.options import VersioningPolicy
+
+# Runs of this workflow stay on whichever build ran their first tick.
+config = EngineConfig(
+    workflow_versioning_policy={"orders.process": VersioningPolicy.PINNED},
+)
+```
+
+```bash
+loomwork worker --app myapp.workflows --build-id "$(git rev-parse --short HEAD)"
+```
+
+| Use `patched()` when...                                   | Use pinning when...                                      |
+| ----------------------------------------------------------- | --------------------------------------------------------- |
+| The change is small: a step swapped, a branch added         | The change is too large or too frequent to express as `if` branches |
+| You want one worker fleet, one deploy                       | You can run two builds side by side, even briefly          |
+| Old runs finish in hours, not months                        | Old runs can safely take as long as they need to drain     |
+| You will remove the branch once old runs are gone           | You never want the new build to run old decisions at all   |
+
+They compose: a `PINNED` workflow can still call `patched()` for small changes within
+one build, and switching a workflow to `PINNED` does not require removing existing
+patches.
+
+To pin a run explicitly (overriding the workflow's configured default) or to check on
+a build's drain progress:
+
+```python
+handle = await client.start(process_order, order, versioning_policy=VersioningPolicy.PINNED)
+
+for build in await client.versioning.builds_summary():
+    print(build.build_id, build.pinned_running_runs, build.live_workers, build.orphaned)
+```
+
+A build with `pinned_running_runs == 0` has no runs left pinned to it and can be
+retired. One with `orphaned=True` has runs waiting for a build (or a build declared
+compatible with it) that has no live workers -- join one, declare a compatible build, or
+`await client.versioning.repin(run_id, other_build_id)` to move it. See
+`docs/operations/deployment.md` for the full rolling-deploy walkthrough.
+
 ## When a run breaks anyway
 
 A run whose history no longer replays does not fail. Its tick fails with a

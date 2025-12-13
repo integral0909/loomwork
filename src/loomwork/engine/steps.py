@@ -147,6 +147,7 @@ class StepExecutor:
         worker_id: str,
         telemetry: Telemetry | None = None,
         interceptors: Sequence[StepInterceptor] = (),
+        build_id: str | None = None,
     ) -> None:
         self.telemetry: Telemetry = telemetry or NoopTelemetry()
         self.store = store
@@ -155,6 +156,7 @@ class StepExecutor:
         self.converter = converter
         self.config = config
         self.worker_id = worker_id
+        self.build_id = build_id
         self.interceptors = interceptors
         self.boundary = CodecBoundary(converter.codec)
         self._rng = random.Random()
@@ -174,6 +176,7 @@ class StepExecutor:
             self.config.step_lease(self.config.default_step_options),
             names,
             queues,
+            self.build_id,
         )
 
     async def run_once(self, queues: Collection[str] | None = None) -> bool:

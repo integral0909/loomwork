@@ -361,6 +361,64 @@ _0007 = (
 
 _0008 = ("ALTER TABLE lw_step_jobs ADD COLUMN headers TEXT",)
 
+# ---------------------------------------------------------------------------------------
+# 0009: worker build versioning -- pinned runs, build compatibility, worker presence
+# (see docs/adr/0006-worker-build-versioning.md)
+
+_0009_SQLITE = (
+    "ALTER TABLE lw_executions ADD COLUMN versioning_policy TEXT NOT NULL DEFAULT 'auto_upgrade'",
+    "ALTER TABLE lw_executions ADD COLUMN pinned_build_id TEXT",
+    "CREATE INDEX lw_executions_pinned_build ON lw_executions (pinned_build_id) "
+    "WHERE pinned_build_id IS NOT NULL",
+    "ALTER TABLE lw_step_jobs ADD COLUMN pinned_build_id TEXT",
+    "CREATE INDEX lw_step_jobs_pinned_build ON lw_step_jobs (pinned_build_id) "
+    "WHERE pinned_build_id IS NOT NULL",
+    """
+    CREATE TABLE lw_build_compatibility (
+        build_id        TEXT    NOT NULL,
+        compatible_with TEXT    NOT NULL,
+        created_at      INTEGER NOT NULL,
+        PRIMARY KEY (build_id, compatible_with)
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE lw_worker_presence (
+        worker_id     TEXT    PRIMARY KEY,
+        build_id      TEXT    NOT NULL,
+        last_seen_at  INTEGER NOT NULL,
+        expires_at    INTEGER NOT NULL
+    ) WITHOUT ROWID
+    """,
+    "CREATE INDEX lw_worker_presence_expires ON lw_worker_presence (expires_at)",
+)
+
+_0009_POSTGRES = (
+    "ALTER TABLE lw_executions ADD COLUMN versioning_policy TEXT NOT NULL DEFAULT 'auto_upgrade'",
+    "ALTER TABLE lw_executions ADD COLUMN pinned_build_id TEXT",
+    "CREATE INDEX lw_executions_pinned_build ON lw_executions (pinned_build_id) "
+    "WHERE pinned_build_id IS NOT NULL",
+    "ALTER TABLE lw_step_jobs ADD COLUMN pinned_build_id TEXT",
+    "CREATE INDEX lw_step_jobs_pinned_build ON lw_step_jobs (pinned_build_id) "
+    "WHERE pinned_build_id IS NOT NULL",
+    """
+    CREATE TABLE lw_build_compatibility (
+        build_id        TEXT        NOT NULL,
+        compatible_with TEXT        NOT NULL,
+        created_at      TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (build_id, compatible_with)
+    )
+    """,
+    """
+    CREATE TABLE lw_worker_presence (
+        worker_id     TEXT        PRIMARY KEY,
+        build_id      TEXT        NOT NULL,
+        last_seen_at  TIMESTAMPTZ NOT NULL,
+        expires_at    TIMESTAMPTZ NOT NULL
+    )
+    """,
+    "CREATE INDEX lw_worker_presence_expires ON lw_worker_presence (expires_at)",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
@@ -370,6 +428,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(6, "search attributes", _0006_SQLITE, _0006_POSTGRES),
     Migration(7, "reset lineage and history size", _0007, _0007),
     Migration(8, "step job headers", _0008, _0008),
+    Migration(9, "worker build versioning", _0009_SQLITE, _0009_POSTGRES),
 )
 
 

@@ -29,6 +29,7 @@ from loomwork.errors import (
     ScheduleConflictError,
     ScheduleExistsError,
     WorkflowAlreadyStartedError,
+    WorkflowClosedError,
     WorkflowIdReuseRejectedError,
 )
 from loomwork.failure import FailureInfo
@@ -44,7 +45,7 @@ from loomwork.history.events import (
     WorkflowTimedOut,
 )
 from loomwork.history.serde import event_from_dict
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, VersioningPolicy
 from loomwork.schedules.model import ScheduleState
 from loomwork.visibility.attributes import attribute_rows, decode_attributes
 
@@ -68,6 +69,7 @@ from loomwork.store.notify import (
     run_topic,
 )
 from loomwork.store.records import (
+    BuildCompatibility,
     ChildSpec,
     CloseOutcome,
     ExecutionRecord,
@@ -77,6 +79,7 @@ from loomwork.store.records import (
     OutboxMessage,
     StepJob,
     TickOutcome,
+    WorkerPresence,
 )
 from loomwork.store.reset import ResetPlan, plan_reset, reconstruct_step_job, reconstruct_timer
 from loomwork.store.sql import codec
@@ -163,7 +166,7 @@ class SQLStore(Store, abc.ABC):
                 consumed_through = ?, tick_pending = ?, tick_ready_at = ?, tick_failures = ?,
                 last_tick_error = ?, lease_owner = ?, lease_expires_at = ?,
                 cancel_requested = ?, result = ?, failure = ?, close_reason = ?,
-                continued_run_id = ?, history_bytes = ?
+                continued_run_id = ?, history_bytes = ?, pinned_build_id = ?
             WHERE run_id = ?
             """,
             (
@@ -184,6 +187,7 @@ class SQLStore(Store, abc.ABC):
                 rec.close_reason,
                 rec.continued_run_id,
                 rec.history_bytes,
+                rec.pinned_build_id,
                 rec.run_id,
             ),
         )
@@ -306,8 +310,8 @@ class SQLStore(Store, abc.ABC):
             """
             INSERT INTO lw_executions (
                 run_id, workflow_id, workflow_name, status, created_at,
-                parent_run_id, parent_seq, parent_close_policy
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                parent_run_id, parent_seq, parent_close_policy, versioning_policy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.run_id,
@@ -318,6 +322,7 @@ class SQLStore(Store, abc.ABC):
                 rec.parent_run_id,
                 rec.parent_seq,
                 rec.parent_close_policy,
+                rec.versioning_policy.value,
             ),
         )
         initial = getattr(started, "search_attributes", None)
@@ -582,6 +587,8 @@ class SQLStore(Store, abc.ABC):
             parent_seq=rec.parent_seq,
             parent_close_policy=rec.parent_close_policy,
             reset_from_run_id=run_id,
+            versioning_policy=rec.versioning_policy,
+            # pinned_build_id is deliberately not carried over: see MemoryStore.reset_run.
         )
         try:
             async with self.transaction() as tx:
@@ -610,8 +617,9 @@ class SQLStore(Store, abc.ABC):
             """
             INSERT INTO lw_executions (
                 run_id, workflow_id, workflow_name, status, created_at,
-                parent_run_id, parent_seq, parent_close_policy, reset_from_run_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parent_run_id, parent_seq, parent_close_policy, reset_from_run_id,
+                versioning_policy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 new_rec.run_id,
@@ -623,6 +631,7 @@ class SQLStore(Store, abc.ABC):
                 new_rec.parent_seq,
                 new_rec.parent_close_policy,
                 new_rec.reset_from_run_id,
+                new_rec.versioning_policy.value,
             ),
         )
         if kept:
@@ -683,12 +692,22 @@ class SQLStore(Store, abc.ABC):
 
     # ------------------------------------------------------------------ ticks
 
+    #: Appended to a claim query's WHERE clause to admit rows whose ``{column}`` is
+    #: unset, matches the claiming worker's build exactly, or is declared compatible
+    #: with it -- shared by ``claim_tick`` and ``claim_step`` (see :meth:`Store.
+    #: declare_build_compatible`). Two ``?`` params: the worker's build id, twice.
+    _BUILD_FILTER = (
+        "({column} IS NULL OR {column} = ? OR {column} IN "
+        "(SELECT compatible_with FROM lw_build_compatibility WHERE build_id = ?))"
+    )
+
     async def claim_tick(
         self,
         worker_id: str,
         now: datetime,
         lease: timedelta,
         workflow_names: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> ExecutionRecord | None:
         if workflow_names is not None and not workflow_names:
             return None
@@ -702,6 +721,12 @@ class SQLStore(Store, abc.ABC):
             clause, names = _in_clause("workflow_name", workflow_names)
             sql += f" AND {clause}"
             params.extend(names)
+        if build_id is not None:
+            # An unversioned worker (build_id is None) is eligible for every run, pinned
+            # or not: today's behaviour, byte-for-byte, when no worker in the deployment
+            # sets a build id.
+            sql += f" AND {self._BUILD_FILTER.format(column='pinned_build_id')}"
+            params.extend((build_id, build_id))
         sql += f" ORDER BY tick_ready_at, run_id LIMIT 1{self.SKIP_LOCKED}"
         # One statement: pick the candidate (skipping rows other workers are claiming)
         # and lease it.
@@ -723,6 +748,13 @@ class SQLStore(Store, abc.ABC):
             if rec.is_closed:
                 raise LeaseLostError(f"run {run_id} was closed while the tick was running")
 
+            if (
+                rec.versioning_policy is VersioningPolicy.PINNED
+                and rec.pinned_build_id is None
+                and outcome.build_id
+            ):
+                rec.pinned_build_id = outcome.build_id
+
             appended: list[Event] = []
             if outcome.consumed_through > rec.consumed_through or outcome.decisions:
                 tick = TickCompleted(
@@ -730,6 +762,7 @@ class SQLStore(Store, abc.ABC):
                     time=outcome.time,
                     worker_id=worker_id,
                     code_version=outcome.code_version,
+                    build_id=outcome.build_id or "",
                 )
                 appended.extend(await self._append_many(tx, rec, [tick, *outcome.decisions], now))
             rec.consumed_through = max(rec.consumed_through, outcome.consumed_through)
@@ -838,8 +871,8 @@ class SQLStore(Store, abc.ABC):
                 job_id, run_id, workflow_id, workflow_name, seq, step_name, args, options,
                 scheduled_at, ready_at, deadline, attempt, lease_owner, lease_expires_at,
                 last_failure, cancel_requested, queue, priority, heartbeat_details,
-                last_heartbeat_at, headers
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_heartbeat_at, headers, pinned_build_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.job_id,
@@ -863,6 +896,7 @@ class SQLStore(Store, abc.ABC):
                 codec.payload_to_json(job.heartbeat_details),
                 self.ts_in(job.last_heartbeat_at),
                 codec.headers_to_json(job.headers),
+                job.pinned_build_id,
             ),
         )
 
@@ -897,6 +931,7 @@ class SQLStore(Store, abc.ABC):
         lease: timedelta,
         step_names: Collection[str] | None = None,
         queues: Collection[str] | None = None,
+        build_id: str | None = None,
     ) -> StepJob | None:
         if (step_names is not None and not step_names) or (queues is not None and not queues):
             return None
@@ -908,6 +943,9 @@ class SQLStore(Store, abc.ABC):
             )
             params: list[Any] = [now_db, False, now_db]
             sql, params = self._job_filters(sql, params, step_names, queues)
+            if build_id is not None:
+                sql += f" AND {self._BUILD_FILTER.format(column='pinned_build_id')}"
+                params.extend((build_id, build_id))
             sql += f" ORDER BY priority DESC, ready_at, job_id LIMIT 1{self.SKIP_LOCKED}"
             candidate = sql.replace("SELECT *", "SELECT job_id", 1)
             claim = (
@@ -1078,6 +1116,105 @@ class SQLStore(Store, abc.ABC):
                 "SELECT * FROM lw_step_jobs WHERE run_id = ? ORDER BY seq", (run_id,)
             )
         return [self._job(row) for row in rows]
+
+    # ------------------------------------------------------------------ worker builds
+
+    async def repin_run(self, run_id: str, build_id: str | None, now: datetime) -> ExecutionRecord:
+        async with self.transaction() as tx:
+            rec = await self._load(tx, run_id, lock=True)
+            if rec.is_closed:
+                raise WorkflowClosedError(f"run {run_id} is closed; it cannot be repinned")
+            rec.pinned_build_id = build_id
+            await self._write(tx, rec)
+        return rec
+
+    async def declare_build_compatible(
+        self, build_id: str, compatible_with: str, now: datetime
+    ) -> None:
+        async with self.transaction() as tx:
+            if await tx.fetchone(
+                "SELECT 1 FROM lw_build_compatibility WHERE build_id = ? AND compatible_with = ?",
+                (build_id, compatible_with),
+            ):
+                return
+            try:
+                await tx.execute(
+                    "INSERT INTO lw_build_compatibility (build_id, compatible_with, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (build_id, compatible_with, self.ts_in(now)),
+                )
+            except Exception as exc:
+                if not self.is_unique_violation(exc):
+                    raise  # lost a race with a concurrent identical declaration
+
+    async def revoke_build_compatibility(self, build_id: str, compatible_with: str) -> bool:
+        async with self.transaction() as tx:
+            deleted = await tx.execute(
+                "DELETE FROM lw_build_compatibility WHERE build_id = ? AND compatible_with = ?",
+                (build_id, compatible_with),
+            )
+        return bool(deleted)
+
+    async def list_build_compatibility(self) -> list[BuildCompatibility]:
+        async with self.transaction() as tx:
+            rows = await tx.fetchall(
+                "SELECT build_id, compatible_with, created_at FROM lw_build_compatibility "
+                "ORDER BY created_at DESC, build_id, compatible_with"
+            )
+        return [
+            BuildCompatibility(
+                build_id=row["build_id"],
+                compatible_with=row["compatible_with"],
+                created_at=self._required_ts(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    async def heartbeat_worker(
+        self, worker_id: str, build_id: str, now: datetime, expires_at: datetime
+    ) -> None:
+        async with self.transaction() as tx:
+            updated = await tx.execute(
+                "UPDATE lw_worker_presence SET build_id = ?, last_seen_at = ?, expires_at = ? "
+                "WHERE worker_id = ?",
+                (build_id, self.ts_in(now), self.ts_in(expires_at), worker_id),
+            )
+            if not updated:
+                try:
+                    await tx.execute(
+                        "INSERT INTO lw_worker_presence "
+                        "(worker_id, build_id, last_seen_at, expires_at) VALUES (?, ?, ?, ?)",
+                        (worker_id, build_id, self.ts_in(now), self.ts_in(expires_at)),
+                    )
+                except Exception as exc:
+                    if not self.is_unique_violation(exc):
+                        raise  # lost a race with this same worker's concurrent heartbeat
+
+    async def list_worker_builds(self, now: datetime) -> list[WorkerPresence]:
+        async with self.transaction() as tx:
+            rows = await tx.fetchall(
+                "SELECT worker_id, build_id, last_seen_at, expires_at FROM lw_worker_presence "
+                "WHERE expires_at > ? ORDER BY last_seen_at DESC, worker_id",
+                (self.ts_in(now),),
+            )
+        return [
+            WorkerPresence(
+                worker_id=row["worker_id"],
+                build_id=row["build_id"],
+                last_seen_at=self._required_ts(row["last_seen_at"]),
+                expires_at=self._required_ts(row["expires_at"]),
+            )
+            for row in rows
+        ]
+
+    async def count_pinned_runs(self) -> dict[str, int]:
+        async with self.transaction() as tx:
+            rows = await tx.fetchall(
+                "SELECT pinned_build_id, COUNT(*) AS n FROM lw_executions "
+                "WHERE status = ? AND pinned_build_id IS NOT NULL GROUP BY pinned_build_id",
+                (ExecutionStatus.RUNNING.value,),
+            )
+        return {row["pinned_build_id"]: int(row["n"]) for row in rows}
 
     # ------------------------------------------------------------------ timers
 

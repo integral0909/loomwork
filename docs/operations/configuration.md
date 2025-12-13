@@ -21,6 +21,9 @@ Shared by the engine, workers and clients of one deployment. Pass the same objec
 | `history_limit_events` | 50000 | History size (event count) at which a run is failed cleanly with `HistoryLimitExceeded`, recommending continue-as-new. Checked before a tick runs, so the failure is deterministic. |
 | `history_warning_bytes` | `None` (disabled) | Same as `history_warning_events`, evaluated against the store's running total of encoded event bytes instead of event count. |
 | `history_limit_bytes` | `None` (disabled) | Same as `history_limit_events`, evaluated against encoded event bytes. Setting it requires `history_warning_bytes` to be set too. |
+| `default_versioning_policy` | `AUTO_UPGRADE` | `VersioningPolicy` a new run gets unless overridden per workflow name or per call; see [worker build versioning](../adr/0006-worker-build-versioning.md). |
+| `workflow_versioning_policy` | `{}` | Per-workflow-name override of `default_versioning_policy`. |
+| `pinned_queues` | `{}` (none) | Task queues whose step jobs are pinned alongside a `PINNED` run's build; other queues are always claimable by any worker. |
 
 ## `WorkerOptions`
 
@@ -34,6 +37,9 @@ Shared by the engine, workers and clients of one deployment. Pass the same objec
 | `shutdown_grace` | 10s | Time in-flight work gets on `stop()` before it is cancelled and handed back. |
 | `task_queues` | `None` (all) | Queues whose steps this worker executes. |
 | `queue_limits` | `{}` | Per-queue `QueueLimit(rate, burst, concurrency)`; limited queues must be listed in `task_queues`. |
+| `build_id` | `None` (unversioned) | This worker's build, for `PINNED`-run routing (`loomwork worker --build-id`); `None` claims every run regardless of pinning, exactly as before this feature. See [ADR-0006](../adr/0006-worker-build-versioning.md). |
+| `build_heartbeat_interval` | 30s | Seconds between presence heartbeats; only runs while `build_id` is set. |
+| `report_build_drain` | `True` | While `build_id` is set, also warn (`Telemetry.pinned_runs_waiting`) about pinned builds with no live or compatible worker. |
 
 ## Stores
 
