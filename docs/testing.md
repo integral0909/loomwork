@@ -294,3 +294,7 @@ environment.
   it never mutates a `StepDefinition` object shared with other code, so the same step
   can be mocked differently (or not at all) in a different environment running at the
   same time.
+
+For fault injection, worker chaos and invariant checking across many workflows and
+workers at once -- the kind of testing that finds the bugs example-based tests like the
+ones on this page miss -- see [simulation testing](simulation-testing.md).

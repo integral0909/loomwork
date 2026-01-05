@@ -19,6 +19,8 @@
   middleware, distributed tracing, structured logging correlation
 - [Versioning](guides/versioning.md): safe changes, patches, compatibility checks
 - [Testing](testing.md): the testkit, time skipping and golden histories
+- [Simulation testing](simulation-testing.md): seeded fault injection, worker chaos and
+  invariant checking across many workflows and workers
 - [Debugging](debugging.md): the replay debugger and history graphs
 
 ## Operations

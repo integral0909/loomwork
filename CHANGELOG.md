@@ -175,6 +175,11 @@ All notable changes to this project are documented here. The format follows
   without patches. Operators declare compatible builds, repin runs and see which builds
   still have pinned runs (`client.versioning`); workers report pinned runs waiting for a
   build with no live workers.
+- Deterministic simulation testing (`loomwork.testing.simulation`): real workers under
+  seeded store faults (including commits whose reply is lost), worker kills and cache
+  evictions, on an event loop that shuffles ready callbacks by seed, checking history,
+  exactly-once recording, replay, liveness and cleanup invariants. Runs in the test
+  suite and as `python -m loomwork.testing.simulation --seeds 1..200` for soaks.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

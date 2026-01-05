@@ -155,6 +155,7 @@ markers = [
     "integration: exercises several subsystems together",
     "postgres: requires a PostgreSQL server (LOOMWORK_TEST_POSTGRES_DSN)",
     "slow: long-running tests excluded from the quick loop",
+    "simulation: deterministic simulation soak tests (many seeds; see docs/simulation-testing.md)",
 ]
 filterwarnings = ["error"]
 
