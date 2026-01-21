@@ -21,6 +21,7 @@ from loomwork.observability import (
     MetricsRegistry,
     MetricsTelemetry,
     OpenTelemetryTelemetry,
+    Telemetry,
 )
 from loomwork.worker import WorkerOptions
 from tests.helpers import FAST_CONFIG, eventually
@@ -132,3 +133,27 @@ async def test_logging_and_composite(clock: ManualClock, caplog: pytest.LogCaptu
     assert any(getattr(r, "outcome", None) == "retrying" for r in records)
     assert any(getattr(r, "step_name", None) == "obs.flaky" for r in records)
     assert "loomwork_step_attempts_total" in registry.render()
+
+
+def test_opentelemetry_reports_history_and_build_signals() -> None:
+    reader = InMemoryMetricReader()
+    # Assigning to the protocol type makes mypy check that no hook is missing.
+    telemetry: Telemetry = OpenTelemetryTelemetry(
+        tracer_provider=TracerProvider(), meter_provider=MeterProvider(metric_readers=[reader])
+    )
+    telemetry.history_size_warning("run-1", "orders.flow", 10_500, "events")
+    telemetry.pinned_runs_waiting("2024.10.1", 3)
+    telemetry.pinned_runs_waiting("2024.10.1", 2)
+
+    points = {
+        metric.name: list(metric.data.data_points)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+    (warning,) = points["loomwork.history.size_warnings"]
+    assert warning.value == 1
+    assert dict(warning.attributes or {}) == {"workflow": "orders.flow", "unit": "events"}
+    (waiting,) = points["loomwork.build.pinned_runs_waiting"]
+    assert waiting.value == 2
+    assert dict(waiting.attributes or {}) == {"build_id": "2024.10.1"}

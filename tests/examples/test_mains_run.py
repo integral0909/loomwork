@@ -42,4 +42,9 @@ def test_every_example_package_was_discovered() -> None:
         "task_queues",
         "encrypted_payments",
         "versioned_workflow",
+        "support_ticket",
+        "blue_green_deploy",
+        "traced_pipeline",
+        "media_processing",
+        "incident_recovery",
     }

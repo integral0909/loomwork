@@ -180,6 +180,10 @@ All notable changes to this project are documented here. The format follows
   evictions, on an event loop that shuffles ready callbacks by seed, checking history,
   exactly-once recording, replay, liveness and cleanup invariants. Runs in the test
   suite and as `python -m loomwork.testing.simulation --seeds 1..200` for soaks.
+- Five more examples: a class-based support ticket with SLA timers, blue-green deploys
+  with build versioning, a traced pipeline with OpenTelemetry and interceptors, media
+  processing with encrypted payload offloading, and incident recovery with reset, batch
+  operations and id policies.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.
@@ -199,5 +203,9 @@ All notable changes to this project are documented here. The format follows
 - Callers waiting for results or update outcomes back off their fallback polling.
 
 ### Fixed
+
+- `OpenTelemetryTelemetry` implements the history-size and pinned-build hooks, reported
+  as `loomwork.history.size_warnings` and `loomwork.build.pinned_runs_waiting`, so it
+  satisfies the `Telemetry` protocol again.
 
 - SQLite transactions could be left open when the calling task was cancelled.

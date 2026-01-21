@@ -15,6 +15,11 @@ self-contained package: `workflows.py` (and `steps.py` where that separation hel
 | [`task_queues`](task_queues/README.md) | Routing GPU-heavy work to a dedicated worker | `@step(queue=...)`, `WorkerOptions(task_queues=..., queue_limits=...)`, two workers sharing one store |
 | [`encrypted_payments`](encrypted_payments/README.md) | Payload encryption for sensitive data | `CodecChain`, `EncryptionCodec`, `StaticKeyRing` key rotation |
 | [`versioned_workflow`](versioned_workflow/README.md) | Evolving a running workflow safely | `patched()`, `deprecate_patch()`, `loomwork.versioning.check_compatibility` |
+| [`support_ticket`](support_ticket/README.md) | A support ticket with SLA timers, escalation and customer replies | Class-based `@lw.workflow`, `@lw.run`/`@lw.signal`/`@lw.query`/`@lw.update`, `lw.wait_condition(..., timeout=...)` |
+| [`blue_green_deploy`](blue_green_deploy/README.md) | Two incompatible builds of one workflow, running side by side | `WorkerOptions(build_id=...)`, `VersioningPolicy.PINNED`, `client.versioning.builds_summary()`/`declare_compatible()` |
+| [`traced_pipeline`](traced_pipeline/README.md) | A document pipeline traced end to end | `OpenTelemetryTelemetry`, `TracingClientInterceptor`, a custom `StepInterceptor`, `CorrelationFilter` |
+| [`media_processing`](media_processing/README.md) | Multi-megabyte step outputs kept out of the history | `OffloadCodec`, `FileSystemBlobStore`, `EnvironmentKeyRing`, `collect_garbage` |
+| [`incident_recovery`](incident_recovery/README.md) | Recovering from a step bug in production | `handle.reset(to=ResetPoint.before_last_failure())`, `client.batch_terminate()`, `IdConflictPolicy.USE_EXISTING` |
 
 ## Running an example
 
@@ -28,10 +33,10 @@ hours or days (a cancellation window, a reminder schedule, a cron job), the demo
 instead of a shortened, unrealistic duration -- the workflow code itself uses the same
 durations a production deployment would.
 
-Examples that are specifically about durability or encryption
-(`task_queues`, `encrypted_payments`) use a real `SQLiteStore` in a temporary directory;
-every other example uses the non-durable `MemoryStore`, since durability isn't the point
-of the scenario.
+Examples that are specifically about durability, encryption or worker builds
+(`task_queues`, `encrypted_payments`, `blue_green_deploy`, `media_processing`) use a real
+`SQLiteStore` in a temporary directory; every other example uses the non-durable
+`MemoryStore`, since durability isn't the point of the scenario.
 
 ## Tests
 

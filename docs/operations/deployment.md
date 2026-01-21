@@ -99,10 +99,14 @@ itself in place:
    `loomwork worker --app myapp.workflows --build-id "$(git rev-parse --short HEAD)"`.
    Give the old workers their own build id too if they do not already have one (any
    stable string identifies a build; a git SHA or an image tag both work).
-3. New runs pin to whichever build's worker processes their first tick -- normally the
-   new build, if it has spare capacity, since both are eligible until a run is pinned.
-   Running `PINNED` runs stay on the old build until they finish; both builds keep
-   working the whole time.
+3. A new run pins to whichever build's worker happens to claim its first tick: until a
+   run is pinned, workers of both builds are eligible, so while both are running, new runs
+   are split between them. That is safe (each run stays on the build it started on), and
+   the share going to the old build shrinks as you scale it down to the capacity its
+   pinned runs need. Loomwork does not yet route unpinned runs preferentially to the
+   newest build, so some new runs keep starting on the old build until it is retired;
+   use a patch instead if every new run must take the new code immediately. Running
+   `PINNED` runs stay on the old build until they finish.
 4. Watch drain progress:
    ```python
    for build in await client.versioning.builds_summary():

@@ -74,6 +74,19 @@ class OpenTelemetryTelemetry:
         self.errors = meter.create_counter(
             "loomwork.worker.errors", description="Unexpected errors in worker loops"
         )
+        self.history_warnings = meter.create_counter(
+            "loomwork.history.size_warnings",
+            description="Runs whose history crossed the configured warning size",
+        )
+        # A gauge reports the latest count per build; observable, since OpenTelemetry's
+        # API has no synchronous "set" for gauges.
+        self._pinned_waiting: dict[str, int] = {}
+        self._observation = metrics.Observation
+        meter.create_observable_gauge(
+            "loomwork.build.pinned_runs_waiting",
+            callbacks=[self._observe_pinned_waiting],
+            description="Pinned runs waiting for a build that has no live workers",
+        )
         self._open_spans: dict[tuple[str, int, int], Any] = {}
 
     # ------------------------------------------------------------------ ticks
@@ -181,6 +194,20 @@ class OpenTelemetryTelemetry:
 
     def worker_error(self, loop: str) -> None:
         self.errors.add(1, {"loop": loop})
+
+    def history_size_warning(self, run_id: str, workflow_name: str, size: int, unit: str) -> None:
+        # The run id is left out of the attributes: it would give the metric unbounded
+        # cardinality. Logs (LoggingTelemetry) carry it.
+        self.history_warnings.add(1, {"workflow": workflow_name, "unit": unit})
+
+    def pinned_runs_waiting(self, build_id: str, count: int) -> None:
+        self._pinned_waiting[build_id] = count
+
+    def _observe_pinned_waiting(self, _options: Any) -> list[Any]:
+        return [
+            self._observation(count, {"build_id": build_id})
+            for build_id, count in sorted(self._pinned_waiting.items())
+        ]
 
     def close_open_spans(self) -> None:
         """End spans of attempts that never reported (e.g. on shutdown)."""
