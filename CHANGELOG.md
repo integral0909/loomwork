@@ -207,5 +207,4 @@ All notable changes to this project are documented here. The format follows
 - `OpenTelemetryTelemetry` implements the history-size and pinned-build hooks, reported
   as `loomwork.history.size_warnings` and `loomwork.build.pinned_runs_waiting`, so it
   satisfies the `Telemetry` protocol again.
-
 - SQLite transactions could be left open when the calling task was cancelled.
