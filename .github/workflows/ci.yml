@@ -86,6 +86,26 @@ jobs:
           name: dist
           path: dist/
 
+  benchmarks:
+    name: Benchmarks (quick)
+    # Informational only: never gates merges. It only runs on pushes to main (never on
+    # pull requests), and continue-on-error keeps a slow or flaky machine from turning
+    # the commit red; read the uploaded JSON, don't rely on this job's own status.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --python 3.12
+      - run: uv run python -m benchmarks run --quick --store memory,sqlite --out benchmark-results.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.json
+
   image:
     name: Container image
     runs-on: ubuntu-latest

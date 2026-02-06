@@ -31,6 +31,8 @@
   reading them back, crash-safely
 - [Configuration reference](operations/configuration.md)
 - [Monitoring](operations/monitoring.md): metrics, tracing, logs, store health
+- [Performance](performance.md): sizing workers, choosing a store, replay cache sizing,
+  payload size advice, backed by `benchmarks/`
 - [Recovery and fleet operations](operations/recovery.md): resetting a run, batch
   signal/cancel/terminate, history size limits
 - [Troubleshooting](operations/troubleshooting.md)

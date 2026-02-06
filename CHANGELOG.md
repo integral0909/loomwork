@@ -93,8 +93,10 @@ All notable changes to this project are documented here. The format follows
   `execution_timeout` bounds the whole workflow id across retries and continue-as-new,
   and `retry_policy` starts a fresh attempt (with backoff) when a run fails. Handles,
   parents and schedules follow the chain of attempts.
-- Benchmarks (`python -m benchmarks.bench`) for throughput, step fan-out, replay cost and
-  tick latency on every store.
+- Benchmark suite (`python -m benchmarks run|list|compare`): eleven scenarios across the
+  memory, SQLite, PostgreSQL and HTTP backends with warmup, repeated trials and bootstrap
+  confidence intervals; `compare` flags regressions only when they clear both a
+  threshold and the noise. A quick run is recorded in CI. See `docs/performance.md`.
 - Server mode (`loomwork.server`): a Starlette HTTP API in front of any store, with
   bearer tokens scoped to namespaces and permissions, per-namespace system workers, and a
   JSON API for starting, signalling, querying and cancelling workflows from any language.
