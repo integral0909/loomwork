@@ -173,8 +173,11 @@ Both checks and the resulting action (terminating an existing run, or not) happe
 atomically inside the store's transaction that creates the new run: two callers racing
 to start the same id never both succeed, and a `TERMINATE_EXISTING` race never leaves two
 runs of the id active. `Client.start(...)` and `Engine.start_workflow(...)` take the same
-two keyword arguments; child workflows started with `lw.start_child(...)` use the default
-policies (`FAIL`/`ALLOW_DUPLICATE`).
+two keyword arguments; `lw.start_child(...)` takes them too (defaulting to `FAIL`/
+`ALLOW_DUPLICATE`, as before), with one difference described in
+[composition.md](composition.md#id-reuse-and-conflict-policies-for-children): since a
+child cannot raise into its caller the way a top-level start can, every rejection reaches
+the parent as an ordinary child failure instead.
 
 ## Cancellation
 

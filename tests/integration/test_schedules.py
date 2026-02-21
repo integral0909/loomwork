@@ -10,6 +10,7 @@ import pytest
 import loomwork as lw
 from loomwork import ExecutionStatus, ManualClock, MemoryStore
 from loomwork.errors import ScheduleExistsError
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy
 from loomwork.schedules.model import OverlapPolicy
 from loomwork.worker import WorkerOptions
 from tests.helpers import FAST_CONFIG, T0, eventually
@@ -150,3 +151,136 @@ async def test_pause_on_failure(clock: ManualClock) -> None:
 
         await eventually(paused)
         assert "failed" in (await handle.describe()).note
+
+
+# --------------------------------------------------------------------------- id and versioning policies
+
+
+async def test_schedule_versioning_policy_pins_every_started_run(clock: ManualClock) -> None:
+    store = MemoryStore()
+    app = lw.Loomwork(
+        store=store,
+        workflows=[daily_report],
+        clock=clock,
+        config=FAST_CONFIG,
+        worker_options=WorkerOptions(shutdown_grace=0.2, build_id="build-a"),
+    )
+    async with app:
+        reports.clear()
+        handle = await app.client.schedules.create(
+            "pinned-schedule",
+            daily_report,
+            "us",
+            cron="0 * * * *",
+            versioning_policy=VersioningPolicy.PINNED,
+        )
+        await clock.advance(timedelta(hours=1, seconds=1))
+        await eventually(lambda: len(reports) == 1)
+        runs = await runs_of(store, "sched.report")
+        assert len(runs) == 1
+        assert runs[0].versioning_policy is VersioningPolicy.PINNED
+        assert runs[0].pinned_build_id == "build-a"
+        assert (await handle.describe()).action.versioning_policy is VersioningPolicy.PINNED
+
+
+async def test_schedule_run_timeout_applies_to_started_runs(clock: ManualClock) -> None:
+    store = MemoryStore()
+    async with make(clock, store) as app:
+        await app.client.schedules.create(
+            "short-lived", slow_job, interval=3600, run_timeout=timedelta(minutes=30)
+        )
+        await clock.advance(timedelta(hours=1, seconds=1))
+        await eventually(lambda: store.run_count == 1)
+        await clock.advance(timedelta(minutes=31))
+
+        async def timed_out() -> bool:
+            runs = await runs_of(store, "sched.slow")
+            return bool(runs) and runs[0].status is ExecutionStatus.TIMED_OUT
+
+        await eventually(timed_out)
+
+
+async def test_schedule_id_conflict_use_existing_adopts_repeated_trigger(
+    clock: ManualClock,
+) -> None:
+    store = MemoryStore()
+    async with make(clock, store) as app:
+        handle = await app.client.schedules.create(
+            "attach-test",
+            slow_job,
+            interval=3600,
+            id_conflict_policy=IdConflictPolicy.USE_EXISTING,
+        )
+        await handle.trigger()
+        await eventually(lambda: store.run_count == 1)
+        first_run_id = (await handle.describe()).running[0].run_id
+
+        # A second trigger at the same nominal time (the clock has not moved) targets
+        # the identical workflow id; USE_EXISTING adopts the run already going instead
+        # of failing or creating a second one.
+        await handle.trigger()
+
+        async def fired_twice() -> bool:
+            return (await handle.describe()).total_started == 2
+
+        await eventually(fired_twice)
+        state = await handle.describe()
+        assert len(state.running) == 1
+        assert state.running[0].run_id == first_run_id
+        assert store.run_count == 1
+
+
+async def test_schedule_id_conflict_terminate_existing_replaces_repeated_trigger(
+    clock: ManualClock,
+) -> None:
+    store = MemoryStore()
+    async with make(clock, store) as app:
+        handle = await app.client.schedules.create(
+            "replace-test",
+            slow_job,
+            interval=3600,
+            id_conflict_policy=IdConflictPolicy.TERMINATE_EXISTING,
+        )
+        await handle.trigger()
+        await eventually(lambda: store.run_count == 1)
+        first_run_id = (await handle.describe()).running[0].run_id
+
+        await handle.trigger()
+
+        async def fired_twice() -> bool:
+            return (await handle.describe()).total_started == 2
+
+        await eventually(fired_twice)
+        state = await handle.describe()
+        assert len(state.running) == 1
+        assert state.running[0].run_id != first_run_id
+        old = await app.store.get_execution(first_run_id)
+        assert old.status is ExecutionStatus.TERMINATED
+
+
+async def test_schedule_id_reuse_policy_persists_and_loads_on_old_documents(
+    clock: ManualClock,
+) -> None:
+    """A schedule created before id_reuse_policy/id_conflict_policy/versioning_policy/
+    run_timeout/execution_timeout/search_attributes existed has none of them in its
+    stored document; loading it must not fail, and it must keep behaving as it always
+    did (see ScheduleAction.from_dict)."""
+    store = MemoryStore()
+    async with make(clock, store) as app:
+        handle = await app.client.schedules.create(
+            "plain", slow_job, interval=3600, id_reuse_policy=IdReusePolicy.REJECT_DUPLICATE
+        )
+        state = await handle.describe()
+        assert state.action.id_reuse_policy is IdReusePolicy.REJECT_DUPLICATE
+        # Simulate a document stored before these fields existed by dropping them from
+        # the persisted body and reloading through the same store.
+        stale_dict = state.to_dict()
+        del stale_dict["action"]["id_reuse_policy"]
+        from loomwork.schedules.model import ScheduleState
+
+        stale = ScheduleState.from_dict(stale_dict)
+        assert stale.action.id_reuse_policy is None
+        await store.update_schedule(stale, state.version, clock.now())
+        reloaded = await handle.describe()
+        assert reloaded.action.id_reuse_policy is None
+        assert reloaded.action.id_conflict_policy is None

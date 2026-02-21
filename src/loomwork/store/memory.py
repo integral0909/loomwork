@@ -48,9 +48,13 @@ if TYPE_CHECKING:
 from loomwork.store.base import Store, id_reuse_allowed
 from loomwork.store.closing import (
     DEADLINE_TIMER_SEQ,
+    attach_unstarted,
+    child_id_reuse_rejected_event,
+    child_outcome_event_for,
     child_start_failed_event,
     closing_messages,
     drop_unstarted,
+    reconcile_running,
     run_deadline,
 )
 from loomwork.store.notify import (
@@ -105,6 +109,11 @@ class MemoryStore(Store):
         self._outbox: deque[OutboxMessage] = deque()
         self._build_compat: dict[tuple[str, str], datetime] = {}
         self._worker_presence: dict[str, WorkerPresence] = {}
+        #: run_id -> [(watcher_run_id, watcher_seq), ...]: extra parents attached with
+        #: IdConflictPolicy.USE_EXISTING after the run was already going, reported when
+        #: it (or the run it continues as, transitively) finally closes. See
+        #: docs/guides/composition.md.
+        self._watchers: dict[str, list[tuple[str, int]]] = {}
 
     def _build_eligible(self, pinned_build_id: str | None, worker_build_id: str | None) -> bool:
         """Mirrors the SQL stores' claim filter (see ``store/base.py``): an unversioned
@@ -174,7 +183,25 @@ class MemoryStore(Store):
             for child in self._children.get(record.run_id, ())
             if child in self._runs and not self._runs[child].record.is_closed
         ]
-        self._enqueue(closing_messages(record, running_children))
+        messages = list(closing_messages(record, running_children))
+        watchers = self._watchers.pop(record.run_id, [])
+        if watchers:
+            if record.continued_run_id is not None:
+                # The run's identity (continue-as-new, a retry, or a reset) moves to its
+                # successor, which will report to these watchers when it truly closes --
+                # exactly how the primary parent link already behaves (see
+                # closing_messages).
+                self._watchers.setdefault(record.continued_run_id, []).extend(watchers)
+            else:
+                messages.extend(
+                    OutboxMessage(
+                        action=OutboxAction.APPEND_INPUT,
+                        target_run_id=watcher_run_id,
+                        event=child_outcome_event_for(watcher_seq, record),
+                    )
+                    for watcher_run_id, watcher_seq in watchers
+                )
+        self._enqueue(messages)
         self.notifier.publish(closed_topic(record.run_id))
 
     def _enqueue(self, messages: Sequence[OutboxMessage]) -> None:
@@ -494,7 +521,7 @@ class MemoryStore(Store):
 
         self._enqueue(outcome.outbox)
         for child in outcome.new_children:
-            self._start_child(run, child.record, child.started, now)
+            self._start_child(run, child, now)
 
         if outcome.search_attributes:
             self._attributes[run_id] = merge(
@@ -546,24 +573,64 @@ class MemoryStore(Store):
         self._mark_tick_pending(run, now)
         return appended
 
-    def _start_child(
-        self, parent: _Run, child: ExecutionRecord, started: Event, now: datetime
-    ) -> None:
+    def _start_child(self, parent: _Run, spec: ChildSpec, now: datetime) -> None:
+        """Create ``spec`` as a child, or resolve a conflict against its workflow id's
+        current or latest run according to ``spec.id_conflict_policy``/
+        ``id_reuse_policy`` (mirroring :meth:`create_execution`'s rules). Every outcome
+        other than a plain create is reported to the parent as an input event: this
+        method never raises, since nothing awaits a child's start synchronously."""
+        child = spec.record
+        assert child.parent_seq is not None
         running = self._running_for(child.workflow_id)
-        if running is not None or child.run_id in self._runs:
-            assert child.parent_seq is not None
+        if running is not None:
+            if spec.id_conflict_policy is IdConflictPolicy.USE_EXISTING:
+                self._watchers.setdefault(running.run_id, []).append(
+                    (parent.record.run_id, child.parent_seq)
+                )
+                return
+            if spec.id_conflict_policy is IdConflictPolicy.TERMINATE_EXISTING:
+                running_run = self._runs[running.run_id]
+                reason = "superseded by child id conflict policy"
+                self._append(running_run, WorkflowTerminated(reason=reason), now)
+                self._close(
+                    running_run, CloseOutcome(ExecutionStatus.TERMINATED, reason=reason), now
+                )
+            else:
+                self._append(
+                    parent,
+                    child_start_failed_event(
+                        child.parent_seq, child.workflow_name, child.workflow_id, running.run_id
+                    ),
+                    now,
+                )
+                return
+        elif spec.id_reuse_policy is not IdReusePolicy.ALLOW_DUPLICATE:
+            run_ids = self._by_workflow_id.get(child.workflow_id)
+            if run_ids:
+                latest = self._runs[run_ids[-1]].record
+                if not id_reuse_allowed(spec.id_reuse_policy, latest.status):
+                    self._append(
+                        parent,
+                        child_id_reuse_rejected_event(
+                            child.parent_seq,
+                            child.workflow_name,
+                            child.workflow_id,
+                            latest.run_id,
+                            spec.id_reuse_policy.value,
+                        ),
+                        now,
+                    )
+                    return
+        if child.run_id in self._runs:
             self._append(
                 parent,
                 child_start_failed_event(
-                    child.parent_seq,
-                    child.workflow_name,
-                    child.workflow_id,
-                    running.run_id if running else child.run_id,
+                    child.parent_seq, child.workflow_name, child.workflow_id, child.run_id
                 ),
                 now,
             )
             return
-        self._insert_run(child, started, now)
+        self._insert_run(child, spec.started, now)
 
     async def fail_tick(
         self,
@@ -970,15 +1037,44 @@ class MemoryStore(Store):
     ) -> ScheduleState:
         self._check_version(state.schedule_id, expected_version)
         conflicts: set[str] = set()
+        reuse_rejected: set[str] = set()
+        attached: dict[str, str] = {}
+        terminated: set[str] = set()
         for spec in starts:
-            if self._running_for(spec.record.workflow_id) or spec.record.run_id in self._runs:
-                conflicts.add(spec.record.run_id)
+            child = spec.record
+            running = self._running_for(child.workflow_id)
+            if running is not None:
+                if spec.id_conflict_policy is IdConflictPolicy.USE_EXISTING:
+                    attached[child.run_id] = running.run_id
+                    continue
+                if spec.id_conflict_policy is IdConflictPolicy.TERMINATE_EXISTING:
+                    running_run = self._runs[running.run_id]
+                    reason = "superseded by schedule id conflict policy"
+                    self._append(running_run, WorkflowTerminated(reason=reason), now)
+                    self._close(
+                        running_run, CloseOutcome(ExecutionStatus.TERMINATED, reason=reason), now
+                    )
+                    terminated.add(running.run_id)
+                else:
+                    conflicts.add(child.run_id)
+                    continue
+            elif spec.id_reuse_policy is not IdReusePolicy.ALLOW_DUPLICATE:
+                run_ids = self._by_workflow_id.get(child.workflow_id)
+                if run_ids:
+                    latest = self._runs[run_ids[-1]].record
+                    if not id_reuse_allowed(spec.id_reuse_policy, latest.status):
+                        conflicts.add(child.run_id)
+                        reuse_rejected.add(child.run_id)
+                        continue
+            if child.run_id in self._runs:
+                conflicts.add(child.run_id)
                 continue
-            self._insert_run(spec.record, spec.started, now)
+            self._insert_run(child, spec.started, now)
         self._enqueue(outbox)
-        stored = drop_unstarted(state, conflicts).with_(
-            version=expected_version + 1, updated_at=now
-        )
+        stored = drop_unstarted(state, conflicts, reuse_rejected=reuse_rejected)
+        stored = attach_unstarted(stored, attached)
+        stored = reconcile_running(stored, terminated)
+        stored = stored.with_(version=expected_version + 1, updated_at=now)
         self._schedules[state.schedule_id] = stored
         self.notifier.publish(TOPIC_SCHEDULES)
         return stored

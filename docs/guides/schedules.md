@@ -63,6 +63,54 @@ await client.schedules.create("sync", sync_inventory, interval=timedelta(minutes
 Intervals are aligned to the Unix epoch plus `offset`, so they fire at predictable times
 regardless of when the schedule was created.
 
+## Id policies, versioning and per-run timeouts
+
+`client.schedules.create(...)` accepts the same policies as `start_workflow`/
+`start_child`, applied to every run the schedule starts:
+
+```python
+await client.schedules.create(
+    "billing.monthly_invoice", monthly_invoice, "cust-7",
+    cron="0 3 1 * *",
+    id_reuse_policy=lw.IdReusePolicy.REJECT_DUPLICATE,
+    versioning_policy=lw.VersioningPolicy.PINNED,
+    run_timeout=timedelta(hours=2),
+    execution_timeout=timedelta(hours=6),
+    search_attributes={"kind": "monthly_invoice"},
+)
+```
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `id_reuse_policy` | `ALLOW_DUPLICATE` | See [id reuse and conflict policies](workflows.md#id-reuse-and-conflict-policies); applies when the exact nominal fire time was started before and has since closed (a re-evaluation after a crash, or overlapping `backfill` ranges). |
+| `id_conflict_policy` | `FAIL` | See below: what a fire time does when its target workflow id is, unusually, already occupied. |
+| `versioning_policy` | resolved from engine configuration | Same override as `start_workflow`/`start_child`; unset, every run the schedule starts resolves its policy exactly as an unspecified top-level start would (see [versioning](versioning.md) and [ADR-0006](../adr/0006-worker-build-versioning.md)). |
+| `run_timeout`, `execution_timeout` | none | Bound each run the schedule starts, the same as the identically named `start_workflow` arguments. |
+| `search_attributes` | none | Set on every run the schedule starts; validated and encoded once, at `create()` (or `update()`) time. |
+
+A schedule created before these fields existed has none of them in its stored document;
+loading it behaves exactly as it always did (`ALLOW_DUPLICATE`/`FAIL`, no override, no
+extra timeout or attributes) -- they are additive, like every other field on a stored
+schedule.
+
+### `id_conflict_policy` and overlap, together
+
+Scheduled workflow ids embed the nominal fire time (`<schedule id>@<nominal time>`), so
+two *different* fire times never collide, and `overlap` already decides whether a fire
+time tries to start a run at all given the schedule's own record of what it started
+(`skip`, `buffer_one`, `cancel_other`, `terminate_other`; see below). `id_conflict_policy`
+only matters for the much narrower case of a fire time that overlap policy *did* decide
+to start, finding its own target workflow id already occupied -- which normally cannot
+happen, and only does when the exact same fire time is evaluated twice (a crash between
+starting the run and recording it, two overlapping `backfill` ranges, or two manual
+`trigger()` calls close enough together to share a nominal time):
+
+| Policy | Effect |
+| --- | --- |
+| `FAIL` (default) | The fire time is skipped and recorded as `already_running`, same as today. |
+| `USE_EXISTING` | The schedule adopts the run it found instead of dropping the fire time: `describe()` reports it under `running`/`recent` from here on, as if the schedule had started it. |
+| `TERMINATE_EXISTING` | The run it found is terminated and the fire time starts fresh in its place. |
+
 ## Overlap policies
 
 What happens when a fire time arrives while the previous run is still running:

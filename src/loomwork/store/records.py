@@ -14,7 +14,7 @@ from typing import Any
 from loomwork.codec.payload import Payload
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event
-from loomwork.options import StepOptions, VersioningPolicy
+from loomwork.options import IdConflictPolicy, IdReusePolicy, StepOptions, VersioningPolicy
 
 
 class ExecutionStatus(enum.StrEnum):
@@ -215,10 +215,20 @@ class WorkerPresence:
 
 @dataclass(frozen=True, slots=True)
 class ChildSpec:
-    """A child execution to create atomically with the parent's tick."""
+    """An execution to create atomically alongside something else: a child workflow
+    (:meth:`~loomwork.store.base.Store.complete_tick`), a scheduled run (:meth:`~loomwork.
+    store.base.Store.fire_schedule`), a continuation or a workflow retry.
+
+    ``id_reuse_policy`` and ``id_conflict_policy`` govern ``record.workflow_id`` exactly
+    as the same-named parameters of :meth:`~loomwork.store.base.Store.create_execution`
+    do for a top-level start; the default (``ALLOW_DUPLICATE``/``FAIL``) reproduces the
+    historical behaviour (a running conflict fails to start; reuse is never rejected).
+    """
 
     record: ExecutionRecord
     started: Event
+    id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE
+    id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL
 
 
 @dataclass(frozen=True, slots=True)

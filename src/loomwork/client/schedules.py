@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from loomwork.codec.converter import DataConverter
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy, as_timedelta
 from loomwork.schedules.model import (
     OverlapPolicy,
     ScheduleAction,
@@ -17,6 +18,7 @@ from loomwork.schedules.model import (
 )
 from loomwork.schedules.service import ScheduleService
 from loomwork.sdk.definitions import WorkflowLike, as_definition
+from loomwork.visibility.attributes import encode_attributes
 
 
 class ScheduleHandle:
@@ -51,13 +53,22 @@ class ScheduleHandle:
         *,
         spec: ScheduleSpec | None = None,
         policy: SchedulePolicy | None = None,
+        action: ScheduleAction | None = None,
         note: str | None = None,
     ) -> ScheduleState:
+        """Change fields of the schedule; only the arguments given are changed.
+
+        ``action`` replaces the whole action, including its arguments and every id,
+        versioning and timeout policy -- construct it with ``dataclasses.replace`` on
+        ``(await handle.describe()).action`` to change just one field of it.
+        """
         changes: dict[str, Any] = {}
         if spec is not None:
             changes["spec"] = spec
         if policy is not None:
             changes["policy"] = policy
+        if action is not None:
+            changes["action"] = action
         if note is not None:
             changes["note"] = note
         return await self._service.update(self.schedule_id, **changes)
@@ -92,8 +103,22 @@ class ScheduleClient:
         pause_on_failure: bool = False,
         paused: bool = False,
         note: str = "",
+        id_reuse_policy: IdReusePolicy | str | None = None,
+        id_conflict_policy: IdConflictPolicy | str | None = None,
+        versioning_policy: VersioningPolicy | str | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> ScheduleHandle:
         """Create a schedule that starts ``workflow(*args)`` on ``cron`` or ``interval``.
+
+        ``id_reuse_policy``, ``id_conflict_policy`` and ``versioning_policy`` govern
+        every run the schedule starts, exactly as the same-named arguments do for
+        :func:`loomwork.start_child` -- unset, each reproduces today's behaviour (see
+        ``docs/guides/schedules.md`` for how ``id_conflict_policy`` interacts with
+        ``overlap``). ``run_timeout`` and ``execution_timeout`` bound each run the same
+        way as :meth:`~loomwork.engine.engine.Engine.start_workflow`'s arguments of the
+        same name. ``search_attributes`` is validated and encoded once, here.
 
         Raises:
             ScheduleExistsError: a schedule with this id exists.
@@ -103,6 +128,7 @@ class ScheduleClient:
         else:
             definition = as_definition(workflow)
             name, positional = definition.name, definition.bind(args)
+        config = self._service.config
         state = ScheduleState(
             schedule_id=validate_schedule_id(schedule_id),
             spec=ScheduleSpec(
@@ -113,7 +139,26 @@ class ScheduleClient:
                 end_at=end_at,
                 jitter=jitter,
             ),
-            action=ScheduleAction(name, await self._converter.encode_args_async(positional)),
+            action=ScheduleAction(
+                name,
+                await self._converter.encode_args_async(positional),
+                id_reuse_policy=IdReusePolicy(id_reuse_policy) if id_reuse_policy else None,
+                id_conflict_policy=(
+                    IdConflictPolicy(id_conflict_policy) if id_conflict_policy else None
+                ),
+                versioning_policy=(
+                    VersioningPolicy(versioning_policy) if versioning_policy else None
+                ),
+                run_timeout=as_timedelta(run_timeout),
+                execution_timeout=as_timedelta(execution_timeout),
+                search_attributes=(
+                    encode_attributes(
+                        search_attributes, config.search_attributes if config else None
+                    )
+                    if search_attributes
+                    else None
+                ),
+            ),
             policy=SchedulePolicy(overlap, catchup_window, pause_on_failure),
             paused=paused,
             note=note,

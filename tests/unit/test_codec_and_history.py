@@ -226,6 +226,9 @@ SAMPLE_EVENTS = [
         run_id="r.c1",
         args=[P],
         parent_close_policy="abandon",
+        id_reuse_policy="reject_duplicate",
+        id_conflict_policy="use_existing",
+        versioning_policy="pinned",
     ),
     UpdateCompleted(update_id="u-1", result=P),
     UpdateCompleted(update_id="u-2", failure=F),
@@ -328,6 +331,11 @@ class TestEvents:
         )
         assert isinstance(child, ChildScheduled)
         assert child.headers == {}
+        assert (child.id_reuse_policy, child.id_conflict_policy, child.versioning_policy) == (
+            "allow_duplicate",
+            "fail",
+            "",
+        )
 
     def test_headers_round_trip_when_set(self) -> None:
         headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}

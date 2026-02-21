@@ -54,9 +54,13 @@ if TYPE_CHECKING:
 from loomwork.store.base import Store, id_reuse_allowed
 from loomwork.store.closing import (
     DEADLINE_TIMER_SEQ,
+    attach_unstarted,
+    child_id_reuse_rejected_event,
+    child_outcome_event_for,
     child_start_failed_event,
     closing_messages,
     drop_unstarted,
+    reconcile_running,
     run_deadline,
 )
 from loomwork.store.notify import (
@@ -265,7 +269,33 @@ class SQLStore(Store, abc.ABC):
             "SELECT * FROM lw_executions WHERE parent_run_id = ? AND status = ? ORDER BY seq",
             (rec.run_id, ExecutionStatus.RUNNING.value),
         )
-        await self._enqueue(tx, closing_messages(rec, [self._record(r) for r in rows]), now)
+        messages = list(closing_messages(rec, [self._record(r) for r in rows]))
+        watcher_rows = await tx.fetchall(
+            "SELECT watcher_run_id, watcher_seq FROM lw_child_watchers WHERE run_id = ?",
+            (rec.run_id,),
+        )
+        if watcher_rows:
+            await tx.execute("DELETE FROM lw_child_watchers WHERE run_id = ?", (rec.run_id,))
+            if rec.continued_run_id is not None:
+                # The run's identity moves to its successor (continue-as-new, a retry or
+                # a reset); it reports to these watchers when it truly closes, exactly
+                # as the primary parent link already does (see closing_messages).
+                for row in watcher_rows:
+                    await tx.execute(
+                        "INSERT INTO lw_child_watchers (run_id, watcher_run_id, watcher_seq) "
+                        "VALUES (?, ?, ?)",
+                        (rec.continued_run_id, row["watcher_run_id"], row["watcher_seq"]),
+                    )
+            else:
+                messages.extend(
+                    OutboxMessage(
+                        action=OutboxAction.APPEND_INPUT,
+                        target_run_id=row["watcher_run_id"],
+                        event=child_outcome_event_for(int(row["watcher_seq"]), rec),
+                    )
+                    for row in watcher_rows
+                )
+        await self._enqueue(tx, messages, now)
         tx.notify(closed_topic(rec.run_id))
 
     async def _enqueue(
@@ -773,7 +803,7 @@ class SQLStore(Store, abc.ABC):
 
             await self._enqueue(tx, outcome.outbox, now)
             for child in outcome.new_children:
-                await self._start_child(tx, rec, child.record, child.started, now)
+                await self._start_child(tx, rec, child, now)
 
             if outcome.search_attributes:
                 await self._write_attributes(tx, run_id, outcome.search_attributes)
@@ -822,32 +852,96 @@ class SQLStore(Store, abc.ABC):
         self,
         tx: SqlTransaction,
         parent: ExecutionRecord,
-        child: ExecutionRecord,
-        started: Event,
+        spec: ChildSpec,
         now: datetime,
     ) -> None:
-        running = await tx.fetchone(
-            "SELECT run_id FROM lw_executions WHERE workflow_id = ? AND status = ?",
+        """Create ``spec`` as a child, or resolve a conflict against its workflow id's
+        current or latest run according to ``spec.id_conflict_policy``/
+        ``id_reuse_policy`` (mirroring :meth:`create_execution`'s rules). Every outcome
+        other than a plain create is reported to the parent as an input event: this
+        never raises, since nothing awaits a child's start synchronously.
+
+        Locks the target row with ``FOR UPDATE`` (same clause ``create_execution`` uses)
+        only when ``USE_EXISTING``/``TERMINATE_EXISTING`` may need to act on it -- the
+        default ``FAIL`` path takes an unlocked read exactly as before this feature. Two
+        ticks can only contend for *each other's own* row this way if one deliberately
+        starts a child whose explicit id equals the other's workflow id; even then this
+        cannot deadlock silently: PostgreSQL's own deadlock detector aborts one side
+        within its bounded ``deadlock_timeout``, which surfaces here as an ordinary
+        transaction failure and retries the whole tick exactly like a lease race would
+        (see docs/internals.md). SQLite serializes all writer transactions through one
+        connection lock, so no two of its transactions ever hold conflicting locks at
+        once.
+        """
+        child = spec.record
+        assert child.parent_seq is not None
+        needs_lock = spec.id_conflict_policy in (
+            IdConflictPolicy.USE_EXISTING,
+            IdConflictPolicy.TERMINATE_EXISTING,
+        )
+        suffix = self.FOR_UPDATE if needs_lock else ""
+        running_row = await tx.fetchone(
+            f"SELECT * FROM lw_executions WHERE workflow_id = ? AND status = ?{suffix}",
             (child.workflow_id, ExecutionStatus.RUNNING.value),
         )
-        clash = running is not None or await tx.fetchone(
-            "SELECT 1 FROM lw_executions WHERE run_id = ?", (child.run_id,)
-        )
-        if clash:
-            assert child.parent_seq is not None
+        if running_row is not None:
+            running = self._record(running_row)
+            if spec.id_conflict_policy is IdConflictPolicy.USE_EXISTING:
+                await tx.execute(
+                    "INSERT INTO lw_child_watchers (run_id, watcher_run_id, watcher_seq) "
+                    "VALUES (?, ?, ?)",
+                    (running.run_id, parent.run_id, child.parent_seq),
+                )
+                return
+            if spec.id_conflict_policy is IdConflictPolicy.TERMINATE_EXISTING:
+                reason = "superseded by child id conflict policy"
+                await self._append(tx, running, WorkflowTerminated(reason=reason), now)
+                await self._close(
+                    tx, running, CloseOutcome(ExecutionStatus.TERMINATED, reason=reason), now
+                )
+                await self._write(tx, running)
+            else:
+                await self._append(
+                    tx,
+                    parent,
+                    child_start_failed_event(
+                        child.parent_seq, child.workflow_name, child.workflow_id, running.run_id
+                    ),
+                    now,
+                )
+                return
+        elif spec.id_reuse_policy is not IdReusePolicy.ALLOW_DUPLICATE:
+            latest_row = await tx.fetchone(
+                "SELECT * FROM lw_executions WHERE workflow_id = ? ORDER BY seq DESC LIMIT 1",
+                (child.workflow_id,),
+            )
+            if latest_row is not None:
+                latest = self._record(latest_row)
+                if not id_reuse_allowed(spec.id_reuse_policy, latest.status):
+                    await self._append(
+                        tx,
+                        parent,
+                        child_id_reuse_rejected_event(
+                            child.parent_seq,
+                            child.workflow_name,
+                            child.workflow_id,
+                            latest.run_id,
+                            spec.id_reuse_policy.value,
+                        ),
+                        now,
+                    )
+                    return
+        if await tx.fetchone("SELECT 1 FROM lw_executions WHERE run_id = ?", (child.run_id,)):
             await self._append(
                 tx,
                 parent,
                 child_start_failed_event(
-                    child.parent_seq,
-                    child.workflow_name,
-                    child.workflow_id,
-                    running["run_id"] if running is not None else child.run_id,
+                    child.parent_seq, child.workflow_name, child.workflow_id, child.run_id
                 ),
                 now,
             )
             return
-        await self._insert_run(tx, dataclasses.replace(child), started, now)
+        await self._insert_run(tx, dataclasses.replace(child), spec.started, now)
 
     async def _cancel_step(self, tx: SqlTransaction, run_id: str, seq: int, now: datetime) -> None:
         row = await tx.fetchone(
@@ -1543,20 +1637,64 @@ class SQLStore(Store, abc.ABC):
         async with self.transaction() as tx:
             await self._lock_schedule(tx, state.schedule_id, expected_version)
             conflicts: set[str] = set()
+            reuse_rejected: set[str] = set()
+            attached: dict[str, str] = {}
+            terminated: set[str] = set()
             for spec in starts:
-                running = await tx.fetchone(
-                    "SELECT 1 FROM lw_executions WHERE (workflow_id = ? AND status = ?) "
-                    "OR run_id = ?",
-                    (spec.record.workflow_id, ExecutionStatus.RUNNING.value, spec.record.run_id),
+                child = spec.record
+                # See SQLStore._start_child for why locking the target row here (only
+                # when a policy may act on it) cannot deadlock.
+                needs_lock = spec.id_conflict_policy in (
+                    IdConflictPolicy.USE_EXISTING,
+                    IdConflictPolicy.TERMINATE_EXISTING,
                 )
-                if running is not None:
-                    conflicts.add(spec.record.run_id)
+                suffix = self.FOR_UPDATE if needs_lock else ""
+                running_row = await tx.fetchone(
+                    f"SELECT * FROM lw_executions WHERE workflow_id = ? AND status = ?{suffix}",
+                    (child.workflow_id, ExecutionStatus.RUNNING.value),
+                )
+                if running_row is not None:
+                    running = self._record(running_row)
+                    if spec.id_conflict_policy is IdConflictPolicy.USE_EXISTING:
+                        attached[child.run_id] = running.run_id
+                        continue
+                    if spec.id_conflict_policy is IdConflictPolicy.TERMINATE_EXISTING:
+                        reason = "superseded by schedule id conflict policy"
+                        await self._append(tx, running, WorkflowTerminated(reason=reason), now)
+                        await self._close(
+                            tx,
+                            running,
+                            CloseOutcome(ExecutionStatus.TERMINATED, reason=reason),
+                            now,
+                        )
+                        await self._write(tx, running)
+                        terminated.add(running.run_id)
+                    else:
+                        conflicts.add(child.run_id)
+                        continue
+                elif spec.id_reuse_policy is not IdReusePolicy.ALLOW_DUPLICATE:
+                    latest_row = await tx.fetchone(
+                        "SELECT * FROM lw_executions WHERE workflow_id = ? "
+                        "ORDER BY seq DESC LIMIT 1",
+                        (child.workflow_id,),
+                    )
+                    if latest_row is not None:
+                        latest = self._record(latest_row)
+                        if not id_reuse_allowed(spec.id_reuse_policy, latest.status):
+                            conflicts.add(child.run_id)
+                            reuse_rejected.add(child.run_id)
+                            continue
+                if await tx.fetchone(
+                    "SELECT 1 FROM lw_executions WHERE run_id = ?", (child.run_id,)
+                ):
+                    conflicts.add(child.run_id)
                     continue
-                await self._insert_run(tx, dataclasses.replace(spec.record), spec.started, now)
+                await self._insert_run(tx, dataclasses.replace(child), spec.started, now)
             await self._enqueue(tx, outbox, now)
-            stored = drop_unstarted(state, conflicts).with_(
-                version=expected_version + 1, updated_at=now
-            )
+            stored = drop_unstarted(state, conflicts, reuse_rejected=reuse_rejected)
+            stored = attach_unstarted(stored, attached)
+            stored = reconcile_running(stored, terminated)
+            stored = stored.with_(version=expected_version + 1, updated_at=now)
             await self._save_schedule(tx, stored, now)
         return stored
 

@@ -76,10 +76,8 @@ def schedule_view(state: ScheduleState) -> dict[str, Any]:
     ``state.to_dict()``, except the action's arguments are decoded like any other payload
     the control API returns, instead of left as wire-form payload dicts."""
     data = state.to_dict()
-    data["action"] = {
-        "workflow_name": state.action.workflow_name,
-        "args": [payload_view(p) for p in state.action.args],
-    }
+    action = data["action"]
+    action["args"] = [payload_view(p) for p in state.action.args]
     return data
 
 

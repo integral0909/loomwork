@@ -31,7 +31,7 @@ from loomwork.history.events import (
 )
 from loomwork.ids import new_id
 from loomwork.observability.telemetry import NoopTelemetry, Telemetry, TickReport
-from loomwork.options import VersioningPolicy
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy
 from loomwork.retry import RetryPolicy
 from loomwork.runtime.commands import (
     CancelTimer,
@@ -390,8 +390,12 @@ class TickProcessor:
 
     def _child_spec(self, parent: ExecutionRecord, command: ScheduleChild, now: Any) -> ChildSpec:
         # A child is its own workflow type with its own policy (not inherited from the
-        # parent): resolved fresh from engine configuration, exactly as a top-level
+        # parent): resolved fresh from engine configuration unless start_child(
+        # versioning_policy=...) overrode it explicitly, exactly as a top-level
         # start_workflow call would resolve it. See docs/adr/0006-worker-build-versioning.md.
+        override = (
+            VersioningPolicy(command.versioning_policy) if command.versioning_policy else None
+        )
         child = ExecutionRecord(
             run_id=command.run_id,
             workflow_id=command.workflow_id,
@@ -401,7 +405,9 @@ class TickProcessor:
             parent_run_id=parent.run_id,
             parent_seq=command.seq,
             parent_close_policy=command.parent_close_policy,
-            versioning_policy=self.config.resolve_versioning_policy(command.workflow_name),
+            versioning_policy=self.config.resolve_versioning_policy(
+                command.workflow_name, override
+            ),
         )
         started = WorkflowStarted(
             workflow_name=command.workflow_name,
@@ -413,7 +419,12 @@ class TickProcessor:
             parent_run_id=parent.run_id,
             headers=dict(command.headers),
         )
-        return ChildSpec(record=child, started=started)
+        return ChildSpec(
+            record=child,
+            started=started,
+            id_reuse_policy=IdReusePolicy(command.id_reuse_policy),
+            id_conflict_policy=IdConflictPolicy(command.id_conflict_policy),
+        )
 
     def _maybe_retry(
         self,

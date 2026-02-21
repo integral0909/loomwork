@@ -172,7 +172,7 @@ class Worker:
             interceptors=self.options.step_interceptors,
             build_id=self.options.build_id,
         )
-        self.schedules = ScheduleService(store, self.clock, self.telemetry)
+        self.schedules = ScheduleService(store, self.clock, self.telemetry, self.config)
         self.versioning = BuildVersioning(store, self.clock)
         self._gate = QueueGate(self.options.task_queues, self.options.queue_limits)
         self._local = Notifier()

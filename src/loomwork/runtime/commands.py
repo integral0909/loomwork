@@ -245,6 +245,9 @@ class ScheduleChild(Command):
     args: list[Payload] = field(default_factory=list)
     parent_close_policy: str = "terminate"
     headers: dict[str, str] = field(default_factory=dict)
+    id_reuse_policy: str = "allow_duplicate"
+    id_conflict_policy: str = "fail"
+    versioning_policy: str = ""
 
     def to_event(self) -> Event:
         return ChildScheduled(
@@ -255,6 +258,9 @@ class ScheduleChild(Command):
             args=self.args,
             parent_close_policy=self.parent_close_policy,
             headers=self.headers,
+            id_reuse_policy=self.id_reuse_policy,
+            id_conflict_policy=self.id_conflict_policy,
+            versioning_policy=self.versioning_policy,
         )
 
     def matches(self, event: Event) -> bool:

@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loomwork.codec.payload import Payload
-from loomwork.options import as_timedelta
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy, as_timedelta
 from loomwork.schedules.cron import CronError, CronExpression, parse_cron
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
@@ -209,19 +209,81 @@ class ScheduleSpec:
 
 @dataclass(frozen=True, slots=True)
 class ScheduleAction:
-    """Start ``workflow_name`` with ``args`` (already-encoded payloads)."""
+    """Start ``workflow_name`` with ``args`` (already-encoded payloads).
+
+    Every field below the first two is optional and, unset (``None``), reproduces the
+    behaviour of a schedule created before it existed: ``id_reuse_policy`` and
+    ``id_conflict_policy`` default to ``ALLOW_DUPLICATE``/``FAIL`` exactly as
+    :meth:`~loomwork.store.base.Store.create_execution` does when neither is passed;
+    ``versioning_policy`` resolves from :class:`~loomwork.engine.config.EngineConfig`
+    exactly as an unspecified ``start_workflow`` call would; ``run_timeout``,
+    ``execution_timeout`` and ``search_attributes`` are absent, as before this feature.
+
+    ``search_attributes`` holds already-*encoded* values (see :func:`loomwork.visibility.
+    attributes.encode_attributes`), the same representation :attr:`~loomwork.history.
+    events.WorkflowStarted.search_attributes` uses -- :class:`~loomwork.client.schedules.
+    ScheduleClient` encodes the raw values passed to ``create()`` once, at creation.
+
+    Interaction with :class:`SchedulePolicy.overlap <OverlapPolicy>`: the overlap policy
+    decides *whether* a fire time tries to start a run at all, given the schedule's own
+    bookkeeping of runs it started (skip, buffer, cancel or terminate the previous one).
+    ``id_conflict_policy`` only matters for what a fire time that *does* try to start
+    finds already occupying its target workflow id -- normally nothing, since scheduled
+    workflow ids embed the nominal time and are otherwise unique per schedule. It can
+    still be occupied by a re-evaluation of the exact same fire time (a crash between
+    starting the run and recording it, or two overlapping ``backfill`` ranges): the
+    default ``FAIL`` behaviour (skip, recorded as ``already_running``) is unchanged;
+    ``USE_EXISTING`` instead has the schedule adopt that run into its own bookkeeping,
+    and ``TERMINATE_EXISTING`` terminates it and starts fresh. ``id_reuse_policy``
+    applies when nothing is running but the exact fire time was already started and has
+    since closed (the same replay scenario, discovered later): the default
+    ``ALLOW_DUPLICATE`` starts another run of it, as always.
+    """
 
     workflow_name: str
     args: list[Payload] = field(default_factory=list)
+    id_reuse_policy: IdReusePolicy | None = None
+    id_conflict_policy: IdConflictPolicy | None = None
+    versioning_policy: VersioningPolicy | None = None
+    run_timeout: timedelta | None = None
+    execution_timeout: timedelta | None = None
+    search_attributes: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"workflow_name": self.workflow_name, "args": [p.to_dict() for p in self.args]}
+        data: dict[str, Any] = {
+            "workflow_name": self.workflow_name,
+            "args": [p.to_dict() for p in self.args],
+        }
+        if self.id_reuse_policy is not None:
+            data["id_reuse_policy"] = self.id_reuse_policy.value
+        if self.id_conflict_policy is not None:
+            data["id_conflict_policy"] = self.id_conflict_policy.value
+        if self.versioning_policy is not None:
+            data["versioning_policy"] = self.versioning_policy.value
+        if self.run_timeout is not None:
+            data["run_timeout"] = self.run_timeout.total_seconds()
+        if self.execution_timeout is not None:
+            data["execution_timeout"] = self.execution_timeout.total_seconds()
+        if self.search_attributes:
+            data["search_attributes"] = self.search_attributes
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScheduleAction:
+        id_reuse_policy = data.get("id_reuse_policy")
+        id_conflict_policy = data.get("id_conflict_policy")
+        versioning_policy = data.get("versioning_policy")
         return cls(
             workflow_name=str(data["workflow_name"]),
             args=[Payload.from_dict(p) for p in data.get("args", [])],
+            id_reuse_policy=IdReusePolicy(id_reuse_policy) if id_reuse_policy else None,
+            id_conflict_policy=(
+                IdConflictPolicy(id_conflict_policy) if id_conflict_policy else None
+            ),
+            versioning_policy=VersioningPolicy(versioning_policy) if versioning_policy else None,
+            run_timeout=as_timedelta(data.get("run_timeout")),
+            execution_timeout=as_timedelta(data.get("execution_timeout")),
+            search_attributes=data.get("search_attributes") or None,
         )
 
 

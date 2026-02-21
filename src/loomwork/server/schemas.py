@@ -97,6 +97,20 @@ class CreateScheduleRequest(BaseModel):
     pause_on_failure: bool = False
     paused: bool = False
     note: str = ""
+    #: See IdReusePolicy/IdConflictPolicy on loomwork.start_child; unset reproduces the
+    #: behaviour of a schedule created before this field existed (ALLOW_DUPLICATE/FAIL).
+    id_reuse_policy: (
+        Literal["allow_duplicate", "allow_duplicate_failed_only", "reject_duplicate"] | None
+    ) = None
+    id_conflict_policy: Literal["fail", "use_existing", "terminate_existing"] | None = None
+    #: Unset resolves from engine configuration, exactly as an unspecified
+    #: start_workflow call would.
+    versioning_policy: Literal["auto_upgrade", "pinned"] | None = None
+    #: Seconds; closes each run this schedule starts after this long.
+    run_timeout: float | None = None
+    #: Seconds; bounds each run's workflow id across its own retries and continue-as-new.
+    execution_timeout: float | None = None
+    search_attributes: dict[str, Any] | None = None
 
 
 class UpdateScheduleRequest(BaseModel):
@@ -114,6 +128,14 @@ class UpdateScheduleRequest(BaseModel):
     catchup_window: float | None = None
     pause_on_failure: bool | None = None
     note: str | None = None
+    id_reuse_policy: (
+        Literal["allow_duplicate", "allow_duplicate_failed_only", "reject_duplicate"] | None
+    ) = None
+    id_conflict_policy: Literal["fail", "use_existing", "terminate_existing"] | None = None
+    versioning_policy: Literal["auto_upgrade", "pinned"] | None = None
+    run_timeout: float | None = None
+    execution_timeout: float | None = None
+    search_attributes: dict[str, Any] | None = None
 
 
 class ScheduleNoteRequest(BaseModel):

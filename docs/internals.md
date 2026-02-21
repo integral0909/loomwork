@@ -82,7 +82,18 @@ correctness bug, however small it looks.
   continuation) in its own transaction, but it never appends to another existing run's
   history. Signals to other workflows and child results reach their target when the
   outbox relay appends them, in a transaction of their own.
-- **Lock order** in SQL stores is the execution row first, then its jobs and timers.
+- **Lock order** in SQL stores is the execution row first, then its jobs and timers. A
+  tick that creates a child (or a scheduler firing a run) with `id_conflict_policy`
+  `USE_EXISTING`/`TERMINATE_EXISTING` is a deliberate, narrow exception: it may also lock
+  a *second* execution row -- the one currently occupying the target workflow id -- to
+  attach a watcher or terminate it. This can only contend with another transaction doing
+  the same thing in the opposite direction (two ticks each targeting the other's own
+  workflow id, which requires an explicit, colliding `id=` and is not a shape normal
+  usage produces), and PostgreSQL's own deadlock detector bounds that case to its
+  `deadlock_timeout`, surfacing as an ordinary transaction failure that retries the whole
+  tick exactly like a lease race would. SQLite serializes every writer transaction
+  through one connection lock, so it cannot deadlock at all. See `SQLStore._start_child`
+  and `docs/guides/composition.md`.
 - **A worker with no build id is eligible for every run and step, pinned or not.**
   `claim_tick`/`claim_step`'s `build_id` filter is additive: passing `None` reproduces
   the exact query that existed before worker build versioning, so an unversioned

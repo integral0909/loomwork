@@ -25,7 +25,13 @@ from loomwork.diagnostics import (
     collect_diagnostics,
 )
 from loomwork.history.events import UpdateCompleted
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
+from loomwork.options import (
+    IdConflictPolicy,
+    IdReusePolicy,
+    ResetPoint,
+    VersioningPolicy,
+    as_timedelta,
+)
 from loomwork.retry import RetryPolicy
 from loomwork.schedules.model import (
     OverlapPolicy,
@@ -60,6 +66,7 @@ from loomwork.server.schemas import (
 from loomwork.server.security import authenticate, server_state
 from loomwork.server.state import NamespaceState
 from loomwork.store.records import ExecutionRecord, ExecutionStatus
+from loomwork.visibility.attributes import encode_attributes
 
 _M = TypeVar("_M", bound=BaseModel)
 
@@ -381,7 +388,7 @@ def _parse_timestamp(text: str) -> datetime:
 
 
 def _schedule_service(ns: NamespaceState) -> ScheduleService:
-    return ScheduleService(ns.store, ns.engine.clock)
+    return ScheduleService(ns.store, ns.engine.clock, config=ns.engine.config)
 
 
 async def create_schedule(request: Request) -> JSONResponse:
@@ -402,7 +409,24 @@ async def create_schedule(request: Request) -> JSONResponse:
             end_at=_parse_timestamp(body.end_at) if body.end_at else None,
             jitter=body.jitter,
         ),
-        action=ScheduleAction(body.workflow, default_converter.encode_args(body.args)),
+        action=ScheduleAction(
+            body.workflow,
+            default_converter.encode_args(body.args),
+            id_reuse_policy=(IdReusePolicy(body.id_reuse_policy) if body.id_reuse_policy else None),
+            id_conflict_policy=(
+                IdConflictPolicy(body.id_conflict_policy) if body.id_conflict_policy else None
+            ),
+            versioning_policy=(
+                VersioningPolicy(body.versioning_policy) if body.versioning_policy else None
+            ),
+            run_timeout=as_timedelta(body.run_timeout),
+            execution_timeout=as_timedelta(body.execution_timeout),
+            search_attributes=(
+                encode_attributes(body.search_attributes, ns.engine.config.search_attributes)
+                if body.search_attributes
+                else None
+            ),
+        ),
         policy=SchedulePolicy(
             OverlapPolicy(body.overlap), body.catchup_window, body.pause_on_failure
         ),
@@ -537,6 +561,52 @@ async def update_schedule(request: Request) -> JSONResponse:
             body.pause_on_failure
             if body.pause_on_failure is not None
             else old_policy.pause_on_failure,
+        )
+    if any(
+        v is not None
+        for v in (
+            body.id_reuse_policy,
+            body.id_conflict_policy,
+            body.versioning_policy,
+            body.run_timeout,
+            body.execution_timeout,
+            body.search_attributes,
+        )
+    ):
+        old_action = current.action
+        changes["action"] = ScheduleAction(
+            workflow_name=old_action.workflow_name,
+            args=old_action.args,
+            id_reuse_policy=(
+                IdReusePolicy(body.id_reuse_policy)
+                if body.id_reuse_policy is not None
+                else old_action.id_reuse_policy
+            ),
+            id_conflict_policy=(
+                IdConflictPolicy(body.id_conflict_policy)
+                if body.id_conflict_policy is not None
+                else old_action.id_conflict_policy
+            ),
+            versioning_policy=(
+                VersioningPolicy(body.versioning_policy)
+                if body.versioning_policy is not None
+                else old_action.versioning_policy
+            ),
+            run_timeout=(
+                as_timedelta(body.run_timeout)
+                if body.run_timeout is not None
+                else old_action.run_timeout
+            ),
+            execution_timeout=(
+                as_timedelta(body.execution_timeout)
+                if body.execution_timeout is not None
+                else old_action.execution_timeout
+            ),
+            search_attributes=(
+                encode_attributes(body.search_attributes, ns.engine.config.search_attributes)
+                if body.search_attributes is not None
+                else old_action.search_attributes
+            ),
         )
     if body.note is not None:
         changes["note"] = body.note

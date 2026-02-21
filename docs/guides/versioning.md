@@ -154,6 +154,23 @@ compatible with it) that has no live workers -- join one, declare a compatible b
 `await client.versioning.repin(run_id, other_build_id)` to move it. See
 `docs/operations/deployment.md` for the full rolling-deploy walkthrough.
 
+### Child workflows and schedules
+
+A child workflow's versioning policy is **not inherited** from its parent: it resolves
+fresh from engine configuration, exactly as a top-level `start_workflow` call would,
+unless the parent overrides it explicitly:
+
+```python
+lw.start_child(rewrite_heavy_workflow, versioning_policy=VersioningPolicy.PINNED)
+```
+
+A `PINNED` parent commonly starts `AUTO_UPGRADE` children and vice versa -- coupling them
+would make one workflow's deploy strategy dictate an unrelated one's. The same applies to
+runs a schedule starts: `client.schedules.create(..., versioning_policy=...)` overrides
+the policy for every run that schedule fires; left unset, each resolves independently,
+exactly like an unspecified top-level start (see `docs/guides/composition.md` and
+`docs/guides/schedules.md`).
+
 ## When a run breaks anyway
 
 A run whose history no longer replays does not fail. Its tick fails with a

@@ -152,9 +152,13 @@ heartbeat. This is the cheap design the presence mechanism needed:
   parent commonly starts `AUTO_UPGRADE` children (and vice versa); coupling them would
   make an unrelated workflow's deploy strategy dictate this one's.
 - **Schedules.** Runs a schedule starts go through the same `ExecutionRecord`
-  construction as any other run and default to `AUTO_UPGRADE` today; wiring
-  `ScheduleService` through `EngineConfig.resolve_versioning_policy` is straightforward
-  follow-up work, tracked separately since `schedules/` is outside this change's scope.
+  construction as any other run. `ScheduleService` is now wired through
+  `EngineConfig.resolve_versioning_policy` (an optional `config` constructor argument,
+  used when the service is built from a worker or client that has one); a schedule may
+  also override the policy explicitly per action (`ScheduleAction.versioning_policy`),
+  exactly as `versioning_policy=` does for `start_workflow`. Neither changes the default:
+  a schedule created without either still resolves `AUTO_UPGRADE` unless engine
+  configuration says otherwise, identical to before this follow-up landed.
 
 ## Consequences
 

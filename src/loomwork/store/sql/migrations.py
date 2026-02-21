@@ -419,6 +419,34 @@ _0009_POSTGRES = (
     "CREATE INDEX lw_worker_presence_expires ON lw_worker_presence (expires_at)",
 )
 
+# ---------------------------------------------------------------------------------------
+# 0010: child watchers -- extra parents attached with IdConflictPolicy.USE_EXISTING after
+# a run was already going (see docs/guides/composition.md)
+
+_0010_SQLITE = (
+    """
+    CREATE TABLE lw_child_watchers (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id         TEXT    NOT NULL,
+        watcher_run_id TEXT    NOT NULL,
+        watcher_seq    INTEGER NOT NULL
+    )
+    """,
+    "CREATE INDEX lw_child_watchers_run_id ON lw_child_watchers (run_id)",
+)
+
+_0010_POSTGRES = (
+    """
+    CREATE TABLE lw_child_watchers (
+        id             BIGSERIAL PRIMARY KEY,
+        run_id         TEXT      NOT NULL,
+        watcher_run_id TEXT      NOT NULL,
+        watcher_seq    INTEGER   NOT NULL
+    )
+    """,
+    "CREATE INDEX lw_child_watchers_run_id ON lw_child_watchers (run_id)",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _0001_SQLITE, _0001_POSTGRES),
     Migration(2, "task queues and heartbeats", _0002_SQLITE, _0002_POSTGRES),
@@ -429,6 +457,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "reset lineage and history size", _0007, _0007),
     Migration(8, "step job headers", _0008, _0008),
     Migration(9, "worker build versioning", _0009_SQLITE, _0009_POSTGRES),
+    Migration(10, "child watchers", _0010_SQLITE, _0010_POSTGRES),
 )
 
 

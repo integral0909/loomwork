@@ -186,6 +186,13 @@ All notable changes to this project are documented here. The format follows
   with build versioning, a traced pipeline with OpenTelemetry and interceptors, media
   processing with encrypted payload offloading, and incident recovery with reset, batch
   operations and id policies.
+- Child workflows accept `id_reuse_policy`, `id_conflict_policy` and
+  `versioning_policy`; `USE_EXISTING` attaches the parent to the running run's result
+  without taking ownership of it. Refusals surface as child failures in the parent's
+  history.
+- Schedules can set id policies, a versioning policy, run and execution timeouts and
+  search attributes for the runs they start; existing schedule documents keep today's
+  behaviour (migration 10).
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

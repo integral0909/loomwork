@@ -541,6 +541,8 @@ def child_spec_to_request(spec: ChildSpec, ref: datetime) -> dict[str, Any]:
     return {
         "record": execution_record_to_request(spec.record, ref),
         "started": event_to_wire(spec.started),
+        "id_reuse_policy": spec.id_reuse_policy.value,
+        "id_conflict_policy": spec.id_conflict_policy.value,
     }
 
 
@@ -549,6 +551,12 @@ def child_spec_from_request(data: dict[str, Any], server_now: datetime) -> Child
         return ChildSpec(
             record=execution_record_from_request(_require(data, "record"), server_now),
             started=event_from_wire(_require(data, "started")),
+            id_reuse_policy=id_reuse_policy_from_wire(
+                data.get("id_reuse_policy", IdReusePolicy.ALLOW_DUPLICATE.value)
+            ),
+            id_conflict_policy=id_conflict_policy_from_wire(
+                data.get("id_conflict_policy", IdConflictPolicy.FAIL.value)
+            ),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise WireFormatError(f"malformed child spec: {exc}") from exc

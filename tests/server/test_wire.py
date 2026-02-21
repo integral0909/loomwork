@@ -31,7 +31,7 @@ from loomwork.history.events import (
     WorkflowFailed,
     WorkflowStarted,
 )
-from loomwork.options import StepOptions, VersioningPolicy
+from loomwork.options import IdConflictPolicy, IdReusePolicy, StepOptions, VersioningPolicy
 from loomwork.remote import wire
 from loomwork.retry import RetryPolicy
 from loomwork.schedules.model import (
@@ -512,3 +512,34 @@ def test_schedule_state_round_trip_request() -> None:
     ref = T0 + timedelta(days=3)
     wire_form = wire.schedule_state_to_request(state, ref)
     assert wire.schedule_state_from_request(wire_form, ref) == state
+
+
+def test_schedule_action_round_trip_with_new_policies() -> None:
+    """See ADR-0006 and docs/guides/schedules.md: every field here is additive."""
+    action = ScheduleAction(
+        "wf",
+        [PAYLOAD],
+        id_reuse_policy=IdReusePolicy.REJECT_DUPLICATE,
+        id_conflict_policy=IdConflictPolicy.TERMINATE_EXISTING,
+        versioning_policy=VersioningPolicy.PINNED,
+        run_timeout=timedelta(minutes=5),
+        execution_timeout=timedelta(hours=1),
+        search_attributes={"tier": {"type": "string", "value": "gold"}},
+    )
+    state = make_schedule(action=action)
+    assert wire.schedule_state_from_wire(wire.schedule_state_to_wire(state)) == state
+    ref = T0 + timedelta(days=3)
+    wire_form = wire.schedule_state_to_request(state, ref)
+    assert wire.schedule_state_from_request(wire_form, ref) == state
+
+
+def test_schedule_action_from_dict_without_new_fields_is_backward_compatible() -> None:
+    """A schedule document written before this feature existed decodes with today's
+    default behaviour: ALLOW_DUPLICATE/FAIL, no versioning override, no timeouts."""
+    action = ScheduleAction.from_dict({"workflow_name": "wf", "args": []})
+    assert action.id_reuse_policy is None
+    assert action.id_conflict_policy is None
+    assert action.versioning_policy is None
+    assert action.run_timeout is None
+    assert action.execution_timeout is None
+    assert action.search_attributes is None

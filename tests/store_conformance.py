@@ -944,7 +944,11 @@ class StoreConformance:
             decisions=[child],
             new_children=[
                 ChildSpec(
-                    record=record("r1.c1", workflow_id="child-1", name="child"),
+                    record=dataclasses.replace(
+                        record("r1.c1", workflow_id="child-1", name="child"),
+                        parent_run_id="r1",
+                        parent_seq=1,
+                    ),
                     started=WorkflowStarted(
                         workflow_name="child",
                         workflow_id="child-1",
@@ -1064,13 +1068,26 @@ class StoreConformance:
     # ------------------------------------------------------------------ children and outbox
 
     def child_spec(
-        self, parent: str, seq: int, workflow_id: str, policy: str = "terminate"
+        self,
+        parent: str,
+        seq: int,
+        workflow_id: str,
+        policy: str = "terminate",
+        *,
+        run_id: str | None = None,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
     ) -> ChildSpec:
-        rec = record(f"{parent}.c{seq}", workflow_id=workflow_id, name="child")
+        rec = record(run_id or f"{parent}.c{seq}", workflow_id=workflow_id, name="child")
         rec.parent_run_id = parent
         rec.parent_seq = seq
         rec.parent_close_policy = policy
-        return ChildSpec(record=rec, started=started(rec))
+        return ChildSpec(
+            record=rec,
+            started=started(rec),
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
+        )
 
     async def test_children_are_created_with_the_tick(self, store: Store) -> None:
         await self.create(store)
@@ -1102,6 +1119,220 @@ class StoreConformance:
         assert isinstance(failed, ChildFailed)
         assert failed.failure.type == "ChildWorkflowAlreadyStarted"
         assert (await store.get_execution("r1")).tick_pending
+
+    async def test_child_id_reuse_reject_duplicate(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        # "kid" is used once and closes; a second child asking for the same id under
+        # REJECT_DUPLICATE must never start, deterministically, on every store.
+        await self.commit(store, "r1", consumed=1, new_children=[self.child_spec("r1", 1, "kid")])
+        await store.terminate("r1.c1", "done", T0)
+        await store.append_input("r1", TimerFired(seq=5), T0)
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=2,
+            new_children=[
+                self.child_spec(
+                    "r1",
+                    2,
+                    "kid",
+                    run_id="r1.c2",
+                    id_reuse_policy=IdReusePolicy.REJECT_DUPLICATE,
+                )
+            ],
+        )
+        with pytest.raises(NotFoundError):
+            await store.get_execution("r1.c2")
+        failed = (await store.load_history("r1"))[-1]
+        assert isinstance(failed, ChildFailed)
+        assert failed.failure.type == "ChildWorkflowIdReuseRejected"
+        assert failed.seq == 2
+
+    async def test_child_id_reuse_allow_duplicate_failed_only(self, store: Store) -> None:
+        await self.create(store)
+        await self.claim(store)
+        await self.commit(store, "r1", consumed=1, new_children=[self.child_spec("r1", 1, "kid")])
+        await store.claim_tick("w2", T0, LEASE, ["child"])
+        await store.complete_tick(
+            "r1.c1",
+            "w2",
+            TickOutcome(
+                "w2",
+                1,
+                T0,
+                decisions=[WorkflowCompleted(result=PAYLOAD)],
+                close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD),
+            ),
+            T0,
+        )
+        await store.append_input("r1", TimerFired(seq=5), T0)
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=2,
+            new_children=[
+                self.child_spec(
+                    "r1",
+                    2,
+                    "kid",
+                    run_id="r1.c2",
+                    id_reuse_policy=IdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+                )
+            ],
+        )
+        with pytest.raises(NotFoundError):
+            await store.get_execution("r1.c2")
+        failed = (await store.load_history("r1"))[-1]
+        assert isinstance(failed, ChildFailed)
+        assert failed.failure.type == "ChildWorkflowIdReuseRejected"
+
+    async def test_child_id_conflict_terminate_existing(self, store: Store) -> None:
+        await self.create(store, "busy", workflow_id="kid")
+        await self.create(store)
+        await store.claim_tick("w1", T0, LEASE, ["wf"])  # claims one of them
+        rec = await store.get_execution("r1")
+        if rec.lease_owner is None:
+            await store.complete_tick("busy", "w1", TickOutcome("w1", 1, T0), T0)
+            await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            new_children=[
+                self.child_spec(
+                    "r1", 1, "kid", id_conflict_policy=IdConflictPolicy.TERMINATE_EXISTING
+                )
+            ],
+        )
+        old = await store.get_execution("busy")
+        assert old.status is ExecutionStatus.TERMINATED
+        assert old.close_reason == "superseded by child id conflict policy"
+        child = await store.get_execution("r1.c1")
+        assert child.status is ExecutionStatus.RUNNING
+        assert (child.parent_run_id, child.parent_seq) == ("r1", 1)
+        assert not any(isinstance(e, ChildFailed) for e in await store.load_history("r1"))
+
+    async def test_child_id_conflict_use_existing_attaches_and_delivers_result(
+        self, store: Store
+    ) -> None:
+        # The "existing" run need not be a child at all, and need not have been started
+        # by this parent -- USE_EXISTING just asks to be told how it turns out.
+        await self.create(store, "busy", workflow_id="kid", name="busy")
+        await self.create(store)
+        await store.claim_tick("w1", T0, LEASE, ["wf"])
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            new_children=[
+                self.child_spec("r1", 1, "kid", id_conflict_policy=IdConflictPolicy.USE_EXISTING)
+            ],
+        )
+        # No new run was created for the attachment.
+        with pytest.raises(NotFoundError):
+            await store.get_execution("r1.c1")
+        assert not any(isinstance(e, ChildFailed) for e in await store.load_history("r1"))
+        await store.claim_tick("w2", T0, LEASE, ["busy"])
+        await store.complete_tick(
+            "busy",
+            "w2",
+            TickOutcome(
+                "w2",
+                1,
+                T0,
+                decisions=[WorkflowCompleted(result=PAYLOAD)],
+                close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD),
+            ),
+            T0,
+        )
+        assert await store.relay_outbox(T0) == 1
+        delivered = (await store.load_history("r1"))[-1]
+        assert isinstance(delivered, ChildCompleted)
+        assert (delivered.seq, delivered.result) == (1, PAYLOAD)
+
+    async def test_child_id_conflict_use_existing_already_closed_by_attach_time(
+        self, store: Store
+    ) -> None:
+        # A race: the target closes between the parent's unlocked read (at live-tick
+        # time, outside the store) and complete_tick's own lookup. Both stores must
+        # still deliver the result rather than silently dropping the attachment.
+        await self.create(store, "busy", workflow_id="kid")
+        await store.claim_tick("w2", T0, LEASE, ["wf"])
+        await store.complete_tick(
+            "busy",
+            "w2",
+            TickOutcome(
+                "w2",
+                1,
+                T0,
+                decisions=[WorkflowCompleted(result=PAYLOAD)],
+                close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD),
+            ),
+            T0,
+        )
+        await self.create(store)
+        await self.claim(store)
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            new_children=[
+                self.child_spec("r1", 1, "kid", id_conflict_policy=IdConflictPolicy.USE_EXISTING)
+            ],
+        )
+        # Nothing was running any more, so this is ordinary id-reuse territory (default
+        # ALLOW_DUPLICATE): a fresh child starts rather than attaching.
+        child = await store.get_execution("r1.c1")
+        assert child.status is ExecutionStatus.RUNNING
+
+    async def test_child_watchers_carry_over_continue_as_new(self, store: Store) -> None:
+        await self.create(store, "busy", workflow_id="kid", name="busy")
+        await self.create(store)
+        await store.claim_tick("w1", T0, LEASE, ["wf"])
+        await self.commit(
+            store,
+            "r1",
+            consumed=1,
+            new_children=[
+                self.child_spec("r1", 1, "kid", id_conflict_policy=IdConflictPolicy.USE_EXISTING)
+            ],
+        )
+        await store.claim_tick("w2", T0, LEASE, ["busy"])
+        successor = record("busy-2", workflow_id="kid", name="busy")
+        await store.complete_tick(
+            "busy",
+            "w2",
+            TickOutcome(
+                "w2",
+                1,
+                T0,
+                decisions=[],
+                close=CloseOutcome(ExecutionStatus.CONTINUED_AS_NEW, continued_run_id="busy-2"),
+                continuation=ChildSpec(successor, started(successor)),
+            ),
+            T0,
+        )
+        assert await store.outbox_size() == 0  # not delivered yet: the chain continues
+        await store.claim_tick("w3", T0, LEASE, ["busy"])
+        await store.complete_tick(
+            "busy-2",
+            "w3",
+            TickOutcome(
+                "w3",
+                1,
+                T0,
+                decisions=[WorkflowCompleted(result=PAYLOAD)],
+                close=CloseOutcome(ExecutionStatus.COMPLETED, result=PAYLOAD),
+            ),
+            T0,
+        )
+        assert await store.relay_outbox(T0) == 1
+        delivered = (await store.load_history("r1"))[-1]
+        assert isinstance(delivered, ChildCompleted)
+        assert (delivered.seq, delivered.result) == (1, PAYLOAD)
 
     async def test_child_result_reaches_parent_through_outbox(self, store: Store) -> None:
         await self.create(store)
@@ -1461,6 +1692,69 @@ class StoreConformance:
         with pytest.raises(NotFoundError):
             await store.get_execution("dup-run")
         assert await store.outbox_size() == 1
+
+    async def test_fire_schedule_use_existing_adopts_the_running_run(self, store: Store) -> None:
+        await self.create(store, "existing", workflow_id="s1@1")
+        created = await store.create_schedule(self.schedule(), T0)
+        rec = record("dup-run", workflow_id="s1@1")
+        run = ScheduledRun(T0, T0, "s1@1", "dup-run")
+        fired = await store.fire_schedule(
+            created.with_(running=(run,), recent=(run,), total_started=1),
+            1,
+            [ChildSpec(rec, started(rec), id_conflict_policy=IdConflictPolicy.USE_EXISTING)],
+            [],
+            T0,
+        )
+        # The schedule now tracks "existing" (the run it actually attached to), not the
+        # run id it originally planned to create.
+        assert [r.run_id for r in fired.running] == ["existing"]
+        assert [r.run_id for r in fired.recent] == ["existing"]
+        assert fired.total_started == 1
+        with pytest.raises(NotFoundError):
+            await store.get_execution("dup-run")
+
+    async def test_fire_schedule_terminate_existing_replaces_the_running_run(
+        self, store: Store
+    ) -> None:
+        await self.create(store, "existing", workflow_id="s1@1")
+        created = await store.create_schedule(self.schedule(), T0)
+        rec = record("replacement-run", workflow_id="s1@1")
+        run = ScheduledRun(T0, T0, "s1@1", "replacement-run")
+        fired = await store.fire_schedule(
+            created.with_(running=(run,), recent=(run,), total_started=1),
+            1,
+            [ChildSpec(rec, started(rec), id_conflict_policy=IdConflictPolicy.TERMINATE_EXISTING)],
+            [],
+            T0,
+        )
+        assert [r.run_id for r in fired.running] == ["replacement-run"]
+        assert fired.total_started == 1
+        old = await store.get_execution("existing")
+        assert old.status is ExecutionStatus.TERMINATED
+        assert old.close_reason == "superseded by schedule id conflict policy"
+        assert (await store.get_execution("replacement-run")).status is ExecutionStatus.RUNNING
+
+    async def test_fire_schedule_id_reuse_reject_duplicate(self, store: Store) -> None:
+        created = await store.create_schedule(self.schedule(), T0)
+        first = record("first-run", workflow_id="s1@1")
+        first_fired = await store.fire_schedule(
+            created, 1, [ChildSpec(first, started(first))], [], T0
+        )
+        await store.terminate("first-run", "done", T0)
+        second = record("second-run", workflow_id="s1@1")
+        run = ScheduledRun(T0, T0, "s1@1", "second-run")
+        fired = await store.fire_schedule(
+            first_fired.with_(running=(run,), recent=(run,), total_started=2),
+            2,
+            [ChildSpec(second, started(second), id_reuse_policy=IdReusePolicy.REJECT_DUPLICATE)],
+            [],
+            T0,
+        )
+        assert fired.running == ()
+        assert fired.recent[-1].status == "id_reuse_rejected"
+        assert fired.total_started == 1
+        with pytest.raises(NotFoundError):
+            await store.get_execution("second-run")
 
     # ------------------------------------------------------------------ timers
 

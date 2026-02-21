@@ -291,6 +291,15 @@ class ChildScheduled(Event):
     headers: dict[str, str] = field(default_factory=dict)
     """The context handed to the child's ``WorkflowStarted``, derived deterministically
     from the parent run id and ``seq``."""
+    id_reuse_policy: str = "allow_duplicate"
+    """:class:`~loomwork.options.IdReusePolicy` value for this child; see
+    :func:`loomwork.start_child`."""
+    id_conflict_policy: str = "fail"
+    """:class:`~loomwork.options.IdConflictPolicy` value for this child."""
+    versioning_policy: str = ""
+    """Explicit :class:`~loomwork.options.VersioningPolicy` override for this child, or
+    ``""`` to resolve it from engine configuration exactly as a top-level
+    ``start_workflow`` call would (see ``docs/adr/0006-worker-build-versioning.md``)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

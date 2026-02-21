@@ -557,6 +557,9 @@ class WorkflowInstance:
         *,
         workflow_id: str | None,
         parent_close_policy: str,
+        id_reuse_policy: str = "allow_duplicate",
+        id_conflict_policy: str = "fail",
+        versioning_policy: str = "",
     ) -> tuple[asyncio.Future[Any], str, str]:
         payloads = self.converter.encode_args(args)
         self._child_seq += 1
@@ -574,6 +577,9 @@ class WorkflowInstance:
                 args=payloads,
                 parent_close_policy=parent_close_policy,
                 headers=self._derived_headers("child", seq),
+                id_reuse_policy=id_reuse_policy,
+                id_conflict_policy=id_conflict_policy,
+                versioning_policy=versioning_policy,
             )
         )
         return future, child_workflow_id, run_id

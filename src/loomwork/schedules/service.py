@@ -17,11 +17,13 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from loomwork.clock import Clock
+from loomwork.engine.config import EngineConfig
 from loomwork.errors import NotFoundError, ScheduleConflictError
 from loomwork.history.events import WorkflowStarted
 from loomwork.ids import new_id
 from loomwork.observability.telemetry import NoopTelemetry, Telemetry
-from loomwork.schedules.model import ScheduledRun, ScheduleState
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy
+from loomwork.schedules.model import ScheduleAction, ScheduledRun, ScheduleState
 from loomwork.schedules.planner import (
     SchedulePlan,
     plan,
@@ -42,10 +44,21 @@ logger = logging.getLogger("loomwork.schedules")
 
 
 class ScheduleService:
-    def __init__(self, store: Store, clock: Clock, telemetry: Telemetry | None = None) -> None:
+    def __init__(
+        self,
+        store: Store,
+        clock: Clock,
+        telemetry: Telemetry | None = None,
+        config: EngineConfig | None = None,
+    ) -> None:
         self.store = store
         self.clock = clock
         self.telemetry: Telemetry = telemetry or NoopTelemetry()
+        #: Resolves ScheduleAction.versioning_policy when the action itself does not
+        #: override it, exactly as an unspecified start_workflow call would (see
+        #: docs/adr/0006-worker-build-versioning.md). ``None`` (an app with no engine at
+        #: hand, such as the console) falls back to VersioningPolicy.AUTO_UPGRADE.
+        self.config = config
         self.evaluations = 0
         self.runs_started = 0
 
@@ -95,10 +108,18 @@ class ScheduleService:
         )
         return saved
 
+    def _versioning_policy(self, action: ScheduleAction) -> VersioningPolicy:
+        if self.config is not None:
+            return self.config.resolve_versioning_policy(
+                action.workflow_name, action.versioning_policy
+            )
+        return action.versioning_policy or VersioningPolicy.AUTO_UPGRADE
+
     async def apply(
         self, result: SchedulePlan, expected_version: int, now: datetime
     ) -> ScheduleState:
         state = result.state
+        action = state.action
         specs: list[ChildSpec] = []
         started: list[ScheduledRun] = []
         for start in result.starts:
@@ -106,20 +127,33 @@ class ScheduleService:
             record = ExecutionRecord(
                 run_id=run_id,
                 workflow_id=start.workflow_id,
-                workflow_name=state.action.workflow_name,
+                workflow_name=action.workflow_name,
                 status=ExecutionStatus.RUNNING,
                 created_at=now,
+                versioning_policy=self._versioning_policy(action),
             )
             event = WorkflowStarted(
-                workflow_name=state.action.workflow_name,
+                workflow_name=action.workflow_name,
                 workflow_id=start.workflow_id,
                 run_id=run_id,
-                args=list(state.action.args),
+                args=list(action.args),
                 random_seed=secrets.randbits(63),
                 schedule_id=state.schedule_id,
                 scheduled_time=start.nominal_time,
+                run_timeout=(action.run_timeout.total_seconds() if action.run_timeout else None),
+                execution_deadline=(
+                    now + action.execution_timeout if action.execution_timeout else None
+                ),
+                search_attributes=dict(action.search_attributes or {}),
             )
-            specs.append(ChildSpec(record=record, started=event))
+            specs.append(
+                ChildSpec(
+                    record=record,
+                    started=event,
+                    id_reuse_policy=action.id_reuse_policy or IdReusePolicy.ALLOW_DUPLICATE,
+                    id_conflict_policy=action.id_conflict_policy or IdConflictPolicy.FAIL,
+                )
+            )
             started.append(ScheduledRun(start.nominal_time, now, start.workflow_id, run_id))
         outbox: list[OutboxMessage] = [
             OutboxMessage(
@@ -136,11 +170,14 @@ class ScheduleService:
             )
             for run_id in result.terminate_run_ids
         ]
+        before_total = state.total_started
         state = record_starts(state, started, now) if started else state.with_(updated_at=now)
         saved = await self.store.fire_schedule(state, expected_version, specs, outbox, now)
         self.evaluations += 1
-        started_ids = {run.run_id for run in started}
-        self.runs_started += sum(1 for run in saved.running if run.run_id in started_ids)
+        # total_started already reflects every conflict dropped by fire_schedule (see
+        # drop_unstarted); an attachment (USE_EXISTING) or a replacement
+        # (TERMINATE_EXISTING) still counts as started, so this stays accurate for both.
+        self.runs_started += saved.total_started - before_total
         return saved
 
     # ------------------------------------------------------------------ management

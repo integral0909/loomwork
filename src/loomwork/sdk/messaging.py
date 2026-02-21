@@ -47,7 +47,7 @@ from typing import Any, Generic, TypeVar, cast, overload
 from pydantic import TypeAdapter, ValidationError
 
 from loomwork.errors import PayloadError
-from loomwork.options import ParentClosePolicy
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ParentClosePolicy, VersioningPolicy
 from loomwork.runtime.context import current_instance, current_instance_or_none
 from loomwork.sdk.conditions import notifying
 from loomwork.sdk.definitions import (
@@ -272,6 +272,9 @@ def start_child(
     *args: Any,
     id: str | None = None,
     parent_close_policy: ParentClosePolicy | str = ParentClosePolicy.TERMINATE,
+    id_reuse_policy: IdReusePolicy | str = IdReusePolicy.ALLOW_DUPLICATE,
+    id_conflict_policy: IdConflictPolicy | str = IdConflictPolicy.FAIL,
+    versioning_policy: VersioningPolicy | str | None = None,
 ) -> ChildHandle[T]: ...
 
 
@@ -281,6 +284,9 @@ def start_child(
     *args: Any,
     id: str | None = None,
     parent_close_policy: ParentClosePolicy | str = ParentClosePolicy.TERMINATE,
+    id_reuse_policy: IdReusePolicy | str = IdReusePolicy.ALLOW_DUPLICATE,
+    id_conflict_policy: IdConflictPolicy | str = IdConflictPolicy.FAIL,
+    versioning_policy: VersioningPolicy | str | None = None,
 ) -> ChildHandle[Any]: ...
 
 
@@ -289,6 +295,9 @@ def start_child(
     *args: Any,
     id: str | None = None,
     parent_close_policy: ParentClosePolicy | str = ParentClosePolicy.TERMINATE,
+    id_reuse_policy: IdReusePolicy | str = IdReusePolicy.ALLOW_DUPLICATE,
+    id_conflict_policy: IdConflictPolicy | str = IdConflictPolicy.FAIL,
+    versioning_policy: VersioningPolicy | str | None = None,
 ) -> ChildHandle[Any]:
     """Start ``workflow`` as a child of the running workflow. *Workflow-only.*
 
@@ -298,13 +307,42 @@ def start_child(
 
     ``parent_close_policy`` decides what happens to the child if the parent closes
     first: ``terminate`` (default), ``request_cancel`` or ``abandon``.
+
+    ``id_reuse_policy`` and ``id_conflict_policy`` govern the child's workflow id exactly
+    as the same-named arguments do for :meth:`~loomwork.engine.engine.Engine.
+    start_workflow` (see :class:`~loomwork.options.IdReusePolicy` and
+    :class:`~loomwork.options.IdConflictPolicy`), with one difference: since a child
+    cannot raise into the caller the way starting a top-level run can, every rejection
+    (``FAIL`` on a running conflict, ``REJECT_DUPLICATE``/``ALLOW_DUPLICATE_FAILED_ONLY``
+    on reuse) surfaces the same way an ordinary child failure does -- ``ChildHandle``
+    raises :class:`~loomwork.errors.ChildWorkflowError` when awaited. ``USE_EXISTING``
+    attaches this call to whatever run currently has the target workflow id (which need
+    not be one of this workflow's own children, or a child at all) and delivers its
+    eventual result here, without creating a new run or affecting the existing run's own
+    parent-close policy; ``TERMINATE_EXISTING`` terminates it and starts the child in its
+    place, atomically. See ``docs/guides/composition.md``.
+
+    ``versioning_policy`` overrides :attr:`~loomwork.engine.config.EngineConfig.
+    workflow_versioning_policy`/``default_versioning_policy`` for this child only, exactly
+    as the same argument does for ``start_workflow``; unset, the child resolves its
+    policy fresh from engine configuration, independent of the parent's own policy (see
+    ``docs/adr/0006-worker-build-versioning.md``).
     """
     policy = ParentClosePolicy(parent_close_policy)
+    reuse = IdReusePolicy(id_reuse_policy)
+    conflict = IdConflictPolicy(id_conflict_policy)
+    version = None if versioning_policy is None else VersioningPolicy(versioning_policy)
     instance = current_instance()
     definition = as_definition(workflow)
     positional = bind_positional(definition.fn, args, {})
     future, workflow_id, run_id = instance.start_child(
-        definition, positional, workflow_id=id, parent_close_policy=policy.value
+        definition,
+        positional,
+        workflow_id=id,
+        parent_close_policy=policy.value,
+        id_reuse_policy=reuse.value,
+        id_conflict_policy=conflict.value,
+        versioning_policy=version.value if version is not None else "",
     )
     return ChildHandle(future, workflow_id, run_id)
 
