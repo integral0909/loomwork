@@ -172,11 +172,11 @@ Handle it like any other durable failure:
 
 ```python
 @lw.workflow
-async def long_running(...) -> None:
-    while not done():
-        await do_work_chunk()
+async def long_running(cursor: str | None) -> None:
+    while cursor is not None:
+        cursor = await process_page(cursor)  # a step returning the next cursor
         if lw.continue_as_new_suggested():
-            lw.continue_as_new(...)
+            lw.continue_as_new(cursor)
 ```
 
 If `continue_as_new_suggested()` (driven by `continue_as_new_after_events`, a separate,

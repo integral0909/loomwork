@@ -87,7 +87,7 @@ example due to an encoding problem).
 syntax error would look "clean" simply because nothing in it was ever checked.
 
 **Bad:**
-```python
+```text
 def process(:  # syntax error
     ...
 ```

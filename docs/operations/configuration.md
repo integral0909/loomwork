@@ -56,6 +56,14 @@ Never put passwords in configuration files: use `PGPASSFILE`, environment variab
 your platform's secret store. `loomwork.store.redact_url` removes passwords from URLs
 before they are logged.
 
+### SQLite's write ceiling
+
+A SQLite store serializes every write transaction through one connection, which is what
+makes it immune to deadlocks, and it is also a throughput ceiling: adding workers or
+claimers does not add write capacity, and claim-heavy workloads plateau early (see the
+`store_contention` numbers in [performance](../performance.md)). Choose PostgreSQL once a
+single process's throughput is not enough, or when several machines need to share work.
+
 ### Sizing the PostgreSQL pool
 
 A worker needs roughly one connection per concurrently executing tick or step attempt
