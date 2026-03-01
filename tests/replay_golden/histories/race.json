@@ -1,0 +1,123 @@
+{
+  "events": [
+    {
+      "args": [],
+      "attempt": 1,
+      "continued_from": "",
+      "execution_deadline": null,
+      "headers": {},
+      "id": 1,
+      "kind": "workflow_started",
+      "parent_run_id": "",
+      "parent_workflow_id": "",
+      "random_seed": 5974047757446714937,
+      "retry_policy": null,
+      "run_id": "01M3NNHHNVFWWRQ293S7FNZXBC",
+      "run_timeout": null,
+      "schedule_id": "",
+      "scheduled_time": null,
+      "search_attributes": {},
+      "ts": "2024-01-01T00:00:00+00:00",
+      "workflow_id": "golden-race",
+      "workflow_name": "golden.race"
+    },
+    {
+      "build_id": "",
+      "code_version": "80c8a2457e0b",
+      "consumed_through": 1,
+      "id": 2,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75873:FNZXBB"
+    },
+    {
+      "fire_at": "2024-01-01T01:00:00+00:00",
+      "id": 3,
+      "kind": "timer_started",
+      "seq": 1,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "channel": "poke",
+      "id": 4,
+      "kind": "signal_received",
+      "message_id": "",
+      "payload": {
+        "data": "ImhpIg==",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "sender": "",
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "80c8a2457e0b",
+      "consumed_through": 4,
+      "id": 5,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75873:FNZXBB"
+    },
+    {
+      "id": 6,
+      "kind": "timer_canceled",
+      "seq": 1,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "args": [],
+      "headers": {},
+      "id": 7,
+      "kind": "step_scheduled",
+      "options": {},
+      "seq": 1,
+      "step_name": "golden.slow",
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "fire_at": "2024-01-01T00:00:00.001000+00:00",
+      "id": 8,
+      "kind": "timer_started",
+      "seq": 2,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "id": 9,
+      "kind": "timer_fired",
+      "seq": 2,
+      "ts": "2024-01-01T00:00:01+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "80c8a2457e0b",
+      "consumed_through": 9,
+      "id": 10,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:01+00:00",
+      "ts": "2024-01-01T00:00:01+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75873:FNZXBB"
+    },
+    {
+      "id": 11,
+      "kind": "step_cancel_requested",
+      "seq": 1,
+      "ts": "2024-01-01T00:00:01+00:00"
+    },
+    {
+      "id": 12,
+      "kind": "workflow_completed",
+      "result": {
+        "data": "ImhpLCBzdGVwIGNhbmNlbGxlZCI=",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "ts": "2024-01-01T00:00:01+00:00"
+    }
+  ],
+  "format_version": 1
+}

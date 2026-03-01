@@ -1,0 +1,42 @@
+{
+  "events": [
+    {
+      "args": [],
+      "attempt": 1,
+      "continued_from": "",
+      "execution_deadline": null,
+      "headers": {},
+      "id": 1,
+      "kind": "workflow_started",
+      "parent_run_id": "",
+      "parent_workflow_id": "",
+      "random_seed": 3014587673766163703,
+      "retry_policy": null,
+      "run_id": "01M3NNGQ3MC11N495PY690C44Z",
+      "run_timeout": 60.0,
+      "schedule_id": "",
+      "scheduled_time": null,
+      "search_attributes": {},
+      "ts": "2024-01-01T00:00:00+00:00",
+      "workflow_id": "golden-timed-out",
+      "workflow_name": "golden.waiter"
+    },
+    {
+      "build_id": "",
+      "code_version": "8936c0ae2d4c",
+      "consumed_through": 1,
+      "id": 2,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:90C44V"
+    },
+    {
+      "id": 3,
+      "kind": "workflow_timed_out",
+      "reason": "run exceeded its timeout",
+      "ts": "2024-01-01T00:01:00+00:00"
+    }
+  ],
+  "format_version": 1
+}

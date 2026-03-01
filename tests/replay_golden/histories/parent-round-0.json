@@ -1,0 +1,167 @@
+{
+  "events": [
+    {
+      "args": [
+        {
+          "data": "MQ==",
+          "metadata": {
+            "encoding": "json/plain"
+          }
+        }
+      ],
+      "attempt": 1,
+      "continued_from": "01M3NNGQ3AD4HF3BKKMWX5TZRP",
+      "execution_deadline": null,
+      "headers": {},
+      "id": 1,
+      "kind": "workflow_started",
+      "parent_run_id": "",
+      "parent_workflow_id": "",
+      "random_seed": 1731434597781544761,
+      "retry_policy": null,
+      "run_id": "01M3NNGQ3F7SCCM43TWBBRV0DJ",
+      "run_timeout": null,
+      "schedule_id": "",
+      "scheduled_time": null,
+      "search_attributes": {},
+      "ts": "2024-01-01T00:00:00+00:00",
+      "workflow_id": "golden-parent",
+      "workflow_name": "golden.parent"
+    },
+    {
+      "build_id": "",
+      "code_version": "ee52d658a4e0",
+      "consumed_through": 1,
+      "id": 2,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SR74W8"
+    },
+    {
+      "args": [
+        {
+          "data": "NA==",
+          "metadata": {
+            "encoding": "json/plain"
+          }
+        }
+      ],
+      "headers": {},
+      "id": 3,
+      "id_conflict_policy": "fail",
+      "id_reuse_policy": "allow_duplicate",
+      "kind": "child_scheduled",
+      "parent_close_policy": "terminate",
+      "run_id": "01M3NNGQ3F7SCCM43TWBBRV0DJ.c1",
+      "seq": 1,
+      "ts": "2024-01-01T00:00:00+00:00",
+      "versioning_policy": "",
+      "workflow_id": "golden-child-1",
+      "workflow_name": "golden.child"
+    },
+    {
+      "id": 4,
+      "kind": "child_completed",
+      "result": {
+        "data": "NDA=",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "seq": 1,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "ee52d658a4e0",
+      "consumed_through": 4,
+      "id": 5,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SR74W8"
+    },
+    {
+      "args": [
+        {
+          "data": "LTE=",
+          "metadata": {
+            "encoding": "json/plain"
+          }
+        }
+      ],
+      "headers": {},
+      "id": 6,
+      "id_conflict_policy": "fail",
+      "id_reuse_policy": "allow_duplicate",
+      "kind": "child_scheduled",
+      "parent_close_policy": "terminate",
+      "run_id": "01M3NNGQ3F7SCCM43TWBBRV0DJ.c2",
+      "seq": 2,
+      "ts": "2024-01-01T00:00:00+00:00",
+      "versioning_policy": "",
+      "workflow_id": "golden-bad-child-1",
+      "workflow_name": "golden.child"
+    },
+    {
+      "failure": {
+        "attributes": {
+          "run_id": "01M3NNGQ3F7SCCM43TWBBRV0DJ.c2",
+          "status": "failed",
+          "workflow_id": "golden-bad-child-1"
+        },
+        "cause": {
+          "kind": "application",
+          "message": "negative",
+          "stack_trace": "Traceback (most recent call last):\n  File \"/Users/fredrik/Downloads/Rustlabs/loomwork/tests/replay_golden/corpus.py\", line 88, in child\n    raise lw.ApplicationError(\"negative\", type=\"Negative\")\nloomwork.errors.ApplicationError: negative\n",
+          "type": "Negative"
+        },
+        "kind": "child",
+        "message": "child workflow 'golden.child' (golden-bad-child-1) failed: negative",
+        "type": "ChildWorkflowError"
+      },
+      "id": 7,
+      "kind": "child_failed",
+      "seq": 2,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "ee52d658a4e0",
+      "consumed_through": 7,
+      "id": 8,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SR74W8"
+    },
+    {
+      "channel": "go",
+      "id": 9,
+      "kind": "external_signal_scheduled",
+      "message_id": "01M3NNGQ3F7SCCM43TWBBRV0DJ:signal:1",
+      "payload": {
+        "data": "ImZyb20gcGFyZW50IDEi",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "seq": 1,
+      "ts": "2024-01-01T00:00:00+00:00",
+      "workflow_id": "golden-listener"
+    },
+    {
+      "id": 10,
+      "kind": "workflow_completed",
+      "result": {
+        "data": "WzQwLCJDaGlsZFdvcmtmbG93RXJyb3IiXQ==",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "ts": "2024-01-01T00:00:00+00:00"
+    }
+  ],
+  "format_version": 1
+}

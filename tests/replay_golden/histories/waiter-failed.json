@@ -1,0 +1,71 @@
+{
+  "events": [
+    {
+      "args": [],
+      "attempt": 1,
+      "continued_from": "",
+      "execution_deadline": null,
+      "headers": {},
+      "id": 1,
+      "kind": "workflow_started",
+      "parent_run_id": "",
+      "parent_workflow_id": "",
+      "random_seed": 4191135995835926601,
+      "retry_policy": null,
+      "run_id": "01M3NNGQ3MC11N495PY690C44W",
+      "run_timeout": null,
+      "schedule_id": "",
+      "scheduled_time": null,
+      "search_attributes": {},
+      "ts": "2024-01-01T00:00:00+00:00",
+      "workflow_id": "golden-failed",
+      "workflow_name": "golden.waiter"
+    },
+    {
+      "build_id": "",
+      "code_version": "8936c0ae2d4c",
+      "consumed_through": 1,
+      "id": 2,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:90C44V"
+    },
+    {
+      "channel": "go",
+      "id": 3,
+      "kind": "signal_received",
+      "message_id": "",
+      "payload": {
+        "data": "ImZhaWwi",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "sender": "",
+      "ts": "2024-01-01T00:01:00+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "8936c0ae2d4c",
+      "consumed_through": 3,
+      "id": 4,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:01:00+00:00",
+      "ts": "2024-01-01T00:01:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:90C44V"
+    },
+    {
+      "failure": {
+        "kind": "application",
+        "message": "asked to fail",
+        "stack_trace": "Traceback (most recent call last):\n  File \"/Users/fredrik/Downloads/Rustlabs/loomwork/tests/replay_golden/corpus.py\", line 118, in waiter\n    raise lw.ApplicationError(\"asked to fail\", type=\"Asked\")\nloomwork.errors.ApplicationError: asked to fail\n",
+        "type": "Asked"
+      },
+      "id": 5,
+      "kind": "workflow_failed",
+      "ts": "2024-01-01T00:01:00+00:00"
+    }
+  ],
+  "format_version": 1
+}

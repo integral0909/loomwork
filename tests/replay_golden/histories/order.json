@@ -1,0 +1,247 @@
+{
+  "events": [
+    {
+      "args": [
+        {
+          "data": "Im8tMSI=",
+          "metadata": {
+            "encoding": "json/plain"
+          }
+        }
+      ],
+      "attempt": 1,
+      "continued_from": "",
+      "execution_deadline": null,
+      "headers": {},
+      "id": 1,
+      "kind": "workflow_started",
+      "parent_run_id": "",
+      "parent_workflow_id": "",
+      "random_seed": 8290232559989490231,
+      "retry_policy": null,
+      "run_id": "01M3NNGPVFE9CKZJMTWC39ZHDS",
+      "run_timeout": null,
+      "schedule_id": "",
+      "scheduled_time": null,
+      "search_attributes": {},
+      "ts": "2024-01-01T00:00:00+00:00",
+      "workflow_id": "golden-order",
+      "workflow_name": "golden.order"
+    },
+    {
+      "build_id": "",
+      "code_version": "bc9612522b91",
+      "consumed_through": 1,
+      "id": 2,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SQ1G6N"
+    },
+    {
+      "args": [
+        {
+          "data": "Im8tMSI=",
+          "metadata": {
+            "encoding": "json/plain"
+          }
+        }
+      ],
+      "headers": {},
+      "id": 3,
+      "kind": "step_scheduled",
+      "options": {},
+      "seq": 1,
+      "step_name": "golden.lookup",
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "channel": "go",
+      "id": 4,
+      "kind": "signal_received",
+      "message_id": "",
+      "payload": {
+        "data": "InNoaXAgaXQi",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "sender": "",
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "args": [
+        {
+          "data": "ImFkYSI=",
+          "metadata": {
+            "encoding": "json/plain"
+          }
+        }
+      ],
+      "id": 5,
+      "kind": "update_requested",
+      "name": "approve",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "update_id": "01M3NNGPWMDXPTJGC0K0JJDJTV"
+    },
+    {
+      "build_id": "",
+      "code_version": "bc9612522b91",
+      "consumed_through": 5,
+      "id": 6,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SQ1G6N"
+    },
+    {
+      "failure": null,
+      "id": 7,
+      "kind": "update_completed",
+      "result": {
+        "data": "MQ==",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "ts": "2024-01-01T00:00:00+00:00",
+      "update_id": "01M3NNGPWMDXPTJGC0K0JJDJTV"
+    },
+    {
+      "attempts": 1,
+      "id": 8,
+      "kind": "step_completed",
+      "result": {
+        "data": "Ik8tMSI=",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "seq": 1,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "bc9612522b91",
+      "consumed_through": 8,
+      "id": 9,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SQ1G6N"
+    },
+    {
+      "args": [
+        {
+          "data": "Im8tMSI=",
+          "metadata": {
+            "encoding": "json/plain"
+          }
+        }
+      ],
+      "headers": {},
+      "id": 10,
+      "kind": "step_scheduled",
+      "options": {
+        "retry": {
+          "backoff": 2.0,
+          "initial_interval": 1.0,
+          "jitter": 0.1,
+          "max_attempts": 1,
+          "max_interval": 100.0,
+          "non_retryable_types": []
+        }
+      },
+      "seq": 2,
+      "step_name": "golden.reject",
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "attempts": 1,
+      "failure": {
+        "attributes": {
+          "attempts": 1,
+          "seq": 2,
+          "step_name": "golden.reject"
+        },
+        "cause": {
+          "kind": "application",
+          "message": "o-1 is not allowed",
+          "non_retryable": true,
+          "stack_trace": "Traceback (most recent call last):\n  File \"/Users/fredrik/Downloads/Rustlabs/loomwork/src/loomwork/sdk/definitions.py\", line 259, in invoke\n    return await self.fn(*args)  # type: ignore[no-any-return, misc]\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/fredrik/Downloads/Rustlabs/loomwork/tests/replay_golden/corpus.py\", line 30, in reject\n    raise lw.ApplicationError(f\"{key} is not allowed\", type=\"Rejected\", non_retryable=True)\nloomwork.errors.ApplicationError: o-1 is not allowed\n",
+          "type": "Rejected"
+        },
+        "kind": "step",
+        "message": "step 'golden.reject' failed after 1 attempt(s): o-1 is not allowed",
+        "non_retryable": true,
+        "type": "StepError"
+      },
+      "id": 11,
+      "kind": "step_failed",
+      "seq": 2,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "bc9612522b91",
+      "consumed_through": 11,
+      "id": 12,
+      "kind": "tick_completed",
+      "time": "2024-01-01T00:00:00+00:00",
+      "ts": "2024-01-01T00:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SQ1G6N"
+    },
+    {
+      "fire_at": "2024-01-01T01:00:00+00:00",
+      "id": 13,
+      "kind": "timer_started",
+      "seq": 1,
+      "ts": "2024-01-01T00:00:00+00:00"
+    },
+    {
+      "id": 14,
+      "kind": "timer_fired",
+      "seq": 1,
+      "ts": "2024-01-01T01:00:00+00:00"
+    },
+    {
+      "build_id": "",
+      "code_version": "bc9612522b91",
+      "consumed_through": 14,
+      "id": 15,
+      "kind": "tick_completed",
+      "time": "2024-01-01T01:00:00+00:00",
+      "ts": "2024-01-01T01:00:00+00:00",
+      "worker_id": "Fredriks-Mac-mini.local:75585:SQ1G6N"
+    },
+    {
+      "id": 16,
+      "kind": "patch_recorded",
+      "patch_id": "golden-express",
+      "ts": "2024-01-01T01:00:00+00:00"
+    },
+    {
+      "attributes": {
+        "golden_stage": {
+          "type": "string",
+          "value": "waiting"
+        }
+      },
+      "id": 17,
+      "kind": "search_attributes_upserted",
+      "ts": "2024-01-01T01:00:00+00:00"
+    },
+    {
+      "id": 18,
+      "kind": "workflow_completed",
+      "result": {
+        "data": "eyJpdGVtIjoiTy0xISIsIm5vdGUiOiJzaGlwIGl0IiwiYXBwcm92ZWQiOlsiYWRhIl19",
+        "metadata": {
+          "encoding": "json/plain"
+        }
+      },
+      "ts": "2024-01-01T01:00:00+00:00"
+    }
+  ],
+  "format_version": 1
+}
