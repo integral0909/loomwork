@@ -299,3 +299,88 @@ def test_admin_token_is_routed_to_the_store_backed_path(
     token = control_env.tokens["admin"]
     code, _out, err = run(monkeypatch, token, "workflow", "start", "cb.sleeper", "--id", "adm-1")
     _proves_store_backed_dispatch(code, err)
+
+
+# --------------------------------------------------------------------------- build versioning
+
+
+def test_operator_versioning_policy_and_repin(
+    control_env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = control_env.tokens["operator"]
+    ok(
+        monkeypatch,
+        token,
+        "workflow",
+        "start",
+        "cb.sleeper",
+        "--id",
+        "cb-pinned-1",
+        "--versioning-policy",
+        "pinned",
+    )
+    code, out, _err = ok(monkeypatch, token, "workflow", "describe", "cb-pinned-1", "--json")
+    assert json.loads(out)["versioning_policy"] == "pinned"
+
+    code, _out, err = ok(monkeypatch, token, "workflow", "repin", "cb-pinned-1", "--to", "build-x")
+    assert "build-x" in err
+
+    code, out, _err = ok(monkeypatch, token, "workflow", "describe", "cb-pinned-1", "--json")
+    assert json.loads(out)["pinned_build_id"] == "build-x"
+
+
+def test_operator_builds_list_and_compatibility(
+    control_env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = control_env.tokens["operator"]
+    ok(
+        monkeypatch,
+        token,
+        "workflow",
+        "start",
+        "cb.sleeper",
+        "--id",
+        "cb-pinned-2",
+        "--versioning-policy",
+        "pinned",
+    )
+    ok(monkeypatch, token, "workflow", "repin", "cb-pinned-2", "--to", "build-old")
+
+    code, out, _err = ok(monkeypatch, token, "builds", "list", "--json")
+    builds = {row["build_id"]: row for row in json.loads(out)}
+    assert builds["build-old"]["pinned_running_runs"] == 1
+    assert builds["build-old"]["orphaned"] is True
+    assert builds["build-old"]["compatible_with"] == []
+
+    # Declaring "build-new" compatible with "build-old" does not make "build-new" itself
+    # show up in the summary (it has no pinned runs or live worker of its own -- see
+    # docs/guides/versioning.md), but it is no longer orphaned once *some* build could
+    # serve it: heartbeat one and re-check.
+    ok(monkeypatch, token, "builds", "compatible", "build-new", "--with", "build-old")
+    code, out, _err = ok(monkeypatch, token, "builds", "list", "--json")
+    builds = {row["build_id"]: row for row in json.loads(out)}
+    assert "build-new" not in builds
+
+    ok(monkeypatch, token, "builds", "compatible", "build-new", "--with", "build-old", "--revoke")
+
+
+def test_reader_cannot_repin_or_declare_compatible(
+    control_env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operator = control_env.tokens["operator"]
+    ok(monkeypatch, operator, "workflow", "start", "cb.sleeper", "--id", "cb-pinned-3")
+
+    reader = control_env.tokens["reader"]
+    code, _out, err = run(monkeypatch, reader, "workflow", "repin", "cb-pinned-3", "--to", "b")
+    assert code != 0
+    assert "control_write" in err or "forbidden" in err.lower()
+
+    code, _out, err = run(
+        monkeypatch, reader, "builds", "compatible", "build-a", "--with", "build-b"
+    )
+    assert code != 0
+    assert "control_write" in err or "forbidden" in err.lower()
+
+    # Reads still work for a reader.
+    code, out, _err = ok(monkeypatch, reader, "builds", "list", "--json")
+    assert isinstance(json.loads(out), list)

@@ -14,10 +14,15 @@ server's control API through :class:`~loomwork.remote.control.ControlClient`.
 Both sides of each pair satisfy the same structural protocols -- :class:`Operations` and
 :class:`OperationsHandle` for workflows, :class:`ScheduleOperations` and
 :class:`ScheduleHandleOps` for schedules -- which mirror the real client classes' own
-public surface almost exactly (a real ``Client``/``WorkflowHandle``/``ScheduleClient``
-needs no adapter at all -- they already have the right methods). Command handlers in
-:mod:`loomwork.cli.commands.workflow` and :mod:`loomwork.cli.commands.schedule` call this
-surface without caring which backend produced it; :func:`open_operations` and
+public surface almost exactly. Most of that surface needs no adapter at all (a real
+``Client``/``ScheduleClient`` already has the right methods); the two exceptions --
+:class:`StoreOperations` and :class:`StoreScheduleHandle` -- exist only to close a small
+gap between what ``Client.start``/``ScheduleHandle.update`` expose and what
+``Engine.start_workflow``/``ScheduleService.update`` can actually do (a per-call
+``versioning_policy`` override, and per-field schedule-action updates instead of one that
+replaces the whole thing), without editing the client classes themselves. Command handlers
+in :mod:`loomwork.cli.commands.workflow` and :mod:`loomwork.cli.commands.schedule` call
+this surface without caring which backend produced it; :func:`open_operations` and
 :func:`open_schedule_operations` are what decide, once per invocation, which one to build.
 
 Reconstructing typed values from the control API's plain JSON (``execution_record_from_view``,
@@ -36,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -44,7 +50,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from loomwork.cli.connection import ConnectionOptions, StoreUnavailableError, session
 from loomwork.cli.errors import UsageError
-from loomwork.client.client import BatchError, BatchResult
+from loomwork.client.client import BatchError, BatchResult, Client
+from loomwork.client.schedules import ScheduleClient, ScheduleHandle
 from loomwork.codec.converter import DataConverter, default_converter
 from loomwork.codec.payload import Payload
 from loomwork.errors import (
@@ -58,7 +65,7 @@ from loomwork.errors import (
 from loomwork.failure import FailureInfo
 from loomwork.history.events import Event
 from loomwork.history.serde import event_from_dict
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, VersioningPolicy
 from loomwork.retry import RetryPolicy
 from loomwork.schedules.model import (
     OverlapPolicy,
@@ -66,7 +73,15 @@ from loomwork.schedules.model import (
     ScheduleSpec,
     ScheduleState,
 )
-from loomwork.store.records import ExecutionRecord, ExecutionStatus
+from loomwork.store.records import (
+    BuildCompatibility,
+    ExecutionRecord,
+    ExecutionStatus,
+    WorkerPresence,
+)
+from loomwork.versioning.builds import BuildSummary
+from loomwork.visibility.attributes import encode_attributes
+from loomwork.visibility.schema import SearchAttributes
 
 if TYPE_CHECKING:
     # Both need the optional httpx dependency; the store-backed CLI works without it.
@@ -129,6 +144,8 @@ def execution_record_from_view(data: dict[str, Any], converter: DataConverter) -
         parent_seq=data.get("parent_seq"),
         continued_run_id=data.get("continued_run_id"),
         reset_from_run_id=data.get("reset_from_run_id"),
+        versioning_policy=VersioningPolicy(data.get("versioning_policy", "auto_upgrade")),
+        pinned_build_id=data.get("pinned_build_id"),
     )
 
 
@@ -196,14 +213,16 @@ def schedule_state_from_view(data: dict[str, Any], converter: DataConverter) -> 
     """The inverse of ``loomwork.server.responses.schedule_view``.
 
     Everything but the action's arguments round-trips through
-    :meth:`~loomwork.schedules.model.ScheduleState.from_dict` unchanged; the arguments are
-    decoded JSON in the view (like any other payload the control API returns) rather than
-    wire-form payload dicts, so they are re-encoded first.
+    :meth:`~loomwork.schedules.model.ScheduleState.from_dict` unchanged, including every
+    other field of the action (``id_reuse_policy``, ``versioning_policy``, timeouts,
+    search attributes, ...) -- only ``args`` is decoded JSON in the view (like any other
+    payload the control API returns) rather than wire-form payload dicts, so it alone is
+    re-encoded first.
     """
     action = data["action"]
     patched = dict(data)
     patched["action"] = {
-        "workflow_name": action["workflow_name"],
+        **action,
         "args": [p.to_dict() for p in _schedule_args_from_view(action.get("args", []), converter)],
     }
     return ScheduleState.from_dict(patched)
@@ -237,11 +256,26 @@ class OperationsHandle(Protocol):
     ) -> Any: ...
 
 
+class BuildOperations(Protocol):
+    """What a command needs for worker build versioning: the common surface of
+    :class:`~loomwork.versioning.builds.BuildVersioning` (``Client.versioning``, used
+    unchanged for the store-backed path) and :class:`ControlBuildVersioning`."""
+
+    async def declare_compatible(self, build_id: str, compatible_with: str) -> None: ...
+    async def revoke_compatible(self, build_id: str, compatible_with: str) -> bool: ...
+    async def list_compatibility(self) -> list[BuildCompatibility]: ...
+    async def repin(self, run_id: str, build_id: str | None) -> None: ...
+    async def list_live_workers(self) -> list[WorkerPresence]: ...
+    async def builds_summary(self) -> list[BuildSummary]: ...
+
+
 class Operations(Protocol):
     """What a command needs to start and find runs: the common surface of
-    :class:`~loomwork.client.client.Client` and :class:`ControlOperations`."""
+    :class:`~loomwork.client.client.Client` (wrapped in :class:`StoreOperations`) and
+    :class:`ControlOperations`."""
 
     converter: DataConverter
+    versioning: BuildOperations
 
     async def start(
         self,
@@ -254,6 +288,7 @@ class Operations(Protocol):
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
     ) -> OperationsHandle: ...
     async def query_runs(self, query: str, limit: int = 100) -> list[ExecutionRecord]: ...
     # Named ``list`` last (matching ``Client``'s own ordering): once bound, that name
@@ -303,6 +338,12 @@ class ScheduleHandleOps(Protocol):
         *,
         spec: ScheduleSpec | None = None,
         policy: SchedulePolicy | None = None,
+        id_reuse_policy: IdReusePolicy | None = None,
+        id_conflict_policy: IdConflictPolicy | None = None,
+        versioning_policy: VersioningPolicy | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        search_attributes: dict[str, Any] | None = None,
         note: str | None = None,
     ) -> ScheduleState: ...
     async def upcoming(self, count: int = 5) -> Sequence[datetime]: ...
@@ -329,6 +370,12 @@ class ScheduleOperations(Protocol):
         pause_on_failure: bool = False,
         paused: bool = False,
         note: str = "",
+        id_reuse_policy: IdReusePolicy | str | None = None,
+        id_conflict_policy: IdConflictPolicy | str | None = None,
+        versioning_policy: VersioningPolicy | str | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> ScheduleHandleOps: ...
     def get(self, schedule_id: str) -> ScheduleHandleOps: ...
     async def list(self, limit: int = 100) -> list[ScheduleState]: ...
@@ -339,10 +386,270 @@ class ScheduleSession:
     """What ``schedule`` commands need, however the CLI connects: a
     :class:`ScheduleOperations` plus the converter used to decode a schedule action's
     arguments for display (mirroring :attr:`~loomwork.cli.connection.Session.converter`,
-    which :class:`~loomwork.client.schedules.ScheduleClient` does not itself expose)."""
+    which :class:`~loomwork.client.schedules.ScheduleClient` does not itself expose), and
+    the declared search attribute schema (``--attr-type``/``$LOOMWORK_SEARCH_ATTRIBUTES``)
+    used to encode ``--attr`` overrides on ``schedule update`` (see
+    :class:`StoreScheduleHandle`)."""
 
     schedules: ScheduleOperations
     converter: DataConverter
+    search_attributes: SearchAttributes
+
+
+# --------------------------------------------------------------------------- store-backed adapters
+#
+# The real Client/ScheduleClient/ScheduleHandle satisfy Operations/ScheduleOperations/
+# ScheduleHandleOps almost exactly as they are -- see the module docstring -- except for
+# two gaps only Engine.start_workflow/ScheduleService.update expose and Client/ScheduleHandle
+# do not (a per-call ``versioning_policy`` override on start, and a flat, per-field
+# ``update`` for a schedule's action instead of one that replaces the whole thing). These
+# thin wrappers close those two gaps without modifying the client classes themselves.
+
+
+class StoreOperations:
+    """:class:`Operations` backed directly by a :class:`~loomwork.client.client.Client`,
+    presenting its build versioning as :class:`BuildOperations`."""
+
+    def __init__(self, client: Client) -> None:
+        self._client = client
+        self.converter = client.converter
+        self.versioning: BuildOperations = client.versioning
+
+    async def start(
+        self,
+        workflow: str,
+        *args: Any,
+        id: str | None = None,
+        search_attributes: dict[str, Any] | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        retry_policy: RetryPolicy | None = None,
+        id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
+    ) -> OperationsHandle:
+        return await self._client.start(
+            workflow,
+            *args,
+            id=id,
+            search_attributes=search_attributes,
+            run_timeout=run_timeout,
+            execution_timeout=execution_timeout,
+            retry_policy=retry_policy,
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
+            versioning_policy=versioning_policy,
+        )
+
+    async def query_runs(self, query: str, limit: int = 100) -> list[ExecutionRecord]:
+        return await self._client.query_runs(query, limit=limit)
+
+    async def list(
+        self,
+        *,
+        workflow: str | None = None,
+        status: ExecutionStatus | None = None,
+        limit: int = 100,
+    ) -> list[ExecutionRecord]:
+        return await self._client.list(workflow=workflow, status=status, limit=limit)
+
+    def get_handle(
+        self, workflow_id: str | None = None, *, run_id: str | None = None
+    ) -> OperationsHandle:
+        return self._client.get_handle(workflow_id, run_id=run_id)
+
+    async def batch_signal(
+        self,
+        query: str,
+        channel: str,
+        value: Any,
+        *,
+        message_id: str | None = None,
+        page_size: int = 100,
+        concurrency: int = 10,
+    ) -> BatchResult:
+        return await self._client.batch_signal(
+            query,
+            channel,
+            value,
+            message_id=message_id,
+            page_size=page_size,
+            concurrency=concurrency,
+        )
+
+    async def batch_cancel(
+        self, query: str, reason: str = "", *, page_size: int = 100, concurrency: int = 10
+    ) -> BatchResult:
+        return await self._client.batch_cancel(
+            query, reason, page_size=page_size, concurrency=concurrency
+        )
+
+    async def batch_terminate(
+        self, query: str, reason: str = "", *, page_size: int = 100, concurrency: int = 10
+    ) -> BatchResult:
+        return await self._client.batch_terminate(
+            query, reason, page_size=page_size, concurrency=concurrency
+        )
+
+
+class StoreScheduleHandle:
+    """:class:`ScheduleHandleOps` backed by a real :class:`~loomwork.client.schedules.
+    ScheduleHandle`.
+
+    Delegates everything unchanged except :meth:`update`: ``ScheduleHandle.update``'s
+    ``action`` argument replaces the schedule's whole action (see its own docstring), so
+    a flat, per-field override (mirroring the control API's ``update_schedule``, which
+    merges each field with the schedule's current action itself) is resolved here first,
+    the same way ``spec``/``policy`` overrides are already resolved by
+    :mod:`loomwork.cli.commands.schedule` before reaching either backend.
+    """
+
+    def __init__(self, handle: ScheduleHandle, search_attributes: SearchAttributes) -> None:
+        self._handle = handle
+        self._search_attributes = search_attributes
+        self.schedule_id = handle.schedule_id
+
+    async def describe(self) -> ScheduleState:
+        return await self._handle.describe()
+
+    async def pause(self, note: str = "") -> ScheduleState:
+        return await self._handle.pause(note)
+
+    async def unpause(self, note: str = "") -> ScheduleState:
+        return await self._handle.unpause(note)
+
+    async def trigger(self) -> ScheduleState:
+        return await self._handle.trigger()
+
+    async def backfill(self, start: datetime, end: datetime) -> ScheduleState:
+        return await self._handle.backfill(start, end)
+
+    async def update(
+        self,
+        *,
+        spec: ScheduleSpec | None = None,
+        policy: SchedulePolicy | None = None,
+        id_reuse_policy: IdReusePolicy | None = None,
+        id_conflict_policy: IdConflictPolicy | None = None,
+        versioning_policy: VersioningPolicy | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        search_attributes: dict[str, Any] | None = None,
+        note: str | None = None,
+    ) -> ScheduleState:
+        action = None
+        if any(
+            v is not None
+            for v in (
+                id_reuse_policy,
+                id_conflict_policy,
+                versioning_policy,
+                run_timeout,
+                execution_timeout,
+                search_attributes,
+            )
+        ):
+            old = (await self._handle.describe()).action
+            action = dataclasses.replace(
+                old,
+                id_reuse_policy=id_reuse_policy
+                if id_reuse_policy is not None
+                else old.id_reuse_policy,
+                id_conflict_policy=(
+                    id_conflict_policy if id_conflict_policy is not None else old.id_conflict_policy
+                ),
+                versioning_policy=(
+                    versioning_policy if versioning_policy is not None else old.versioning_policy
+                ),
+                run_timeout=_as_timedelta(run_timeout)
+                if run_timeout is not None
+                else old.run_timeout,
+                execution_timeout=(
+                    _as_timedelta(execution_timeout)
+                    if execution_timeout is not None
+                    else old.execution_timeout
+                ),
+                search_attributes=(
+                    encode_attributes(search_attributes, self._search_attributes)
+                    if search_attributes is not None
+                    else old.search_attributes
+                ),
+            )
+        return await self._handle.update(spec=spec, policy=policy, action=action, note=note)
+
+    async def upcoming(self, count: int = 5) -> Sequence[datetime]:
+        return await self._handle.upcoming(count)
+
+    async def delete(self) -> bool:
+        return await self._handle.delete()
+
+
+class StoreScheduleOperations:
+    """:class:`ScheduleOperations` backed by a real :class:`~loomwork.client.schedules.
+    ScheduleClient`; wraps the handles it returns in :class:`StoreScheduleHandle`."""
+
+    def __init__(self, client: ScheduleClient, search_attributes: SearchAttributes) -> None:
+        self._client = client
+        self._search_attributes = search_attributes
+
+    async def create(
+        self,
+        schedule_id: str,
+        workflow: str,
+        *args: Any,
+        cron: str | None = None,
+        interval: timedelta | float | None = None,
+        timezone: str = "UTC",
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        jitter: timedelta | float = 0,
+        overlap: OverlapPolicy | str = OverlapPolicy.SKIP,
+        catchup_window: timedelta | float = timedelta(minutes=1),
+        pause_on_failure: bool = False,
+        paused: bool = False,
+        note: str = "",
+        id_reuse_policy: IdReusePolicy | str | None = None,
+        id_conflict_policy: IdConflictPolicy | str | None = None,
+        versioning_policy: VersioningPolicy | str | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        search_attributes: dict[str, Any] | None = None,
+    ) -> StoreScheduleHandle:
+        handle = await self._client.create(
+            schedule_id,
+            workflow,
+            *args,
+            cron=cron,
+            interval=interval,
+            timezone=timezone,
+            start_at=start_at,
+            end_at=end_at,
+            jitter=jitter,
+            overlap=overlap,
+            catchup_window=catchup_window,
+            pause_on_failure=pause_on_failure,
+            paused=paused,
+            note=note,
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
+            versioning_policy=versioning_policy,
+            run_timeout=run_timeout,
+            execution_timeout=execution_timeout,
+            search_attributes=search_attributes,
+        )
+        return StoreScheduleHandle(handle, self._search_attributes)
+
+    def get(self, schedule_id: str) -> StoreScheduleHandle:
+        return StoreScheduleHandle(self._client.get(schedule_id), self._search_attributes)
+
+    async def list(self, limit: int = 100) -> list[ScheduleState]:
+        return await self._client.list(limit)
+
+
+def _as_timedelta(value: timedelta | float | None) -> timedelta | None:
+    if value is None:
+        return None
+    return value if isinstance(value, timedelta) else timedelta(seconds=value)
 
 
 # --------------------------------------------------------------------------- control-backed
@@ -452,12 +759,64 @@ class ControlWorkflowHandle:
         return outcome.get("result")
 
 
+class ControlBuildVersioning:
+    """:class:`BuildOperations` backed by the control API."""
+
+    def __init__(self, client: ControlClient) -> None:
+        self._client = client
+
+    async def declare_compatible(self, build_id: str, compatible_with: str) -> None:
+        await self._client.declare_build_compatible(build_id, compatible_with)
+
+    async def revoke_compatible(self, build_id: str, compatible_with: str) -> bool:
+        return await self._client.revoke_build_compatibility(build_id, compatible_with)
+
+    async def list_compatibility(self) -> list[BuildCompatibility]:
+        data = await self._client.list_build_compatibility()
+        return [
+            BuildCompatibility(
+                build_id=str(c["build_id"]),
+                compatible_with=str(c["compatible_with"]),
+                created_at=datetime.fromisoformat(c["created_at"]),
+            )
+            for c in data
+        ]
+
+    async def repin(self, run_id: str, build_id: str | None) -> None:
+        await self._client.repin_workflow(run_id, build_id)
+
+    async def list_live_workers(self) -> list[WorkerPresence]:
+        data = await self._client.list_workers()
+        return [
+            WorkerPresence(
+                worker_id=str(w["worker_id"]),
+                build_id=str(w["build_id"]),
+                last_seen_at=datetime.fromisoformat(w["last_seen_at"]),
+                expires_at=datetime.fromisoformat(w["expires_at"]),
+            )
+            for w in data
+        ]
+
+    async def builds_summary(self) -> list[BuildSummary]:
+        data = await self._client.builds_summary()
+        return [
+            BuildSummary(
+                build_id=str(b["build_id"]),
+                pinned_running_runs=int(b["pinned_running_runs"]),
+                live_workers=int(b["live_workers"]),
+                orphaned=bool(b["orphaned"]),
+            )
+            for b in data
+        ]
+
+
 class ControlOperations:
     """:class:`Operations` backed by the control API."""
 
     def __init__(self, client: ControlClient, converter: DataConverter | None = None) -> None:
         self._client = client
         self.converter = converter or default_converter
+        self.versioning: BuildOperations = ControlBuildVersioning(client)
 
     async def start(
         self,
@@ -470,6 +829,7 @@ class ControlOperations:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
     ) -> ControlWorkflowHandle:
         data = await self._client.start_workflow(
             workflow,
@@ -481,6 +841,7 @@ class ControlOperations:
             retry_max_attempts=retry_policy.max_attempts if retry_policy is not None else None,
             id_reuse_policy=id_reuse_policy,
             id_conflict_policy=id_conflict_policy,
+            versioning_policy=versioning_policy.value if versioning_policy is not None else None,
         )
         return ControlWorkflowHandle(
             self._client,
@@ -654,6 +1015,12 @@ class ControlScheduleHandle:
         *,
         spec: ScheduleSpec | None = None,
         policy: SchedulePolicy | None = None,
+        id_reuse_policy: IdReusePolicy | None = None,
+        id_conflict_policy: IdConflictPolicy | None = None,
+        versioning_policy: VersioningPolicy | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        search_attributes: dict[str, Any] | None = None,
         note: str | None = None,
     ) -> ScheduleState:
         # Every field of a given `spec`/`policy` is sent, not only the ones that changed:
@@ -662,6 +1029,14 @@ class ControlScheduleHandle:
         # store-backed path's `ScheduleHandle.update`, which replaces the field outright.
         # ``offset`` has no wire field: the control API recomputes it itself (0 unless the
         # interval is unchanged), exactly like `ScheduleHandle.update` does locally.
+        #
+        # The action-level fields below are different: the control API's own
+        # ``update_schedule`` handler already merges each one with the schedule's current
+        # action (only the ones given here change), so -- unlike ``spec``/``policy`` --
+        # these are forwarded exactly as given, unresolved; ``search_attributes`` here is
+        # the *raw* JSON value (the server encodes it against its own configured search
+        # attribute schema), not the already-encoded form
+        # :class:`~loomwork.schedules.model.ScheduleAction` stores internally.
         data = await self._client.update_schedule(
             self.schedule_id,
             cron=spec.cron if spec is not None else None,
@@ -672,6 +1047,12 @@ class ControlScheduleHandle:
             catchup_window=policy.catchup_window.total_seconds() if policy is not None else None,
             pause_on_failure=policy.pause_on_failure if policy is not None else None,
             note=note,
+            id_reuse_policy=id_reuse_policy.value if id_reuse_policy is not None else None,
+            id_conflict_policy=id_conflict_policy.value if id_conflict_policy is not None else None,
+            versioning_policy=versioning_policy.value if versioning_policy is not None else None,
+            run_timeout=_seconds(run_timeout),
+            execution_timeout=_seconds(execution_timeout),
+            search_attributes=search_attributes,
         )
         return self._state(data)
 
@@ -705,6 +1086,12 @@ class ControlScheduleOperations:
         pause_on_failure: bool = False,
         paused: bool = False,
         note: str = "",
+        id_reuse_policy: IdReusePolicy | str | None = None,
+        id_conflict_policy: IdConflictPolicy | str | None = None,
+        versioning_policy: VersioningPolicy | str | None = None,
+        run_timeout: timedelta | float | None = None,
+        execution_timeout: timedelta | float | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> ControlScheduleHandle:
         await self._client.create_schedule(
             schedule_id,
@@ -721,6 +1108,16 @@ class ControlScheduleOperations:
             pause_on_failure=pause_on_failure,
             paused=paused,
             note=note,
+            id_reuse_policy=IdReusePolicy(id_reuse_policy).value if id_reuse_policy else None,
+            id_conflict_policy=(
+                IdConflictPolicy(id_conflict_policy).value if id_conflict_policy else None
+            ),
+            versioning_policy=(
+                VersioningPolicy(versioning_policy).value if versioning_policy else None
+            ),
+            run_timeout=_seconds(run_timeout),
+            execution_timeout=_seconds(execution_timeout),
+            search_attributes=search_attributes,
         )
         return ControlScheduleHandle(self._client, self.converter, schedule_id)
 
@@ -760,7 +1157,7 @@ async def open_operations(args: argparse.Namespace) -> AsyncIterator[Operations]
     options = ConnectionOptions.from_args(args)
     if options.server_url is None:
         async with session(options) as active:
-            yield active.client
+            yield StoreOperations(active.client)
         return
     from loomwork.remote.control import ControlClient
 
@@ -783,7 +1180,7 @@ async def open_operations(args: argparse.Namespace) -> AsyncIterator[Operations]
     if who.has_any("worker", "admin"):
         await control.close()
         async with session(options) as active:
-            yield active.client
+            yield StoreOperations(active.client)
         return
     if not who.has_any("operator", "reader"):
         await control.close()
@@ -809,7 +1206,10 @@ async def open_schedule_operations(args: argparse.Namespace) -> AsyncIterator[Sc
     options = ConnectionOptions.from_args(args)
     if options.server_url is None:
         async with session(options) as active:
-            yield ScheduleSession(active.client.schedules, active.converter)
+            store_schedules = StoreScheduleOperations(
+                active.client.schedules, options.search_attributes
+            )
+            yield ScheduleSession(store_schedules, active.converter, options.search_attributes)
         return
     from loomwork.remote.control import ControlClient
 
@@ -832,7 +1232,10 @@ async def open_schedule_operations(args: argparse.Namespace) -> AsyncIterator[Sc
     if who.has_any("worker", "admin"):
         await control.close()
         async with session(options) as active:
-            yield ScheduleSession(active.client.schedules, active.converter)
+            store_schedules = StoreScheduleOperations(
+                active.client.schedules, options.search_attributes
+            )
+            yield ScheduleSession(store_schedules, active.converter, options.search_attributes)
         return
     if not who.has_any("operator", "reader"):
         await control.close()
@@ -842,12 +1245,14 @@ async def open_schedule_operations(args: argparse.Namespace) -> AsyncIterator[Sc
         )
     try:
         control_schedules = ControlScheduleOperations(control, default_converter)
-        yield ScheduleSession(control_schedules, default_converter)
+        yield ScheduleSession(control_schedules, default_converter, options.search_attributes)
     finally:
         await control.close()
 
 
 __all__ = [
+    "BuildOperations",
+    "ControlBuildVersioning",
     "ControlOperations",
     "ControlScheduleHandle",
     "ControlScheduleOperations",
@@ -857,6 +1262,9 @@ __all__ = [
     "ScheduleHandleOps",
     "ScheduleOperations",
     "ScheduleSession",
+    "StoreOperations",
+    "StoreScheduleHandle",
+    "StoreScheduleOperations",
     "execution_record_from_view",
     "event_from_view",
     "open_operations",

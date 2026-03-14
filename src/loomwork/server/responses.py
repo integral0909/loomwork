@@ -19,7 +19,8 @@ from loomwork.failure import FailureInfo
 from loomwork.history.events import Event
 from loomwork.history.serde import event_to_dict
 from loomwork.schedules.model import ScheduleState
-from loomwork.store.records import ExecutionRecord
+from loomwork.store.records import BuildCompatibility, ExecutionRecord, WorkerPresence
+from loomwork.versioning.builds import BuildSummary
 
 _DECODABLE = {"json/plain", "binary/null"}
 
@@ -68,6 +69,34 @@ def execution_view(record: ExecutionRecord) -> dict[str, Any]:
         "parent_seq": record.parent_seq,
         "continued_run_id": record.continued_run_id,
         "reset_from_run_id": record.reset_from_run_id,
+        "versioning_policy": record.versioning_policy.value,
+        "pinned_build_id": record.pinned_build_id,
+    }
+
+
+def build_summary_view(build: BuildSummary) -> dict[str, Any]:
+    return {
+        "build_id": build.build_id,
+        "pinned_running_runs": build.pinned_running_runs,
+        "live_workers": build.live_workers,
+        "orphaned": build.orphaned,
+    }
+
+
+def worker_presence_view(presence: WorkerPresence) -> dict[str, Any]:
+    return {
+        "worker_id": presence.worker_id,
+        "build_id": presence.build_id,
+        "last_seen_at": presence.last_seen_at.isoformat(),
+        "expires_at": presence.expires_at.isoformat(),
+    }
+
+
+def build_compatibility_view(compat: BuildCompatibility) -> dict[str, Any]:
+    return {
+        "build_id": compat.build_id,
+        "compatible_with": compat.compatible_with,
+        "created_at": compat.created_at.isoformat(),
     }
 
 

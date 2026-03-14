@@ -277,3 +277,32 @@ def test_start_with_timeouts_and_retries(cli: Cli) -> None:
     started = history[0]
     assert started["run_timeout"] == 3600
     assert started["retry_policy"]["max_attempts"] == 3
+
+
+# --------------------------------------------------------------------------- build versioning
+
+
+def test_start_with_versioning_policy(cli: Cli) -> None:
+    cli.ok("workflow", "start", "cli.sleeper", "--id", "vp-1", "--versioning-policy", "pinned")
+    data = json.loads(cli.ok("workflow", "describe", "vp-1", "--json").out)
+    assert data["versioning_policy"] == "pinned"
+    assert data["pinned_build_id"] is None
+
+
+def test_repin_moves_a_pinned_run_and_unpin_clears_it(cli: Cli) -> None:
+    cli.ok("workflow", "start", "cli.sleeper", "--id", "repin-1", "--versioning-policy", "pinned")
+    result = cli.ok("workflow", "repin", "repin-1", "--to", "build-a")
+    assert "build-a" in result.err
+
+    data = json.loads(cli.ok("workflow", "describe", "repin-1", "--json").out)
+    assert data["pinned_build_id"] == "build-a"
+
+    cli.ok("workflow", "repin", "repin-1", "--unpin")
+    data = json.loads(cli.ok("workflow", "describe", "repin-1", "--json").out)
+    assert data["pinned_build_id"] is None
+
+
+def test_repin_needs_a_build_or_unpin(cli: Cli) -> None:
+    cli.ok("workflow", "start", "cli.sleeper", "--id", "repin-2")
+    result = cli("workflow", "repin", "repin-2")
+    assert result.code == 2  # argparse: mutually exclusive group is required

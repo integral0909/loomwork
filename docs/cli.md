@@ -10,8 +10,9 @@ loomwork [--json] [--log-level LEVEL] COMMAND ...
 
 | Command | What it does |
 | ------- | ------------ |
-| [`workflow`](#loomwork-workflow) (`wf`) | start, list, describe, signal, query, update, cancel and terminate runs |
+| [`workflow`](#loomwork-workflow) (`wf`) | start, list, describe, signal, query, update, cancel, terminate and repin runs |
 | [`schedule`](#loomwork-schedule) (`sched`) | create, pause, trigger, backfill, update and delete schedules |
+| [`builds`](#loomwork-builds) | worker build versioning: drain status, live workers, declared compatibility |
 | [`worker`](#loomwork-worker) | run a worker for your workflow code |
 | [`server`](#loomwork-server) | run the HTTP server |
 | [`store`](#loomwork-store) | migrate, inspect and prune a store |
@@ -92,6 +93,7 @@ replaced.
 loomwork workflow start NAME [ARG ...] [--id ID] [--attr KEY=VALUE ...]
                         [--run-timeout D] [--execution-timeout D] [--retry-attempts N]
                         [--id-reuse-policy POLICY] [--id-conflict-policy POLICY]
+                        [--versioning-policy {auto_upgrade,pinned}]
                         [--wait [--wait-timeout D]] [--raw]
 loomwork workflow list [--workflow NAME] [--status STATUS] [-q QUERY] [--limit N]
 loomwork workflow describe WORKFLOW_ID [--run RUN_ID]
@@ -104,6 +106,7 @@ loomwork workflow cancel   WORKFLOW_ID [--reason TEXT]
 loomwork workflow terminate WORKFLOW_ID --reason TEXT
 loomwork workflow reset    WORKFLOW_ID [--run RUN_ID] (--to POINT | --after-tick N)
                         --reason TEXT [--wait [--wait-timeout D]]
+loomwork workflow repin    WORKFLOW_ID [--run RUN_ID] (--to BUILD | --unpin)
 loomwork workflow batch signal|cancel|terminate --query Q [...]
                         [--page-size N] [--concurrency N] [--dry-run]
                         [--max-runs N] [--yes]
@@ -120,6 +123,13 @@ without the id).
 closed; `--id-conflict-policy` (`fail`, the default; `use_existing`;
 `terminate_existing`) controls what happens when it is *currently* running. See
 `loomwork.options.IdReusePolicy`/`IdConflictPolicy`.
+
+`--versioning-policy` overrides which worker builds may process this run's ticks
+(`auto_upgrade`, the default: any worker; `pinned`: only the build that ran the first
+tick, or one declared compatible with it), in place of whatever engine configuration
+would otherwise resolve for this workflow. See
+[versioning](guides/versioning.md#patching-vs-pinning-which-to-use) and
+[`loomwork builds`](#loomwork-builds).
 
 ```
 $ loomwork workflow start orders.checkout '{"order_id": "A-17"}' --id order-A-17 --attr tier=gold
@@ -165,6 +175,17 @@ $ loomwork workflow reset order-A-17 --to before-last-failure --reason "fixed in
 reset to order-A-17 (run 01J1V808Z2Q8R0M3S7N5T9W1X)
 ```
 
+`repin` moves a `PINNED` run onto a different build (`--to BUILD`), or unpins it
+(`--unpin`, so its next tick pins fresh to whichever build claims it) -- the operator
+escape hatch for a run stuck waiting for a build with no live or compatible worker; see
+[`loomwork builds`](#loomwork-builds) and
+[versioning](guides/versioning.md#operating-builds).
+
+```
+$ loomwork workflow repin order-A-17 --to 8f21ac0
+repinned 01J1V6Y4ZK2Q8R0M3S7N5T9W1X to build '8f21ac0'
+```
+
 `batch signal|cancel|terminate` applies one operation to every run a
 [visibility query](visibility-queries.md) matches (`--query`/`-q`; a plain filter, no
 `ORDER BY` or `LIMIT` of its own -- batch pages through matches itself). `--dry-run`
@@ -191,6 +212,9 @@ matched 12, succeeded 12, skipped (already closed) 0, failed 0
 loomwork schedule create ID WORKFLOW [ARG ...] (--cron EXPR [--tz ZONE] | --every D)
                          [--start-at T] [--end-at T] [--jitter D] [--overlap POLICY]
                          [--catchup-window D] [--pause-on-failure] [--paused] [--note TEXT]
+                         [--id-reuse-policy POLICY] [--id-conflict-policy POLICY]
+                         [--versioning-policy {auto_upgrade,pinned}]
+                         [--run-timeout D] [--execution-timeout D] [--attr KEY=VALUE ...]
 loomwork schedule list
 loomwork schedule describe ID
 loomwork schedule pause ID [--note TEXT] / unpause ID [--note TEXT]
@@ -200,11 +224,25 @@ loomwork schedule upcoming ID [-n COUNT]
 loomwork schedule update ID [--cron EXPR | --every D] [--tz ZONE] [--jitter D]
                          [--overlap POLICY] [--catchup-window D]
                          [--pause-on-failure | --no-pause-on-failure] [--note TEXT]
+                         [--id-reuse-policy POLICY] [--id-conflict-policy POLICY]
+                         [--versioning-policy {auto_upgrade,pinned}]
+                         [--run-timeout D] [--execution-timeout D] [--attr KEY=VALUE ...]
 loomwork schedule delete ID                      # runs it started keep running
 ```
 
 Overlap policies: `skip`, `buffer_one`, `allow_all`, `cancel_other`, `terminate_other`
 (see [schedules](guides/schedules.md)).
+
+`--id-reuse-policy`, `--id-conflict-policy`, `--versioning-policy`, `--run-timeout`,
+`--execution-timeout` and `--attr` (repeatable, same `KEY=VALUE` parsing as `workflow
+start --attr`) govern every run the schedule starts -- the same policies and options
+`workflow start` takes, applied once to the schedule instead of once per run; see
+[id reuse and conflict policies](guides/workflows.md#id-reuse-and-conflict-policies) and
+[schedules: id policies, versioning and per-run timeouts](guides/schedules.md#id-policies-versioning-and-per-run-timeouts).
+On `create` an unset option resolves normally (`ALLOW_DUPLICATE`/`FAIL`, engine-configured
+versioning, no timeout or attributes); on `update` an unset option leaves the schedule's
+current value alone, and `--attr` replaces the whole search-attribute set when given.
+`describe` shows whichever of these a schedule has set.
 
 ```
 $ loomwork schedule create nightly-report reports.nightly --cron "0 3 * * *" --tz Europe/Stockholm
@@ -212,6 +250,38 @@ created schedule nightly-report; next fire 2024-06-02 01:00:00+00:00
 $ loomwork schedule backfill nightly-report --from -3d
 backfill started 3 run(s)
 ```
+
+## `loomwork builds`
+
+```
+loomwork builds list                                    # drain status per build id
+loomwork builds workers                                 # every worker's live heartbeat
+loomwork builds compatible BUILD --with OLD_BUILD        # declare BUILD may drain OLD_BUILD
+loomwork builds compatible BUILD --with OLD_BUILD --revoke
+```
+
+Operates worker build versioning ([versioning](guides/versioning.md#patching-vs-pinning-which-to-use),
+[ADR-0006](adr/0006-worker-build-versioning.md)). `list` prints one row per build id seen
+in either a pinned run or a live worker's heartbeat: live workers, pinned running runs,
+whether it is `orphaned` (pinned runs waiting for a build with no live or compatible
+worker), and which builds it has declared itself compatible with:
+
+```
+$ loomwork builds list
+BUILD    LIVE WORKERS  PINNED RUNNING RUNS  ORPHANED  DECLARED COMPATIBLE WITH
+a1b2c3d  6             142                  -         -
+e4f5g6h  2             11                   yes       -
+$ loomwork builds compatible a1b2c3d --with e4f5g6h
+declared: a1b2c3d may now claim work pinned to e4f5g6h
+```
+
+`compatible BUILD --with OLD_BUILD` lets workers of `BUILD` claim ticks and pinned-queue
+steps pinned to `OLD_BUILD` (directed: it does not also let `OLD_BUILD` drain `BUILD`) --
+the tool for a same-day hotfix that changed no workflow code to drain the build it
+replaces without waiting for its runs to finish naturally. `--revoke` undoes a
+declaration and fails with a usage error if it was never made. To move an individual
+stuck run instead of declaring a whole build compatible, use
+[`loomwork workflow repin`](#loomwork-workflow).
 
 ## `loomwork worker`
 
@@ -287,6 +357,7 @@ $ loomwork doctor --store sqlite:///loomwork.db
 [PASS] timers            no outstanding timers
 [PASS] schedules         no schedule is overdue
 [PASS] history size      no run is near its history limit
+[PASS] build versioning  no pinned build is orphaned
 ```
 
 Checks: store reachability and schema version (against the newest migration this
@@ -294,8 +365,10 @@ release knows); outbox backlog; runs whose ticks keep failing (`--tick-failure-t
 consecutive failures); the oldest unclaimed, ready-to-run step job, store-wide and (with
 `--queue`, repeatable) for specific queues, against `--step-stall`; the next timer's
 overdue time against `--timer-overdue`; schedules whose next fire time is overdue by
-`--schedule-overdue`; and running runs approaching the history size limit
-(`--history-warning-fraction` of it). `--server` adds two checks a local `--store`
+`--schedule-overdue`; running runs approaching the history size limit
+(`--history-warning-fraction` of it); and pinned builds with runs waiting for a build
+with no live or compatible worker (see [`loomwork builds`](#loomwork-builds)). `--server`
+adds two checks a local `--store`
 connection cannot make: clock skew between this machine and the server, and the token's
 own roles and namespaces. Every query is capped by `--limit` (default 100), so `doctor`
 is safe to run against a large production store. `--json` prints

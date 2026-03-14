@@ -17,7 +17,7 @@ from loomwork.engine.engine import Engine
 from loomwork.engine.queries import QueryRunner
 from loomwork.errors import WorkflowClosedError
 from loomwork.interceptors import ClientCallContext, ClientInterceptor, wrap_call
-from loomwork.options import IdConflictPolicy, IdReusePolicy
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy
 from loomwork.retry import RetryPolicy
 from loomwork.schedules.service import ScheduleService
 from loomwork.sdk.definitions import Registry, WorkflowDefinition, WorkflowLike, as_definition
@@ -103,6 +103,7 @@ class Client:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
         headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[R]: ...
 
@@ -118,6 +119,7 @@ class Client:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
         headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]: ...
 
@@ -132,6 +134,7 @@ class Client:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
         headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]:
         """Start a run and return a handle to it without waiting.
@@ -140,6 +143,9 @@ class Client:
         has been used before; see :class:`~loomwork.options.IdReusePolicy` and
         :class:`~loomwork.options.IdConflictPolicy`. With ``IdConflictPolicy.
         USE_EXISTING`` the returned handle refers to the already-running execution.
+
+        ``versioning_policy`` overrides the configured policy for this run (see
+        :class:`~loomwork.options.VersioningPolicy` and ADR-0006).
 
         ``headers`` is recorded on the run's ``WorkflowStarted`` (see
         :meth:`~loomwork.engine.engine.Engine.start_workflow`); registered
@@ -169,6 +175,7 @@ class Client:
                 retry_policy=retry_policy,
                 id_reuse_policy=id_reuse_policy,
                 id_conflict_policy=id_conflict_policy,
+                versioning_policy=versioning_policy,
                 headers=ctx.headers,
             )
         return WorkflowHandle(

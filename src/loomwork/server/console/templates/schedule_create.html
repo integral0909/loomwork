@@ -68,6 +68,49 @@
     <input type="text" name="note" value="{{ form.get('note', '') }}">
   </label>
 
+  <fieldset>
+    <legend class="field-label">Every run this schedule starts</legend>
+
+    <label><span class="field-label">Id reuse policy</span>
+      <select name="id_reuse_policy">
+        <option value="">(default: allow_duplicate)</option>
+        {% for policy in id_reuse_policies %}
+        <option value="{{ policy }}" {{ "selected" if form.get("id_reuse_policy") == policy }}>{{ policy }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label><span class="field-label">Id conflict policy</span>
+      <select name="id_conflict_policy">
+        <option value="">(default: fail)</option>
+        {% for policy in id_conflict_policies %}
+        <option value="{{ policy }}" {{ "selected" if form.get("id_conflict_policy") == policy }}>{{ policy }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label><span class="field-label">Versioning policy</span>
+      <select name="versioning_policy">
+        <option value="">(default: resolved from engine configuration)</option>
+        {% for policy in versioning_policies %}
+        <option value="{{ policy }}" {{ "selected" if form.get("versioning_policy") == policy }}>{{ policy }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label><span class="field-label">Run timeout (seconds, optional)</span>
+      <input type="number" name="run_timeout_seconds" value="{{ form.get('run_timeout_seconds', '') }}" min="0" step="1">
+    </label>
+
+    <label><span class="field-label">Execution timeout (seconds, optional)</span>
+      <input type="number" name="execution_timeout_seconds" value="{{ form.get('execution_timeout_seconds', '') }}" min="0" step="1">
+    </label>
+
+    <label><span class="field-label">Search attributes (JSON object, optional)</span>
+      <textarea name="search_attributes" placeholder='{"tier": "gold"}'>{{ form.get('search_attributes', '') }}</textarea>
+    </label>
+  </fieldset>
+
   <button type="submit">Create schedule</button>
 </form>
 {% endblock %}

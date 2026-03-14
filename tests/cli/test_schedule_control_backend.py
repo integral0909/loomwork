@@ -254,3 +254,70 @@ def test_worker_token_is_routed_to_the_store_backed_path(
     )
     assert code == ExitCode.UNAVAILABLE, err
     assert "cannot reach the server" in err
+
+
+# --------------------------------------------------------------------------- action-level options
+
+
+def test_operator_create_and_update_with_action_options(
+    control_env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = control_env.tokens["operator"]
+    _code, out, _err = ok(
+        monkeypatch,
+        token,
+        "schedule",
+        "create",
+        "vp-sched",
+        "sb.greet",
+        '"a"',
+        "--every",
+        "1h",
+        "--versioning-policy",
+        "pinned",
+        "--id-reuse-policy",
+        "reject_duplicate",
+        "--run-timeout",
+        "1h",
+        "--attr",
+        "tier=gold",
+        "--json",
+    )
+    action = json.loads(out)["action"]
+    assert action["versioning_policy"] == "pinned"
+    assert action["id_reuse_policy"] == "reject_duplicate"
+    assert action["run_timeout"] == 3600
+    assert action["search_attributes"]["tier"] == {"type": "string", "value": "gold"}
+
+    ok(
+        monkeypatch,
+        token,
+        "schedule",
+        "update",
+        "vp-sched",
+        "--id-conflict-policy",
+        "terminate_existing",
+        "--attr",
+        "tier=silver",
+    )
+    _code, out, _err = ok(monkeypatch, token, "schedule", "describe", "vp-sched", "--json")
+    action = json.loads(out)["action"]
+    # Unset by the update: unchanged (the server merges each field with the current
+    # action, unlike a fresh create).
+    assert action["versioning_policy"] == "pinned"
+    assert action["id_conflict_policy"] == "terminate_existing"
+    assert action["search_attributes"] == {"tier": {"type": "string", "value": "silver"}}
+
+
+def test_reader_cannot_update_action_options(
+    control_env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operator = control_env.tokens["operator"]
+    ok(monkeypatch, operator, "schedule", "create", "reader-vp", "sb.greet", '"a"', "--every", "1h")
+
+    reader = control_env.tokens["reader"]
+    code, _out, err = run(
+        monkeypatch, reader, "schedule", "update", "reader-vp", "--versioning-policy", "pinned"
+    )
+    assert code != 0
+    assert "control_write" in err or "forbidden" in err.lower()

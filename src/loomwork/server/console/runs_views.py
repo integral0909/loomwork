@@ -9,7 +9,12 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from loomwork.codec.converter import default_converter
-from loomwork.errors import InvalidResetPointError, PayloadError, WorkflowClosedError
+from loomwork.errors import (
+    InvalidResetPointError,
+    NotFoundError,
+    PayloadError,
+    WorkflowClosedError,
+)
 from loomwork.history.events import WorkflowStarted
 from loomwork.history.serde import event_to_dict
 from loomwork.options import ResetPoint
@@ -226,6 +231,27 @@ def _reset_point_from_form(form: dict[str, str]) -> ResetPoint:
             raise InvalidResetPointError("give a whole number of ticks to keep") from None
         return ResetPoint.after_tick(count)
     raise InvalidResetPointError(f"unknown reset point {point!r}")
+
+
+def run_repin_view(runtime: ConsoleRuntime) -> View:
+    async def view(request: Request) -> Response:
+        namespace, run_id, form = await _run_action(request, runtime)
+        ns = runtime.state.namespace(namespace)
+        path = _run_path(namespace, run_id)
+        unpin = form.get("unpin") == "on"
+        build_id = form.get("build_id", "").strip()
+        if not unpin and not build_id:
+            return redirect_with_flash(
+                path, level="error", message="Give a build id, or check unpin."
+            )
+        try:
+            await ns.engine.versioning.repin(run_id, None if unpin else build_id)
+        except (NotFoundError, WorkflowClosedError) as exc:
+            return redirect_with_flash(path, level="error", message=str(exc))
+        message = "Unpinned; the next tick pins fresh." if unpin else f"Repinned to {build_id!r}."
+        return redirect_with_flash(path, level="success", message=message)
+
+    return view
 
 
 def run_reset_view(runtime: ConsoleRuntime) -> View:

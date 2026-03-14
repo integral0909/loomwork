@@ -193,6 +193,13 @@ All notable changes to this project are documented here. The format follows
 - Schedules can set id policies, a versioning policy, run and execution timeouts and
   search attributes for the runs they start; existing schedule documents keep today's
   behaviour (migration 10).
+- Operating builds: `loomwork builds list|workers|compatible`, `loomwork workflow repin`,
+  `--versioning-policy` on `workflow start`, matching control API routes, a console
+  Builds page and repin action, and a `loomwork doctor` finding for pinned runs whose
+  build has no live or compatible worker.
+- Schedule id policies, versioning policy, timeouts and search attributes in the CLI,
+  control API and console forms.
+- `Client.start` and `Loomwork.start_workflow` accept `versioning_policy`.
 - Seven example applications (order fulfilment saga, expense approval, bulk import,
   scheduled reports, task queues, encrypted payments, versioned workflow), each tested
   and lint-clean, and checked by CI.

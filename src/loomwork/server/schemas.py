@@ -33,6 +33,9 @@ class StartWorkflowRequest(BaseModel):
         "allow_duplicate", "allow_duplicate_failed_only", "reject_duplicate"
     ] = "allow_duplicate"
     id_conflict_policy: Literal["fail", "use_existing", "terminate_existing"] = "fail"
+    #: Unset resolves from engine configuration, exactly as an unspecified
+    #: ``start_workflow`` call would; see ``docs/guides/versioning.md``.
+    versioning_policy: Literal["auto_upgrade", "pinned"] | None = None
 
 
 class ResetWorkflowRequest(BaseModel):
@@ -151,6 +154,27 @@ class BackfillRequest(BaseModel):
     end: str
 
 
+# --------------------------------------------------------------------------- builds
+
+
+class DeclareCompatibleRequest(BaseModel):
+    """``POST .../builds/{build_id}/compatible``: let workers of ``build_id`` claim
+    runs and pinned-queue steps pinned to ``compatible_with``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    compatible_with: str
+
+
+class RepinRequest(BaseModel):
+    """``POST .../workflows/{run_id}/repin``: move the run onto ``build_id``, or unpin
+    it (``None``) so its next tick pins fresh."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    build_id: str | None = None
+
+
 # --------------------------------------------------------------------------- responses
 
 
@@ -192,6 +216,8 @@ class ExecutionView(BaseModel):
     parent_seq: int | None = None
     continued_run_id: str | None = None
     reset_from_run_id: str | None = None
+    versioning_policy: str = "auto_upgrade"
+    pinned_build_id: str | None = None
 
 
 class ExecutionListResponse(BaseModel):
@@ -244,6 +270,56 @@ class TokenGeneratedResponse(BaseModel):
     token: str
     roles: list[str]
     namespaces: list[str]
+
+
+class BuildSummaryView(BaseModel):
+    """JSON view of a :class:`~loomwork.versioning.builds.BuildSummary`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    build_id: str
+    pinned_running_runs: int
+    live_workers: int
+    orphaned: bool
+
+
+class BuildsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    builds: list[BuildSummaryView]
+
+
+class WorkerPresenceView(BaseModel):
+    """JSON view of a :class:`~loomwork.store.records.WorkerPresence`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: str
+    build_id: str
+    last_seen_at: str
+    expires_at: str
+
+
+class WorkersResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workers: list[WorkerPresenceView]
+
+
+class BuildCompatibilityView(BaseModel):
+    """JSON view of a :class:`~loomwork.store.records.BuildCompatibility`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    build_id: str
+    compatible_with: str
+    created_at: str
+
+
+class BuildCompatibilityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    compatibility: list[BuildCompatibilityView]
 
 
 class HealthResponse(BaseModel):

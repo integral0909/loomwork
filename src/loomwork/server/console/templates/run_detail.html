@@ -17,6 +17,13 @@
     {% if record.last_tick_error %}
     <div><span class="field-label">Last tick error</span><br>{{ record.last_tick_error }}</div>
     {% endif %}
+    <div><span class="field-label">Versioning policy</span><br>{{ record.versioning_policy.value }}</div>
+    {% if record.pinned_build_id %}
+    <div><span class="field-label">Pinned build</span><br>
+      {{ record.pinned_build_id }}
+      &middot; <a href="/console/{{ namespace }}/builds">builds</a>
+    </div>
+    {% endif %}
   </div>
 </div>
 
@@ -157,6 +164,21 @@
     </label>
     <button type="submit" class="danger">Terminate</button>
   </form>
+
+  {% if record.versioning_policy.value == "pinned" %}
+  <form method="post" action="/console/{{ namespace }}/runs/{{ record.run_id }}/repin">
+    <h3>Repin</h3>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted">
+      Move this run onto a different build (or unpin it, so its next tick pins fresh) --
+      the escape hatch for a run stuck waiting for a build with no live or compatible
+      worker. See <code>docs/guides/versioning.md</code>.
+    </p>
+    <label><span class="field-label">Build id</span><input type="text" name="build_id"></label>
+    <label><input type="checkbox" name="unpin"> Unpin instead</label>
+    <button type="submit" class="secondary">Repin</button>
+  </form>
+  {% endif %}
 
   <form method="post" action="/console/{{ namespace }}/runs/{{ record.run_id }}/reset">
     <h3>Reset</h3>

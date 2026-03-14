@@ -121,7 +121,8 @@ other long-lived credential.
   'failed' AND created_at >= now() - interval '1 day'`); `limit` bounds the page size. An
   invalid query renders the parser's own pointed-at-the-token error message instead of
   failing the page.
-- **Run detail** (`/console/{namespace}/runs/{run_id}`): summary fields, decoded result
+- **Run detail** (`/console/{namespace}/runs/{run_id}`): summary fields (including
+  versioning policy and, for a pinned run, the build id it is pinned to), decoded result
   or failure (with its full cause chain), search attributes, pending step jobs (attempt,
   lease owner and expiry, last failure), children, the parent link, the continue-as-new
   chain in both directions, and the reset chain in both directions (`reset_from_run_id`
@@ -130,7 +131,9 @@ other long-lived credential.
   timeline (event id, time, kind, and every other field of that event, decoded the same
   way results are). Below that, the signal/cancel/terminate/reset forms (`control_write`
   only): reset picks a point (first tick, before the last tick, or after a given tick
-  number) and requires a reason, exactly like `loomwork workflow reset`.
+  number) and requires a reason, exactly like `loomwork workflow reset`. A `PINNED` run
+  additionally gets a **repin** form (a build id, or an "unpin instead" checkbox),
+  exactly like `loomwork workflow repin` (see [versioning](guides/versioning.md#operating-builds)).
 - **Batch** (`/console/{namespace}/batch`): enter a
   [visibility query](visibility-queries.md), preview every run it matches (a plain read,
   `control_read`), then cancel or terminate all of them in one action (`control_write`;
@@ -141,16 +144,27 @@ other long-lived credential.
   spec, policy, next fire time, upcoming fire times, currently running and recently
   completed actions, and pause/unpause/trigger/backfill/delete forms (`control_write`).
   **New schedule** (`/console/{namespace}/schedules/new`) and **edit** (`.../{schedule_id}
-  /edit`, spec/policy/note only -- the workflow and its arguments cannot be changed after
-  creation) validate cron expressions, time zones and the JSON arguments array
-  server-side and, on a problem, re-render the same form with the message next to what
-  needs fixing and every other field exactly as submitted, rather than an error page.
-  Delete requires the same explicit confirmation checkbox as terminating a run; the runs
-  a schedule already started keep running.
+  /edit`, spec/policy/note and the action-level options below -- the workflow and its
+  arguments cannot be changed after creation) validate cron expressions, time zones, the
+  JSON arguments array, id reuse/conflict/versioning policies, timeouts and the search
+  attributes object server-side and, on a problem, re-render the same form with the
+  message next to what needs fixing and every other field exactly as submitted, rather
+  than an error page. Both forms and the detail page show `id_reuse_policy`,
+  `id_conflict_policy`, `versioning_policy`, `run_timeout`, `execution_timeout` and
+  search attributes -- the same per-run options `loomwork schedule create`/`update` take
+  (see [schedules: id policies, versioning and per-run timeouts](guides/schedules.md#id-policies-versioning-and-per-run-timeouts));
+  on edit, a blank field leaves that option unchanged. Delete requires the same explicit
+  confirmation checkbox as terminating a run; the runs a schedule already started keep
+  running.
+- **Builds** (`/console/{namespace}/builds`): the same drain summary as
+  [`loomwork builds list`](cli.md#loomwork-builds) -- live workers, pinned running runs,
+  an `orphaned` flag and declared compatibility per build id -- with declare/revoke
+  compatibility forms (`control_write`, CSRF); read-only otherwise (`control_read`). See
+  [versioning](guides/versioning.md#operating-builds).
 - **Diagnostics** (`/console/{namespace}/diagnostics`): the same pass/warn/fail report as
   [`loomwork doctor`](cli.md#loomwork-doctor) -- store schema, outbox backlog, tick
-  failures, step and timer backlogs, overdue schedules and history size -- read-only,
-  `control_read`.
+  failures, step and timer backlogs, overdue schedules, history size and orphaned pinned
+  builds -- read-only, `control_read`.
 
 ## What it does not do
 

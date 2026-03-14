@@ -13,6 +13,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from loomwork.server.console.formatting import describe_payload, describe_value
+from loomwork.visibility.attributes import decode_attributes
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -27,4 +28,5 @@ def build_environment() -> Environment:
     )
     env.filters["describe_value"] = describe_value
     env.filters["describe_payload"] = describe_payload
+    env.filters["decode_attributes"] = decode_attributes
     return env

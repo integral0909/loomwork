@@ -45,16 +45,21 @@ from loomwork.schedules.service import ScheduleService
 from loomwork.server.auth import audit
 from loomwork.server.errors import bad_request
 from loomwork.server.responses import (
+    build_compatibility_view,
+    build_summary_view,
     event_view,
     execution_view,
     failure_view,
     payload_view,
     schedule_view,
+    worker_presence_view,
 )
 from loomwork.server.schemas import (
     BackfillRequest,
     CreateScheduleRequest,
+    DeclareCompatibleRequest,
     ReasonRequest,
+    RepinRequest,
     RequestUpdateRequest,
     ResetWorkflowRequest,
     ScheduleNoteRequest,
@@ -119,6 +124,9 @@ async def start_workflow(request: Request) -> JSONResponse:
         retry_policy=retry,
         id_reuse_policy=IdReusePolicy(body.id_reuse_policy),
         id_conflict_policy=IdConflictPolicy(body.id_conflict_policy),
+        versioning_policy=(
+            VersioningPolicy(body.versioning_policy) if body.versioning_policy else None
+        ),
     )
     _audit(request, token.id, "start_workflow", record.run_id)
     return JSONResponse(execution_view(record), status_code=201)
@@ -374,6 +382,79 @@ async def workflow_result(request: Request) -> JSONResponse:
     record = await ns.engine.wait_closed(run_id, timeout)
     _audit(request, token.id, "workflow_result", run_id)
     return JSONResponse(execution_view(record))
+
+
+async def repin_workflow(request: Request) -> JSONResponse:
+    """Move a run onto a different build (or unpin it): the operator escape hatch for a
+    run stuck pinned to a build with no live or compatible worker (see :mod:`loomwork.
+    versioning.builds` and ``docs/guides/versioning.md``)."""
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    run_id = request.path_params["run_id"]
+    body = await _model(request, RepinRequest)
+    await ns.engine.versioning.repin(run_id, body.build_id)
+    record = await ns.engine.resolve(run_id=run_id)
+    _audit(request, token.id, "repin_workflow", run_id)
+    return JSONResponse(execution_view(record))
+
+
+# --------------------------------------------------------------------------- builds
+
+
+async def list_builds(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    builds = await ns.engine.versioning.builds_summary()
+    _audit(request, token.id, "list_builds")
+    return JSONResponse({"builds": [build_summary_view(b) for b in builds]})
+
+
+async def list_workers(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    workers = await ns.engine.versioning.list_live_workers()
+    _audit(request, token.id, "list_workers")
+    return JSONResponse({"workers": [worker_presence_view(w) for w in workers]})
+
+
+async def list_build_compatibility(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_read"
+    )
+    ns = _namespace(request)
+    compat = await ns.engine.versioning.list_compatibility()
+    _audit(request, token.id, "list_build_compatibility")
+    return JSONResponse({"compatibility": [build_compatibility_view(c) for c in compat]})
+
+
+async def declare_build_compatible(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    build_id = request.path_params["build_id"]
+    body = await _model(request, DeclareCompatibleRequest)
+    await ns.engine.versioning.declare_compatible(build_id, body.compatible_with)
+    _audit(request, token.id, "declare_build_compatible", build_id)
+    return JSONResponse({"ok": True})
+
+
+async def revoke_build_compatibility(request: Request) -> JSONResponse:
+    token = await authenticate(
+        request, namespace=_namespace_name(request), capability="control_write"
+    )
+    ns = _namespace(request)
+    build_id = request.path_params["build_id"]
+    compatible_with = request.path_params["compatible_with"]
+    ok = await ns.engine.versioning.revoke_compatible(build_id, compatible_with)
+    _audit(request, token.id, "revoke_build_compatibility", build_id)
+    return JSONResponse({"ok": ok})
 
 
 # --------------------------------------------------------------------------- schedules
@@ -645,6 +726,16 @@ routes = [
     Route("/workflows/{run_id}/terminate", terminate_workflow, methods=["POST"]),
     Route("/workflows/{run_id}/reset", reset_workflow, methods=["POST"]),
     Route("/workflows/{run_id}/result", workflow_result, methods=["GET"]),
+    Route("/workflows/{run_id}/repin", repin_workflow, methods=["POST"]),
+    Route("/builds", list_builds, methods=["GET"]),
+    Route("/builds/workers", list_workers, methods=["GET"]),
+    Route("/builds/compatibility", list_build_compatibility, methods=["GET"]),
+    Route("/builds/{build_id}/compatible", declare_build_compatible, methods=["POST"]),
+    Route(
+        "/builds/{build_id}/compatible/{compatible_with}",
+        revoke_build_compatibility,
+        methods=["DELETE"],
+    ),
     Route("/schedules", create_schedule, methods=["POST"]),
     Route("/schedules", list_schedules, methods=["GET"]),
     Route("/schedules/{schedule_id}", describe_schedule, methods=["GET"]),

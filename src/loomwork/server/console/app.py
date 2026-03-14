@@ -21,10 +21,16 @@ from loomwork.server.console.batch_views import (
     batch_terminate_view,
     batch_view,
 )
+from loomwork.server.console.builds_views import (
+    build_declare_compatible_view,
+    build_revoke_compatible_view,
+    builds_list_view,
+)
 from loomwork.server.console.diagnostics_views import diagnostics_view
 from loomwork.server.console.runs_views import (
     run_cancel_view,
     run_detail_view,
+    run_repin_view,
     run_reset_view,
     run_signal_view,
     run_terminate_view,
@@ -76,6 +82,7 @@ def build_console_app(state: ServerState) -> Starlette:
             "/{namespace}/runs/{run_id}/terminate", run_terminate_view(runtime), methods=["POST"]
         ),
         Route("/{namespace}/runs/{run_id}/reset", run_reset_view(runtime), methods=["POST"]),
+        Route("/{namespace}/runs/{run_id}/repin", run_repin_view(runtime), methods=["POST"]),
         Route("/{namespace}/batch", batch_view(runtime), methods=["GET"]),
         Route("/{namespace}/batch/cancel", batch_cancel_view(runtime), methods=["POST"]),
         Route("/{namespace}/batch/terminate", batch_terminate_view(runtime), methods=["POST"]),
@@ -117,6 +124,17 @@ def build_console_app(state: ServerState) -> Starlette:
             methods=["POST"],
         ),
         Route("/{namespace}/diagnostics", diagnostics_view(runtime), methods=["GET"]),
+        Route("/{namespace}/builds", builds_list_view(runtime), methods=["GET"]),
+        Route(
+            "/{namespace}/builds/compatible",
+            build_declare_compatible_view(runtime),
+            methods=["POST"],
+        ),
+        Route(
+            "/{namespace}/builds/{build_id}/compatible/{compatible_with}/revoke",
+            build_revoke_compatible_view(runtime),
+            methods=["POST"],
+        ),
     ]
     app = Starlette(routes=routes, middleware=[Middleware(SecurityHeadersMiddleware)])
     console_errors.install(app, runtime)

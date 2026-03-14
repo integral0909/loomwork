@@ -22,6 +22,28 @@
     {% for arg in state.action.args %}{{ arg | describe_payload }}{% if not loop.last %}, {% endif %}{% endfor %}
   </p>
   {% endif %}
+  {% if state.action.id_reuse_policy %}
+  <p><span class="field-label">Id reuse policy</span><br>{{ state.action.id_reuse_policy.value }}</p>
+  {% endif %}
+  {% if state.action.id_conflict_policy %}
+  <p><span class="field-label">Id conflict policy</span><br>{{ state.action.id_conflict_policy.value }}</p>
+  {% endif %}
+  {% if state.action.versioning_policy %}
+  <p><span class="field-label">Versioning policy</span><br>{{ state.action.versioning_policy.value }}</p>
+  {% endif %}
+  {% if state.action.run_timeout %}
+  <p><span class="field-label">Run timeout</span><br>{{ state.action.run_timeout }}</p>
+  {% endif %}
+  {% if state.action.execution_timeout %}
+  <p><span class="field-label">Execution timeout</span><br>{{ state.action.execution_timeout }}</p>
+  {% endif %}
+  {% if state.action.search_attributes %}
+  <p><span class="field-label">Search attributes</span><br>
+    {% for name, value in (state.action.search_attributes | decode_attributes).items() %}
+    {{ name }}={{ value | describe_value }}{% if not loop.last %}, {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
 </div>
 
 {% if upcoming %}

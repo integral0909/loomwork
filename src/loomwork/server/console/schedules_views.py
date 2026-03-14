@@ -15,9 +15,10 @@ typo.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from starlette.requests import Request
@@ -25,6 +26,7 @@ from starlette.responses import Response
 
 from loomwork.codec.converter import default_converter
 from loomwork.errors import ScheduleConflictError, ScheduleExistsError
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy
 from loomwork.schedules.model import (
     OverlapPolicy,
     ScheduleAction,
@@ -45,6 +47,8 @@ from loomwork.server.console.runtime import (
     require_session,
 )
 from loomwork.server.console.util import parse_form, parse_int
+from loomwork.visibility.attributes import decode_attributes, encode_attributes
+from loomwork.visibility.schema import SchemaError
 
 View = Callable[[Request], Awaitable[Response]]
 
@@ -52,6 +56,9 @@ _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
 _UPCOMING_COUNT = 5
 _OVERLAP_POLICIES = [p.value for p in OverlapPolicy]
+_ID_REUSE_POLICIES = [p.value for p in IdReusePolicy]
+_ID_CONFLICT_POLICIES = [p.value for p in IdConflictPolicy]
+_VERSIONING_POLICIES = [p.value for p in VersioningPolicy]
 
 
 class _FormError(ValueError):
@@ -274,6 +281,80 @@ def _args_from_form(form: dict[str, str]) -> list[Any]:
     return value
 
 
+def _search_attributes_from_form(form: dict[str, str]) -> dict[str, Any] | None:
+    """``None`` when the field is blank (no change on edit, none set on create); a JSON
+    object otherwise. Replaces the whole set, like ``loomwork schedule ... --attr``."""
+    text = form.get("search_attributes", "").strip()
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _FormError(f"Search attributes must be valid JSON: {exc.msg}.") from exc
+    if not isinstance(value, dict):
+        raise _FormError('Search attributes must be a JSON object, for example {"tier": "gold"}.')
+    return value
+
+
+def _optional_duration_from_form(
+    form: dict[str, str], field: str, *, label: str
+) -> timedelta | None:
+    raw = form.get(field, "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        raise _FormError(f"{label} must be a number of seconds.") from None
+    if seconds <= 0:
+        raise _FormError(f"{label} must be positive.")
+    return timedelta(seconds=seconds)
+
+
+def _action_overrides_from_form(form: dict[str, str]) -> dict[str, Any]:
+    """Action-level fields given in the form, as keyword arguments for
+    :class:`~loomwork.schedules.model.ScheduleAction` -- only the ones the form actually
+    set (a blank select or field means "leave alone" on edit, "use the default" on
+    create)."""
+    overrides: dict[str, Any] = {}
+    if form.get("id_reuse_policy"):
+        overrides["id_reuse_policy"] = IdReusePolicy(form["id_reuse_policy"])
+    if form.get("id_conflict_policy"):
+        overrides["id_conflict_policy"] = IdConflictPolicy(form["id_conflict_policy"])
+    if form.get("versioning_policy"):
+        overrides["versioning_policy"] = VersioningPolicy(form["versioning_policy"])
+    run_timeout = _optional_duration_from_form(form, "run_timeout_seconds", label="Run timeout")
+    if run_timeout is not None:
+        overrides["run_timeout"] = run_timeout
+    execution_timeout = _optional_duration_from_form(
+        form, "execution_timeout_seconds", label="Execution timeout"
+    )
+    if execution_timeout is not None:
+        overrides["execution_timeout"] = execution_timeout
+    return overrides
+
+
+def _action_to_form(action: ScheduleAction) -> dict[str, str]:
+    return {
+        "id_reuse_policy": action.id_reuse_policy.value if action.id_reuse_policy else "",
+        "id_conflict_policy": (
+            action.id_conflict_policy.value if action.id_conflict_policy else ""
+        ),
+        "versioning_policy": action.versioning_policy.value if action.versioning_policy else "",
+        "run_timeout_seconds": (
+            str(action.run_timeout.total_seconds()) if action.run_timeout else ""
+        ),
+        "execution_timeout_seconds": (
+            str(action.execution_timeout.total_seconds()) if action.execution_timeout else ""
+        ),
+        "search_attributes": (
+            json.dumps(decode_attributes(action.search_attributes), sort_keys=True)
+            if action.search_attributes
+            else ""
+        ),
+    }
+
+
 def _spec_to_form(spec: ScheduleSpec) -> dict[str, str]:
     return {
         "kind": "interval" if spec.interval is not None else "cron",
@@ -307,6 +388,9 @@ def schedule_create_view(runtime: ConsoleRuntime) -> View:
                 "schedule_create.html",
                 namespace=namespace,
                 overlaps=_OVERLAP_POLICIES,
+                id_reuse_policies=_ID_REUSE_POLICIES,
+                id_conflict_policies=_ID_CONFLICT_POLICIES,
+                versioning_policies=_VERSIONING_POLICIES,
                 form={"kind": "cron", "timezone": "UTC"},
                 error=None,
                 csrf_token=session.csrf,
@@ -322,17 +406,29 @@ def schedule_create_view(runtime: ConsoleRuntime) -> View:
             args = _args_from_form(form)
             spec = _spec_from_form(form)
             policy = _policy_from_form(form)
+            overrides = _action_overrides_from_form(form)
+            raw_attributes = _search_attributes_from_form(form)
             encoded_args = await default_converter.encode_args_async(args)
+            action = ScheduleAction(
+                workflow,
+                encoded_args,
+                search_attributes=(
+                    encode_attributes(raw_attributes, ns.engine.config.search_attributes)
+                    if raw_attributes
+                    else None
+                ),
+                **overrides,
+            )
             state = ScheduleState(
                 schedule_id=schedule_id,
                 spec=spec,
-                action=ScheduleAction(workflow, encoded_args),
+                action=action,
                 policy=policy,
                 paused=form.get("paused") == "on",
                 note=form.get("note", ""),
             )
             saved = await ScheduleService(ns.store, ns.engine.clock).create(state)
-        except (_FormError, ScheduleError) as exc:
+        except (_FormError, ScheduleError, SchemaError) as exc:
             return render(
                 runtime,
                 request,
@@ -340,6 +436,9 @@ def schedule_create_view(runtime: ConsoleRuntime) -> View:
                 status_code=422,
                 namespace=namespace,
                 overlaps=_OVERLAP_POLICIES,
+                id_reuse_policies=_ID_REUSE_POLICIES,
+                id_conflict_policies=_ID_CONFLICT_POLICIES,
+                versioning_policies=_VERSIONING_POLICIES,
                 form=form,
                 error=str(exc),
                 csrf_token=session.csrf,
@@ -352,6 +451,9 @@ def schedule_create_view(runtime: ConsoleRuntime) -> View:
                 status_code=409,
                 namespace=namespace,
                 overlaps=_OVERLAP_POLICIES,
+                id_reuse_policies=_ID_REUSE_POLICIES,
+                id_conflict_policies=_ID_CONFLICT_POLICIES,
+                versioning_policies=_VERSIONING_POLICIES,
                 form=form,
                 error=str(exc),
                 csrf_token=session.csrf,
@@ -380,6 +482,7 @@ def schedule_edit_view(runtime: ConsoleRuntime) -> View:
             form = {
                 **_spec_to_form(current.spec),
                 **_policy_to_form(current.policy),
+                **_action_to_form(current.action),
                 "note": current.note,
             }
             return render(
@@ -389,6 +492,9 @@ def schedule_edit_view(runtime: ConsoleRuntime) -> View:
                 namespace=namespace,
                 state=current,
                 overlaps=_OVERLAP_POLICIES,
+                id_reuse_policies=_ID_REUSE_POLICIES,
+                id_conflict_policies=_ID_CONFLICT_POLICIES,
+                versioning_policies=_VERSIONING_POLICIES,
                 form=form,
                 error=None,
                 csrf_token=session.csrf,
@@ -399,10 +505,25 @@ def schedule_edit_view(runtime: ConsoleRuntime) -> View:
         try:
             spec = _spec_from_form(form)
             policy = _policy_from_form(form)
-            saved = await service.update(
-                schedule_id, spec=spec, policy=policy, note=form.get("note", "")
-            )
-        except (_FormError, ScheduleError) as exc:
+            changes: dict[str, Any] = _action_overrides_from_form(form)
+            raw_attributes = _search_attributes_from_form(form)
+            if raw_attributes:
+                changes["search_attributes"] = encode_attributes(
+                    raw_attributes, ns.engine.config.search_attributes
+                )
+            update_kwargs: dict[str, Any] = {
+                "spec": spec,
+                "policy": policy,
+                "note": form.get("note", ""),
+            }
+            if changes:
+                # ScheduleService.update passes every keyword straight through to
+                # dataclasses.replace, unlike ScheduleHandle.update -- an explicit
+                # ``action=None`` here would wipe the schedule's action, so it is only
+                # included at all when there is something to change.
+                update_kwargs["action"] = dataclasses.replace(current.action, **changes)
+            saved = await service.update(schedule_id, **update_kwargs)
+        except (_FormError, ScheduleError, SchemaError) as exc:
             return render(
                 runtime,
                 request,
@@ -411,6 +532,9 @@ def schedule_edit_view(runtime: ConsoleRuntime) -> View:
                 namespace=namespace,
                 state=current,
                 overlaps=_OVERLAP_POLICIES,
+                id_reuse_policies=_ID_REUSE_POLICIES,
+                id_conflict_policies=_ID_CONFLICT_POLICIES,
+                versioning_policies=_VERSIONING_POLICIES,
                 form=form,
                 error=str(exc),
                 csrf_token=session.csrf,
@@ -424,6 +548,9 @@ def schedule_edit_view(runtime: ConsoleRuntime) -> View:
                 namespace=namespace,
                 state=current,
                 overlaps=_OVERLAP_POLICIES,
+                id_reuse_policies=_ID_REUSE_POLICIES,
+                id_conflict_policies=_ID_CONFLICT_POLICIES,
+                versioning_policies=_VERSIONING_POLICIES,
                 form=form,
                 error=str(exc),
                 csrf_token=session.csrf,

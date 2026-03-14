@@ -33,6 +33,7 @@ from loomwork.diagnostics import (
     build_findings,
 )
 from loomwork.engine.engine import Engine
+from loomwork.options import VersioningPolicy
 from loomwork.schedules.model import ScheduleAction, SchedulePolicy, ScheduleSpec, ScheduleState
 from loomwork.schedules.service import ScheduleService
 from loomwork.sdk.definitions import Registry
@@ -304,6 +305,53 @@ def test_outbox_backlog_is_reported(cli: Cli, db_path: Path) -> None:
     line = _finding(result.out, "outbox backlog")
     assert line.startswith("[FAIL]")
     assert "run_outbox=True" in result.out
+
+
+# --------------------------------------------------------------------------- build versioning
+
+
+def test_orphaned_pinned_build_is_reported(cli: Cli, db_path: Path) -> None:
+    """A run pinned to a build with no live worker (and no declared-compatible one) is
+    stuck by design (see ``docs/adr/0006-worker-build-versioning.md``); constructed for
+    real via the same tick-claim/complete primitives a worker uses, with a build id that
+    never heartbeats, rather than mocked."""
+
+    async def setup() -> None:
+        store = await _open(db_path)
+        try:
+            engine = Engine(store)
+            record = await engine.start_workflow(
+                "doctor.noop",
+                [],
+                workflow_id="pinned-1",
+                versioning_policy=VersioningPolicy.PINNED,
+            )
+            now = datetime.now(UTC)
+            claimed = await store.claim_tick(
+                "w1", now, timedelta(seconds=30), build_id="build-orphan"
+            )
+            assert claimed is not None and claimed.run_id == record.run_id
+            outcome = TickOutcome(
+                worker_id="w1", consumed_through=0, time=now, outbox=[], build_id="build-orphan"
+            )
+            await store.complete_tick(record.run_id, "w1", outcome, now)
+        finally:
+            await store.close()
+
+    _run(setup())
+
+    result = cli("doctor")
+    assert result.code == 1
+    line = _finding(result.out, "build versioning")
+    assert line.startswith("[FAIL]")
+    assert "build-orphan" in line
+    assert "repin" in result.out
+
+
+def test_no_pinned_runs_passes_build_versioning_check(cli: Cli) -> None:
+    result = cli.ok("doctor")
+    line = _finding(result.out, "build versioning")
+    assert line.startswith("[PASS]")
 
 
 # --------------------------------------------------------------------------- build_findings unit tests

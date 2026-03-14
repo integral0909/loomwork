@@ -22,7 +22,7 @@ from loomwork.engine.engine import Engine
 from loomwork.errors import NotFoundError
 from loomwork.interceptors import ClientInterceptor, StepInterceptor
 from loomwork.observability.telemetry import Telemetry
-from loomwork.options import IdConflictPolicy, IdReusePolicy
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy
 from loomwork.retry import RetryPolicy
 from loomwork.sdk.definitions import (
     Registry,
@@ -156,6 +156,7 @@ class Loomwork:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
         headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[R]: ...
 
@@ -171,6 +172,7 @@ class Loomwork:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
         headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]: ...
 
@@ -185,6 +187,7 @@ class Loomwork:
         retry_policy: RetryPolicy | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: VersioningPolicy | None = None,
         headers: dict[str, str] | None = None,
     ) -> WorkflowHandle[Any]:
         self._check_known(workflow)
@@ -198,6 +201,7 @@ class Loomwork:
             retry_policy=retry_policy,
             id_reuse_policy=id_reuse_policy,
             id_conflict_policy=id_conflict_policy,
+            versioning_policy=versioning_policy,
             headers=headers,
         )
 

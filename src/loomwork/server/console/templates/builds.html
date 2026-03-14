@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Builds -- {{ namespace }}{% endblock %}
+{% block content %}
+<h1>Builds -- {{ namespace }}</h1>
+<p class="muted">
+  Every build id seen in a pinned run or a worker heartbeat. See
+  <code>docs/guides/versioning.md</code>. An orphaned build has pinned runs waiting for a
+  worker that never comes -- join one, declare a compatible build below, or repin the
+  runs from their run detail page.
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Build</th><th>Live workers</th><th>Pinned running runs</th><th>Orphaned</th>
+      <th>Declared compatible with</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for build in summaries %}
+    <tr>
+      <td>{{ build.build_id }}</td>
+      <td>{{ build.live_workers }}</td>
+      <td>{{ build.pinned_running_runs }}</td>
+      <td>
+        {% if build.orphaned %}
+        <span class="status-pill status-failed">orphaned</span>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+      <td>
+        {% if compatible_with.get(build.build_id) %}
+        <ul>
+          {% for other in compatible_with[build.build_id] | sort %}
+          <li>
+            {{ other }}
+            {% if can_write %}
+            <form method="post" action="/console/{{ namespace }}/builds/{{ build.build_id }}/compatible/{{ other }}/revoke">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="secondary">revoke</button>
+            </form>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No build has live workers or pinned runs.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if can_write %}
+<div class="card actions">
+  <form method="post" action="/console/{{ namespace }}/builds/compatible">
+    <h3>Declare compatibility</h3>
+    <p class="muted">
+      Let workers of one build claim runs and pinned-queue steps pinned to another (for
+      example a same-day hotfix that changed no workflow code, draining the build it
+      replaces).
+    </p>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><span class="field-label">Build</span>
+      <input type="text" name="build_id" required placeholder="the build that gains eligibility">
+    </label>
+    <label><span class="field-label">Compatible with</span>
+      <input type="text" name="compatible_with" required placeholder="the build it replaces">
+    </label>
+    <button type="submit">Declare</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

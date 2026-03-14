@@ -9,9 +9,17 @@ from loomwork.cli.backend import open_schedule_operations
 from loomwork.cli.commands.common import connected, decode_payload
 from loomwork.cli.errors import ExitCode, UsageError
 from loomwork.cli.output import Console
-from loomwork.cli.parsing import format_duration, parse_arguments, parse_duration, parse_timestamp
+from loomwork.cli.parsing import (
+    format_duration,
+    parse_arguments,
+    parse_duration,
+    parse_key_values,
+    parse_timestamp,
+)
 from loomwork.codec.converter import DataConverter
+from loomwork.options import IdConflictPolicy, IdReusePolicy, VersioningPolicy
 from loomwork.schedules.model import OverlapPolicy, SchedulePolicy, ScheduleSpec, ScheduleState
+from loomwork.visibility.attributes import decode_attributes
 
 
 def _describe_when(state: ScheduleState) -> str:
@@ -43,11 +51,11 @@ _HEADERS = ["schedule", "workflow", "when", "state", "next fire", "running", "st
 
 
 def _fields(state: ScheduleState, converter: DataConverter) -> list[tuple[str, Any]]:
-    spec, policy = state.spec, state.policy
+    spec, policy, action = state.spec, state.policy, state.action
     fields: list[tuple[str, Any]] = [
         ("schedule", state.schedule_id),
-        ("workflow", state.action.workflow_name),
-        ("arguments", [decode_payload(p, converter) for p in state.action.args]),
+        ("workflow", action.workflow_name),
+        ("arguments", [decode_payload(p, converter) for p in action.args]),
         ("when", _describe_when(state)),
         ("state", "paused" if state.paused else "active"),
         ("note", state.note or None),
@@ -59,6 +67,19 @@ def _fields(state: ScheduleState, converter: DataConverter) -> list[tuple[str, A
         fields.append(("jitter", spec.jitter))
     if spec.start_at or spec.end_at:
         fields.append(("active between", f"{spec.start_at or '-'} .. {spec.end_at or '-'}"))
+    if action.id_reuse_policy is not None:
+        fields.append(("id reuse policy", action.id_reuse_policy.value))
+    if action.id_conflict_policy is not None:
+        fields.append(("id conflict policy", action.id_conflict_policy.value))
+    if action.versioning_policy is not None:
+        fields.append(("versioning policy", action.versioning_policy.value))
+    if action.run_timeout is not None:
+        fields.append(("run timeout", action.run_timeout))
+    if action.execution_timeout is not None:
+        fields.append(("execution timeout", action.execution_timeout))
+    if action.search_attributes:
+        decoded = decode_attributes(action.search_attributes)
+        fields += [(f"attr.{key}", decoded[key]) for key in sorted(decoded)]
     fields += [
         ("next fire", state.next_fire_at),
         ("last evaluated", state.last_evaluated),
@@ -86,6 +107,7 @@ async def create(args: argparse.Namespace, console: Console) -> int:
         raise UsageError("give exactly one of --cron and --every")
     stdin_text = console.read_stdin() if "@-" in args.args else None
     positional = parse_arguments(list(args.args), raw_strings=args.raw, stdin_text=stdin_text)
+    attributes = parse_key_values(args.attr or [], what="--attr")
     async with open_schedule_operations(args) as sched:
         handle = await sched.schedules.create(
             args.schedule_id,
@@ -102,6 +124,14 @@ async def create(args: argparse.Namespace, console: Console) -> int:
             pause_on_failure=args.pause_on_failure,
             paused=args.paused,
             note=args.note,
+            id_reuse_policy=args.id_reuse_policy,
+            id_conflict_policy=args.id_conflict_policy,
+            versioning_policy=args.versioning_policy,
+            run_timeout=parse_duration(args.run_timeout) if args.run_timeout else None,
+            execution_timeout=(
+                parse_duration(args.execution_timeout) if args.execution_timeout else None
+            ),
+            search_attributes=attributes or None,
         )
         state = await handle.describe()
         if console.json_output:
@@ -216,9 +246,39 @@ async def update(args: argparse.Namespace, console: Console) -> int:
                     else old_policy.pause_on_failure
                 ),
             )
-        if spec is None and policy is None and args.note is None:
+        attributes = parse_key_values(args.attr, what="--attr") if args.attr is not None else None
+        action_fields = (
+            args.id_reuse_policy,
+            args.id_conflict_policy,
+            args.versioning_policy,
+            args.run_timeout,
+            args.execution_timeout,
+            attributes,
+        )
+        if (
+            spec is None
+            and policy is None
+            and args.note is None
+            and all(v is None for v in action_fields)
+        ):
             raise UsageError("nothing to change")
-        state = await handle.update(spec=spec, policy=policy, note=args.note)
+        state = await handle.update(
+            spec=spec,
+            policy=policy,
+            note=args.note,
+            id_reuse_policy=IdReusePolicy(args.id_reuse_policy) if args.id_reuse_policy else None,
+            id_conflict_policy=(
+                IdConflictPolicy(args.id_conflict_policy) if args.id_conflict_policy else None
+            ),
+            versioning_policy=(
+                VersioningPolicy(args.versioning_policy) if args.versioning_policy else None
+            ),
+            run_timeout=parse_duration(args.run_timeout) if args.run_timeout else None,
+            execution_timeout=(
+                parse_duration(args.execution_timeout) if args.execution_timeout else None
+            ),
+            search_attributes=attributes,
+        )
         _show(console, state, sched.converter)
     return ExitCode.OK
 
@@ -246,6 +306,45 @@ def _bool_flag(parser: argparse.ArgumentParser, name: str, help: str) -> None:
     group.add_argument(f"--no-{name}", dest=dest, action="store_false", default=None)
 
 
+def _add_action_options(parser: argparse.ArgumentParser) -> None:
+    """Options governing every run the schedule starts: unset (the default) leaves the
+    field alone on ``update``, or lets it resolve normally on ``create`` -- see
+    ``docs/guides/schedules.md``."""
+    parser.add_argument(
+        "--id-reuse-policy",
+        choices=[policy.value for policy in IdReusePolicy],
+        help="what a closed run of a fire time's id allows (default: allow_duplicate)",
+    )
+    parser.add_argument(
+        "--id-conflict-policy",
+        choices=[policy.value for policy in IdConflictPolicy],
+        help="what a fire time whose id is already running allows (default: fail)",
+    )
+    parser.add_argument(
+        "--versioning-policy",
+        choices=[policy.value for policy in VersioningPolicy],
+        help="which worker builds may process each run's ticks (default: resolved from "
+        "engine configuration; see docs/guides/versioning.md)",
+    )
+    parser.add_argument(
+        "--run-timeout",
+        metavar="DURATION",
+        help="close each run this schedule starts after this long",
+    )
+    parser.add_argument(
+        "--execution-timeout",
+        metavar="DURATION",
+        help="bound each run's workflow id across retries and continue-as-new",
+    )
+    parser.add_argument(
+        "--attr",
+        action="append",
+        metavar="KEY=VALUE",
+        help="search attribute set on every run this schedule starts (repeatable); "
+        "replaces the whole set when given",
+    )
+
+
 def register(subparsers: Any) -> None:
     parser = subparsers.add_parser(
         "schedule", aliases=["sched"], help="create and operate schedules"
@@ -269,6 +368,7 @@ def register(subparsers: Any) -> None:
     p.add_argument("--pause-on-failure", action="store_true")
     p.add_argument("--paused", action="store_true", help="create the schedule paused")
     p.add_argument("--note", default="")
+    _add_action_options(p)
     connected(p, create)
 
     p = commands.add_parser("list", aliases=["ls"], help="list schedules")
@@ -313,6 +413,7 @@ def register(subparsers: Any) -> None:
     p.add_argument("--catchup-window", metavar="DURATION")
     _bool_flag(p, "pause-on-failure", "pause the schedule when a run fails")
     p.add_argument("--note")
+    _add_action_options(p)
     connected(p, update)
 
     p = commands.add_parser("delete", aliases=["rm"], help="delete a schedule (its runs continue)")

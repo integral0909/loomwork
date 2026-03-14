@@ -362,6 +362,25 @@ async def test_start_with_timeouts_and_retry(control_client: httpx.AsyncClient) 
     assert started_event["retry_policy"]["max_attempts"] == 3
 
 
+async def test_start_with_versioning_policy(control_client: httpx.AsyncClient) -> None:
+    response = await control_client.post(
+        "/workflows",
+        json={
+            "name": "control.waits_for_signal",
+            "workflow_id": "vp-1",
+            "versioning_policy": "pinned",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["versioning_policy"] == "pinned"
+    assert response.json()["pinned_build_id"] is None
+
+    unset = await control_client.post(
+        "/workflows", json={"name": "control.waits_for_signal", "workflow_id": "vp-2"}
+    )
+    assert unset.json()["versioning_policy"] == "auto_upgrade"
+
+
 async def test_list_with_visibility_query(control_client: httpx.AsyncClient) -> None:
     started = await control_client.post(
         "/workflows", json={"name": "control.echo", "args": ["q"], "workflow_id": "query-list-1"}
@@ -451,6 +470,39 @@ async def test_schedule_lifecycle(control_client: httpx.AsyncClient) -> None:
 
     gone = await control_client.get("/schedules/sched-1")
     assert gone.status_code == 404
+
+
+async def test_schedule_action_level_options(control_client: httpx.AsyncClient) -> None:
+    created = await control_client.post(
+        "/schedules",
+        json={
+            "schedule_id": "sched-vp",
+            "workflow": "control.echo",
+            "args": ["hi"],
+            "interval": 3600,
+            "versioning_policy": "pinned",
+            "id_reuse_policy": "reject_duplicate",
+            "run_timeout": 60,
+            "search_attributes": {"tier": "gold"},
+        },
+    )
+    assert created.status_code == 201
+    action = created.json()["action"]
+    assert action["versioning_policy"] == "pinned"
+    assert action["id_reuse_policy"] == "reject_duplicate"
+    assert action["run_timeout"] == 60
+    assert action["search_attributes"]["tier"] == {"type": "string", "value": "gold"}
+
+    updated = await control_client.post(
+        "/schedules/sched-vp/update",
+        json={"id_conflict_policy": "terminate_existing", "search_attributes": {"tier": "silver"}},
+    )
+    assert updated.status_code == 200
+    action = updated.json()["action"]
+    # Unset fields are unaffected by the update -- only the ones given change.
+    assert action["versioning_policy"] == "pinned"
+    assert action["id_conflict_policy"] == "terminate_existing"
+    assert action["search_attributes"]["tier"] == {"type": "string", "value": "silver"}
 
 
 async def test_create_schedule_requires_exactly_one_of_cron_and_interval(

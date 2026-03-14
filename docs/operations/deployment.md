@@ -92,8 +92,10 @@ run the old and new code as two builds side by side instead of one fleet replaci
 itself in place:
 
 1. Mark the workflow (or the specific run) `PINNED` before the change ships:
-   `EngineConfig(workflow_versioning_policy={"orders.process": VersioningPolicy.PINNED})`.
-   Existing `AUTO_UPGRADE` runs are unaffected; this only affects runs started from now on.
+   `EngineConfig(workflow_versioning_policy={"orders.process": VersioningPolicy.PINNED})`,
+   or per run with `--versioning-policy pinned` on `loomwork workflow start` and
+   `loomwork schedule create`/`update`. Existing `AUTO_UPGRADE` runs are unaffected; this
+   only affects runs started from now on.
 2. Deploy the new code as a **new build id**, alongside the old workers, rather than
    replacing them:
    `loomwork worker --app myapp.workflows --build-id "$(git rev-parse --short HEAD)"`.
@@ -107,19 +109,30 @@ itself in place:
    newest build, so some new runs keep starting on the old build until it is retired;
    use a patch instead if every new run must take the new code immediately. Running
    `PINNED` runs stay on the old build until they finish.
-4. Watch drain progress:
-   ```python
-   for build in await client.versioning.builds_summary():
-       print(build.build_id, "pinned:", build.pinned_running_runs, "workers:", build.live_workers)
+4. Watch drain progress with `loomwork builds list` (or the console's **Builds** page,
+   `/console/{namespace}/builds`), which show live workers, pinned running runs and an
+   `orphaned` flag per build id:
+   ```
+   $ loomwork builds list
+   BUILD    LIVE WORKERS  PINNED RUNNING RUNS  ORPHANED  DECLARED COMPATIBLE WITH
+   a1b2c3d  6             142                  -         -
+   e4f5g6h  2             11                   -         -
    ```
    Retire the old build's workers once `pinned_running_runs` reaches zero.
 5. If a build must be retired before it fully drains (a hotfix that changed no workflow
-   code, or an operator decision to force old runs onto new code), either
-   `declare_build_compatible(new_build, old_build)` so the new build's workers pick up
-   the old build's remaining runs, or `client.versioning.repin(run_id, new_build)` case
-   by case. A build with runs pinned to it and no live or compatible worker shows up as
-   `orphaned=True` in `builds_summary()` and is reported through
-   `Telemetry.pinned_runs_waiting` -- alert on it.
+   code, or an operator decision to force old runs onto new code), either declare it
+   compatible with the build it replaces so the new build's workers pick up the old
+   build's remaining runs:
+   ```
+   loomwork builds compatible e4f5g6h --with a1b2c3d
+   ```
+   or repin individual runs case by case (`loomwork workflow repin WORKFLOW_ID --to
+   e4f5g6h`, or the run detail page's **Repin** form). A build with runs pinned to it and
+   no live or compatible worker shows up with `ORPHANED yes` in `loomwork builds list`
+   (and as a `[FAIL]` in `loomwork doctor`), and is reported through
+   `Telemetry.pinned_runs_waiting` -- alert on it. See [the CLI reference](../cli.md#loomwork-builds)
+   and [the console](../console.md#pages) for the full command/page reference, and
+   [versioning](../guides/versioning.md#operating-builds) for the Python API these wrap.
 
 Unversioned workers (no `--build-id`) are unaffected by any of this and keep claiming
 every run, pinned or not, exactly as before; build ids are opt-in per worker, not a

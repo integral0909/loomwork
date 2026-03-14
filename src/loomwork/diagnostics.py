@@ -27,6 +27,7 @@ from typing import Any
 from loomwork.engine.engine import Engine
 from loomwork.store.base import Store
 from loomwork.store.records import ExecutionStatus
+from loomwork.versioning.builds import summarize_builds
 
 #: Defaults shared by the CLI's flags and the control API's query parameters, so a bare
 #: ``loomwork doctor`` and a bare ``GET /control/diagnostics`` agree.
@@ -129,6 +130,33 @@ class LargeHistory:
 
 
 @dataclass(frozen=True, slots=True)
+class OrphanedBuild:
+    """A pinned build with running runs but no live or compatible worker to process
+    them (see :func:`loomwork.versioning.builds.summarize_builds`). These runs are
+    stuck until an operator joins a matching worker, declares a compatible build, or
+    repins them (``loomwork workflow repin`` / ``loomwork builds compatible``)."""
+
+    build_id: str
+    pinned_running_runs: int
+    live_workers: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "build_id": self.build_id,
+            "pinned_running_runs": self.pinned_running_runs,
+            "live_workers": self.live_workers,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OrphanedBuild:
+        return cls(
+            build_id=str(data["build_id"]),
+            pinned_running_runs=int(data["pinned_running_runs"]),
+            live_workers=int(data["live_workers"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class QueueBacklog:
     """The oldest unclaimed, ready-to-run step job on one queue.
 
@@ -171,6 +199,7 @@ class DiagnosticsSnapshot:
     large_histories_capped: bool
     history_limit_bytes: int | None
     history_limit_events: int
+    orphaned_builds: tuple[OrphanedBuild, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -193,6 +222,7 @@ class DiagnosticsSnapshot:
             "large_histories_capped": self.large_histories_capped,
             "history_limit_bytes": self.history_limit_bytes,
             "history_limit_events": self.history_limit_events,
+            "orphaned_builds": [b.to_dict() for b in self.orphaned_builds],
         }
 
     @classmethod
@@ -221,6 +251,9 @@ class DiagnosticsSnapshot:
             large_histories_capped=bool(data["large_histories_capped"]),
             history_limit_bytes=data.get("history_limit_bytes"),
             history_limit_events=int(data["history_limit_events"]),
+            orphaned_builds=tuple(
+                OrphanedBuild.from_dict(b) for b in data.get("orphaned_builds", [])
+            ),
         )
 
 
@@ -300,6 +333,15 @@ async def collect_diagnostics(
         )
     ]
 
+    pinned_counts = await store.count_pinned_runs()
+    presence = await store.list_worker_builds(now)
+    compat = await store.list_build_compatibility()
+    orphaned_builds = tuple(
+        OrphanedBuild(b.build_id, b.pinned_running_runs, b.live_workers)
+        for b in summarize_builds(pinned_counts, presence, compat)
+        if b.orphaned
+    )
+
     return DiagnosticsSnapshot(
         now=now,
         schema_version=schema_version,
@@ -320,6 +362,7 @@ async def collect_diagnostics(
         large_histories_capped=len(large_histories) > limit,
         history_limit_bytes=history_limit_bytes,
         history_limit_events=history_limit_events,
+        orphaned_builds=orphaned_builds,
     )
 
 
@@ -522,6 +565,22 @@ def _history_size_finding(snapshot: DiagnosticsSnapshot) -> Finding:
     )
 
 
+def _builds_finding(snapshot: DiagnosticsSnapshot) -> Finding:
+    if not snapshot.orphaned_builds:
+        return Finding("build versioning", Status.PASS, "no pinned build is orphaned")
+    sample = _sample(
+        [f"{b.build_id} ({b.pinned_running_runs} pinned run(s))" for b in snapshot.orphaned_builds]
+    )
+    return Finding(
+        "build versioning",
+        Status.FAIL,
+        f"{len(snapshot.orphaned_builds)} build(s) orphaned: {sample}",
+        "no live or compatible worker for these pinned runs; join a matching worker, "
+        "declare a compatible build (`loomwork builds compatible`), or repin the runs "
+        "(`loomwork workflow repin`) -- see docs/guides/versioning.md",
+    )
+
+
 def _token_finding(roles: Sequence[str], namespaces: Sequence[str] | None) -> Finding:
     return Finding(
         "token",
@@ -557,6 +616,7 @@ def build_findings(
         _timers_finding(snapshot, timer_overdue_seconds),
         _schedules_finding(snapshot, schedule_overdue_seconds),
         _history_size_finding(snapshot),
+        _builds_finding(snapshot),
     ]
     if roles is not None:
         findings.append(_token_finding(roles, namespaces))
@@ -576,6 +636,7 @@ __all__ = [
     "DiagnosticsSnapshot",
     "Finding",
     "LargeHistory",
+    "OrphanedBuild",
     "OverdueSchedule",
     "QueueBacklog",
     "Status",

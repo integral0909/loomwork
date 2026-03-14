@@ -172,6 +172,9 @@ def execution_fields(record: ExecutionRecord, converter: DataConverter) -> list[
         fields.append(("reset from", record.reset_from_run_id))
     if record.continued_run_id:
         fields.append(("continued as", record.continued_run_id))
+    if record.versioning_policy.value != "auto_upgrade" or record.pinned_build_id:
+        fields.append(("versioning policy", record.versioning_policy.value))
+        fields.append(("pinned build", record.pinned_build_id))
     return fields
 
 

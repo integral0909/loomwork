@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from loomwork.codec.converter import default_converter
+from loomwork.options import VersioningPolicy
 from loomwork.sdk.definitions import Registry
 from loomwork.server.app import create_app
 from loomwork.server.auth import Role, TokenFile, generate_token
@@ -128,6 +129,98 @@ async def test_run_detail_renders_summary_and_search_attributes(console_env: Con
     assert response.status_code == 200
     assert "detail-1" in response.text
     assert "running" in response.text.lower()
+
+
+async def test_run_detail_shows_versioning_policy_and_pinned_build(
+    console_env: ConsoleEnv,
+) -> None:
+    ns = console_env.app.state.server.namespace("default")
+    record = await ns.engine.start_workflow(
+        "console.echo",
+        [default_converter.encode("hi")],
+        workflow_id="detail-vp-1",
+        versioning_policy=VersioningPolicy.PINNED,
+    )
+    await ns.engine.versioning.repin(record.run_id, "build-x")
+    await _login_operator(console_env)
+    response = await console_env.client.get(f"/console/default/runs/{record.run_id}")
+    assert response.status_code == 200
+    assert "pinned" in response.text
+    assert "build-x" in response.text
+
+
+async def test_run_detail_shows_no_repin_form_for_auto_upgrade_runs(
+    console_env: ConsoleEnv,
+) -> None:
+    ns = console_env.app.state.server.namespace("default")
+    record = await start_echo(ns.engine, "detail-vp-none")
+    await _login_operator(console_env)
+    response = await console_env.client.get(f"/console/default/runs/{record.run_id}")
+    assert response.status_code == 200
+    assert f"runs/{record.run_id}/repin" not in response.text
+
+
+async def test_repin_action_moves_a_pinned_run(console_env: ConsoleEnv) -> None:
+    ns = console_env.app.state.server.namespace("default")
+    record = await ns.engine.start_workflow(
+        "console.echo",
+        [default_converter.encode("hi")],
+        workflow_id="detail-repin-1",
+        versioning_policy=VersioningPolicy.PINNED,
+    )
+    await ns.engine.versioning.repin(record.run_id, "build-old")
+    await _login_operator(console_env)
+    page = await console_env.client.get(f"/console/default/runs/{record.run_id}")
+    csrf = extract_csrf(page.text)
+
+    response = await console_env.client.post(
+        f"/console/default/runs/{record.run_id}/repin",
+        data={"csrf_token": csrf, "build_id": "build-new"},
+    )
+    assert response.status_code == 303
+    followed = await console_env.client.get(response.headers["location"])
+    assert "Repinned" in followed.text
+
+    described = await ns.engine.describe(record.run_id)
+    assert described.pinned_build_id == "build-new"
+
+
+async def test_repin_action_unpin(console_env: ConsoleEnv) -> None:
+    ns = console_env.app.state.server.namespace("default")
+    record = await ns.engine.start_workflow(
+        "console.echo",
+        [default_converter.encode("hi")],
+        workflow_id="detail-repin-unpin",
+        versioning_policy=VersioningPolicy.PINNED,
+    )
+    await ns.engine.versioning.repin(record.run_id, "build-old")
+    await _login_operator(console_env)
+    page = await console_env.client.get(f"/console/default/runs/{record.run_id}")
+    csrf = extract_csrf(page.text)
+
+    response = await console_env.client.post(
+        f"/console/default/runs/{record.run_id}/repin",
+        data={"csrf_token": csrf, "build_id": "", "unpin": "on"},
+    )
+    assert response.status_code == 303
+    described = await ns.engine.describe(record.run_id)
+    assert described.pinned_build_id is None
+
+
+async def test_reader_cannot_repin(console_env: ConsoleEnv) -> None:
+    ns = console_env.app.state.server.namespace("default")
+    record = await ns.engine.start_workflow(
+        "console.echo",
+        [default_converter.encode("hi")],
+        workflow_id="detail-repin-reader",
+        versioning_policy=VersioningPolicy.PINNED,
+    )
+    await login(console_env.client, console_env.tokens.reader)
+    response = await console_env.client.post(
+        f"/console/default/runs/{record.run_id}/repin",
+        data={"csrf_token": "irrelevant", "build_id": "build-new"},
+    )
+    assert response.status_code == 403
 
 
 async def test_run_detail_shows_history_and_pending_step_then_result(

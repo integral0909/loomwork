@@ -154,6 +154,31 @@ compatible with it) that has no live workers -- join one, declare a compatible b
 `await client.versioning.repin(run_id, other_build_id)` to move it. See
 `docs/operations/deployment.md` for the full rolling-deploy walkthrough.
 
+### Operating builds
+
+An operator without a Python shell open uses the CLI or the console instead of
+`client.versioning` directly -- both talk to the same `BuildVersioning` surface, through
+the control API when there is no direct store access (see `docs/server.md`):
+
+```
+loomwork builds list                              # drain status: live workers, pinned
+                                                    # running runs, orphaned, declared
+                                                    # compatibility, per build id
+loomwork builds workers                            # every worker's current heartbeat
+loomwork builds compatible NEW --with OLD          # let NEW's workers drain OLD's runs
+loomwork builds compatible NEW --with OLD --revoke # undo that
+loomwork workflow repin ORDER-123 --to NEW         # move one run onto a different build
+loomwork workflow repin ORDER-123 --unpin          # or unpin it: the next tick pins fresh
+```
+
+The console's **Builds** page (`/console/{namespace}/builds`) shows the same summary
+with declare/revoke forms, and the run detail page gains a **Repin** form for any run
+whose versioning policy is `PINNED`. `loomwork doctor` (and the console's diagnostics
+page) fail the `build versioning` check when any build is orphaned, so a stuck rollout
+shows up the same way any other unhealthy condition does. See
+[the CLI reference](../cli.md#loomwork-builds) and
+[the console reference](../console.md#pages).
+
 ### Child workflows and schedules
 
 A child workflow's versioning policy is **not inherited** from its parent: it resolves

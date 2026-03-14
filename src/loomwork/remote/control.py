@@ -215,6 +215,7 @@ class ControlClient:
         retry_max_attempts: int | None = None,
         id_reuse_policy: IdReusePolicy = IdReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy: IdConflictPolicy = IdConflictPolicy.FAIL,
+        versioning_policy: str | None = None,
     ) -> dict[str, Any]:
         body = {
             "name": name,
@@ -226,6 +227,7 @@ class ControlClient:
             "retry_max_attempts": retry_max_attempts,
             "id_reuse_policy": id_reuse_policy.value,
             "id_conflict_policy": id_conflict_policy.value,
+            "versioning_policy": versioning_policy,
         }
         data: dict[str, Any] = await self._request("POST", "/workflows", json=body)
         return data
@@ -374,6 +376,40 @@ class ControlClient:
             record: dict[str, Any] = data
             return record
 
+    async def repin_workflow(self, run_id: str, build_id: str | None) -> dict[str, Any]:
+        data: dict[str, Any] = await self._request(
+            "POST", f"/workflows/{run_id}/repin", json={"build_id": build_id}
+        )
+        return data
+
+    # ------------------------------------------------------------------ builds
+
+    async def builds_summary(self) -> list[dict[str, Any]]:
+        data = await self._request("GET", "/builds")
+        builds: list[dict[str, Any]] = data["builds"]
+        return builds
+
+    async def list_workers(self) -> list[dict[str, Any]]:
+        data = await self._request("GET", "/builds/workers")
+        workers: list[dict[str, Any]] = data["workers"]
+        return workers
+
+    async def list_build_compatibility(self) -> list[dict[str, Any]]:
+        data = await self._request("GET", "/builds/compatibility")
+        compatibility: list[dict[str, Any]] = data["compatibility"]
+        return compatibility
+
+    async def declare_build_compatible(self, build_id: str, compatible_with: str) -> None:
+        await self._request(
+            "POST",
+            f"/builds/{build_id}/compatible",
+            json={"compatible_with": compatible_with},
+        )
+
+    async def revoke_build_compatibility(self, build_id: str, compatible_with: str) -> bool:
+        data = await self._request("DELETE", f"/builds/{build_id}/compatible/{compatible_with}")
+        return bool(data["ok"])
+
     # ------------------------------------------------------------------ schedules
 
     async def create_schedule(
@@ -393,6 +429,12 @@ class ControlClient:
         pause_on_failure: bool = False,
         paused: bool = False,
         note: str = "",
+        id_reuse_policy: str | None = None,
+        id_conflict_policy: str | None = None,
+        versioning_policy: str | None = None,
+        run_timeout: float | None = None,
+        execution_timeout: float | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body = {
             "schedule_id": schedule_id,
@@ -409,6 +451,12 @@ class ControlClient:
             "pause_on_failure": pause_on_failure,
             "paused": paused,
             "note": note,
+            "id_reuse_policy": id_reuse_policy,
+            "id_conflict_policy": id_conflict_policy,
+            "versioning_policy": versioning_policy,
+            "run_timeout": run_timeout,
+            "execution_timeout": execution_timeout,
+            "search_attributes": search_attributes,
         }
         data: dict[str, Any] = await self._request("POST", "/schedules", json=body)
         return data
@@ -465,6 +513,12 @@ class ControlClient:
         catchup_window: float | None = None,
         pause_on_failure: bool | None = None,
         note: str | None = None,
+        id_reuse_policy: str | None = None,
+        id_conflict_policy: str | None = None,
+        versioning_policy: str | None = None,
+        run_timeout: float | None = None,
+        execution_timeout: float | None = None,
+        search_attributes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body = {
             "cron": cron,
@@ -475,6 +529,12 @@ class ControlClient:
             "catchup_window": catchup_window,
             "pause_on_failure": pause_on_failure,
             "note": note,
+            "id_reuse_policy": id_reuse_policy,
+            "id_conflict_policy": id_conflict_policy,
+            "versioning_policy": versioning_policy,
+            "run_timeout": run_timeout,
+            "execution_timeout": execution_timeout,
+            "search_attributes": search_attributes,
         }
         data: dict[str, Any] = await self._request(
             "POST", f"/schedules/{schedule_id}/update", json=body

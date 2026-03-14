@@ -451,3 +451,131 @@ async def test_reader_cannot_backfill(console_env: ConsoleEnv) -> None:
         data={"csrf_token": "x", "start": "2024-01-01T00:00", "end": "2024-01-01T03:00"},
     )
     assert response.status_code == 403
+
+
+# --------------------------------------------------------------------------- action-level fields
+
+
+async def test_create_with_action_level_fields(console_env: ConsoleEnv) -> None:
+    ns = console_env.app.state.server.namespace("default")
+    await login(console_env.client, console_env.tokens.operator)
+    csrf = await _new_schedule_csrf(console_env)
+
+    form = {
+        **_CRON_FORM,
+        "schedule_id": "created-vp",
+        "id_reuse_policy": "reject_duplicate",
+        "id_conflict_policy": "use_existing",
+        "versioning_policy": "pinned",
+        "run_timeout_seconds": "3600",
+        "execution_timeout_seconds": "7200",
+        "search_attributes": '{"tier": "gold"}',
+    }
+    response = await console_env.client.post(
+        "/console/default/schedules/new", data={**form, "csrf_token": csrf}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    state = await ns.store.get_schedule("created-vp")
+    action = state.action
+    assert action.id_reuse_policy is not None and action.id_reuse_policy.value == "reject_duplicate"
+    assert (
+        action.id_conflict_policy is not None and action.id_conflict_policy.value == "use_existing"
+    )
+    assert action.versioning_policy is not None and action.versioning_policy.value == "pinned"
+    assert action.run_timeout is not None and action.run_timeout.total_seconds() == 3600
+    assert action.execution_timeout is not None and action.execution_timeout.total_seconds() == 7200
+    assert action.search_attributes == {"tier": {"type": "string", "value": "gold"}}
+
+    detail = await console_env.client.get("/console/default/schedules/created-vp")
+    assert "pinned" in detail.text
+    assert "gold" in detail.text
+
+
+async def test_create_invalid_search_attributes_json_shows_inline_error(
+    console_env: ConsoleEnv,
+) -> None:
+    await login(console_env.client, console_env.tokens.operator)
+    csrf = await _new_schedule_csrf(console_env)
+
+    form = {**_CRON_FORM, "search_attributes": "{not json"}
+    response = await console_env.client.post(
+        "/console/default/schedules/new", data={**form, "csrf_token": csrf}
+    )
+    assert response.status_code == 422
+    assert "valid JSON" in response.text
+
+
+async def test_edit_updates_action_level_fields_and_leaves_others_alone(
+    console_env: ConsoleEnv,
+) -> None:
+    await _create_schedule(console_env, "edit-vp")
+    ns = console_env.app.state.server.namespace("default")
+    await login(console_env.client, console_env.tokens.operator)
+    page = await console_env.client.get("/console/default/schedules/edit-vp/edit")
+    csrf = extract_csrf(page.text)
+
+    response = await console_env.client.post(
+        "/console/default/schedules/edit-vp/edit",
+        data={
+            "csrf_token": csrf,
+            "kind": "interval",
+            "interval_seconds": "3600",
+            "timezone": "UTC",
+            "overlap": "skip",
+            "catchup_window_seconds": "60",
+            "versioning_policy": "pinned",
+            "search_attributes": '{"tier": "gold"}',
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    state = await ns.store.get_schedule("edit-vp")
+    assert state.action.versioning_policy is not None
+    assert state.action.versioning_policy.value == "pinned"
+    assert state.action.search_attributes == {"tier": {"type": "string", "value": "gold"}}
+
+    # A second edit that leaves the new fields blank keeps them untouched.
+    page = await console_env.client.get("/console/default/schedules/edit-vp/edit")
+    csrf = extract_csrf(page.text)
+    response = await console_env.client.post(
+        "/console/default/schedules/edit-vp/edit",
+        data={
+            "csrf_token": csrf,
+            "kind": "interval",
+            "interval_seconds": "1800",
+            "timezone": "UTC",
+            "overlap": "skip",
+            "catchup_window_seconds": "60",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    state = await ns.store.get_schedule("edit-vp")
+    assert state.spec.interval is not None and state.spec.interval.total_seconds() == 1800
+    assert state.action.versioning_policy is not None
+    assert state.action.versioning_policy.value == "pinned"
+    assert state.action.search_attributes == {"tier": {"type": "string", "value": "gold"}}
+
+
+async def test_edit_invalid_search_attributes_json_shows_inline_error(
+    console_env: ConsoleEnv,
+) -> None:
+    await _create_schedule(console_env, "edit-bad-attrs")
+    await login(console_env.client, console_env.tokens.operator)
+    page = await console_env.client.get("/console/default/schedules/edit-bad-attrs/edit")
+    csrf = extract_csrf(page.text)
+
+    response = await console_env.client.post(
+        "/console/default/schedules/edit-bad-attrs/edit",
+        data={
+            "csrf_token": csrf,
+            "kind": "interval",
+            "interval_seconds": "60",
+            "timezone": "UTC",
+            "overlap": "skip",
+            "catchup_window_seconds": "60",
+            "search_attributes": "not json at all",
+        },
+    )
+    assert response.status_code == 422
+    assert "valid JSON" in response.text

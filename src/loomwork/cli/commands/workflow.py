@@ -40,7 +40,7 @@ from loomwork.errors import (
     WorkflowTimedOutError,
 )
 from loomwork.history import history_to_json
-from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint
+from loomwork.options import IdConflictPolicy, IdReusePolicy, ResetPoint, VersioningPolicy
 from loomwork.retry import RetryPolicy
 from loomwork.store.records import ExecutionStatus
 
@@ -112,6 +112,9 @@ async def start(args: argparse.Namespace, console: Console) -> int:
             retry_policy=retry,
             id_reuse_policy=IdReusePolicy(args.id_reuse_policy),
             id_conflict_policy=IdConflictPolicy(args.id_conflict_policy),
+            versioning_policy=(
+                VersioningPolicy(args.versioning_policy) if args.versioning_policy else None
+            ),
         )
         if not args.wait:
             if console.json_output:
@@ -253,6 +256,19 @@ async def reset(args: argparse.Namespace, console: Console) -> int:
         console.note(f"reset to {new_handle.workflow_id} (run {new_handle.run_id}); waiting")
         timeout = parse_duration(args.wait_timeout).total_seconds() if args.wait_timeout else None
         return await _await_result(new_handle, timeout, console)
+
+
+async def repin(args: argparse.Namespace, console: Console) -> int:
+    build_id = None if args.unpin else args.to
+    async with open_operations(args) as ops:
+        handle = handle_for(args, ops)
+        record = await handle.describe()
+        await ops.versioning.repin(record.run_id, build_id)
+    if build_id is None:
+        console.note(f"unpinned {record.run_id}; its next tick pins fresh")
+    else:
+        console.note(f"repinned {record.run_id} to build {build_id!r}")
+    return ExitCode.OK
 
 
 async def steps(args: argparse.Namespace, console: Console) -> int:
@@ -461,6 +477,12 @@ def register(subparsers: Any) -> None:
         default=IdConflictPolicy.FAIL.value,
         help="what a currently-running run of this id allows (default: %(default)s)",
     )
+    p.add_argument(
+        "--versioning-policy",
+        choices=[policy.value for policy in VersioningPolicy],
+        help="which worker builds may process this run's ticks (default: resolved from "
+        "engine configuration; see docs/guides/versioning.md)",
+    )
     p.add_argument("--wait", action="store_true", help="wait for the result and print it")
     p.add_argument(
         "--wait-timeout", metavar="DURATION", help="with --wait: give up after this long"
@@ -531,6 +553,17 @@ def register(subparsers: Any) -> None:
         "--wait-timeout", metavar="DURATION", help="with --wait: give up after this long"
     )
     connected(p, reset)
+
+    p = commands.add_parser("repin", help="move a pinned run onto a different (or no) worker build")
+    add_target_arguments(p)
+    to_build = p.add_mutually_exclusive_group(required=True)
+    to_build.add_argument("--to", metavar="BUILD", help="build id to pin the run to")
+    to_build.add_argument(
+        "--unpin",
+        action="store_true",
+        help="unpin the run; its next tick pins fresh, to whichever build claims it",
+    )
+    connected(p, repin)
 
     p = commands.add_parser("steps", help="list a run's pending step jobs")
     add_target_arguments(p)

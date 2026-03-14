@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 from tests.cli.conftest import Cli, finish
 
@@ -150,3 +151,70 @@ def test_delete(cli: Cli) -> None:
 
 def test_describe_missing_schedule(cli: Cli) -> None:
     assert cli("schedule", "describe", "ghost").code == 3
+
+
+# --------------------------------------------------------------------------- action-level options
+
+
+def test_create_with_versioning_and_id_policies_and_timeouts_and_attrs(cli: Cli) -> None:
+    created = create(
+        cli,
+        "vp-sched",
+        "--versioning-policy",
+        "pinned",
+        "--id-reuse-policy",
+        "reject_duplicate",
+        "--id-conflict-policy",
+        "use_existing",
+        "--run-timeout",
+        "1h",
+        "--execution-timeout",
+        "2h",
+        "--attr",
+        "tier=gold",
+        "--attr",
+        "amount=12.5",
+    )
+    action = cast(dict[str, Any], created["action"])
+    assert action["versioning_policy"] == "pinned"
+    assert action["id_reuse_policy"] == "reject_duplicate"
+    assert action["id_conflict_policy"] == "use_existing"
+    assert action["run_timeout"] == 3600
+    assert action["execution_timeout"] == 7200
+    assert action["search_attributes"]["tier"] == {"type": "string", "value": "gold"}
+    assert action["search_attributes"]["amount"] == {"type": "float", "value": 12.5}
+
+    described = cli.ok("schedule", "describe", "vp-sched")
+    assert "versioning policy:   pinned" in described.out or "versioning policy:" in described.out
+    assert "attr.tier:" in described.out
+    assert "gold" in described.out
+
+
+def test_update_changes_action_fields_and_replaces_attrs(cli: Cli) -> None:
+    create(cli, "upd-sched", "--attr", "tier=gold")
+    cli.ok(
+        "schedule",
+        "update",
+        "upd-sched",
+        "--versioning-policy",
+        "pinned",
+        "--id-conflict-policy",
+        "terminate_existing",
+        "--run-timeout",
+        "30m",
+        "--attr",
+        "tier=silver",
+    )
+    data = json.loads(cli.ok("schedule", "describe", "upd-sched", "--json").out)
+    action = data["action"]
+    assert action["versioning_policy"] == "pinned"
+    assert action["id_conflict_policy"] == "terminate_existing"
+    assert action["run_timeout"] == 1800
+    assert action["search_attributes"] == {"tier": {"type": "string", "value": "silver"}}
+
+    # A second update that gives none of these leaves them exactly as they were.
+    cli.ok("schedule", "update", "upd-sched", "--note", "keep going")
+    data = json.loads(cli.ok("schedule", "describe", "upd-sched", "--json").out)
+    assert data["action"]["versioning_policy"] == "pinned"
+    assert data["action"]["search_attributes"] == {"tier": {"type": "string", "value": "silver"}}
+    assert data["note"] == "keep going"

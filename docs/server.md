@@ -335,7 +335,7 @@ All worker-API paths are under `/v1/namespaces/{namespace}`; control-API paths a
 | ------ | ---- | ------ |
 | GET | `/control/whoami` | The caller's own token id, roles, namespaces and the server's current time (for clock skew checks); any correctly-scoped token, no specific role required. |
 | GET | `/control/diagnostics` | Aggregate health facts for `loomwork doctor --server`: `?tick_failure_threshold=&history_warning_fraction=&queue=&limit=` (`queue` repeatable). Requires `control_read`. |
-| POST | `/control/workflows` | Start a workflow: `{name, args: [...], workflow_id?, search_attributes?, run_timeout?, execution_timeout?, retry_max_attempts?, id_reuse_policy?, id_conflict_policy?}` → `201` with the execution. |
+| POST | `/control/workflows` | Start a workflow: `{name, args: [...], workflow_id?, search_attributes?, run_timeout?, execution_timeout?, retry_max_attempts?, id_reuse_policy?, id_conflict_policy?, versioning_policy?}` → `201` with the execution. |
 | GET | `/control/workflows` | List: `?workflow_name=&status=&limit=`, or `?query=<visibility query>&limit=` for a full query (not combinable with `workflow_name`/`status`). |
 | POST | `/control/workflows/signal-with-start` | `{name, args, workflow_id, channel, value, message_id?}`. |
 | GET | `/control/workflows/by-id/{workflow_id}` | Describe the *latest* run of a workflow id (the counterpart of the worker API's `find_execution`). |
@@ -349,7 +349,13 @@ All worker-API paths are under `/v1/namespaces/{namespace}`; control-API paths a
 | POST | `/control/workflows/{run_id}/terminate` | `{reason?}`. |
 | POST | `/control/workflows/{run_id}/reset` | `{to: "first_tick"|"before_last_failure", reason?}` or `{after_tick: N, reason?}` → `201` with the new run. |
 | GET | `/control/workflows/{run_id}/result` | `?timeout=`; long-polls for the run to close (does not follow a `continued_run_id` chain: it answers for exactly the run id given). |
-| POST | `/control/schedules` | Create: `{schedule_id, workflow, args?, cron|interval, timezone?, start_at?, end_at?, jitter?, overlap?, catchup_window?, pause_on_failure?, paused?, note?}` → `201`. |
+| POST | `/control/workflows/{run_id}/repin` | `{build_id}` (`null` unpins) → the updated execution. Requires `control_write`. |
+| GET | `/control/builds` | Drain summary per build id seen in a pinned run or a live worker: `{builds: [{build_id, pinned_running_runs, live_workers, orphaned}]}`. |
+| GET | `/control/builds/workers` | Live worker heartbeats: `{workers: [{worker_id, build_id, last_seen_at, expires_at}]}`. |
+| GET | `/control/builds/compatibility` | Every declared compatibility: `{compatibility: [{build_id, compatible_with, created_at}]}`. |
+| POST | `/control/builds/{build_id}/compatible` | `{compatible_with}`: let `build_id`'s workers claim work pinned to `compatible_with`. Requires `control_write`. |
+| DELETE | `/control/builds/{build_id}/compatible/{compatible_with}` | Undo the above → `{ok}`. Requires `control_write`. |
+| POST | `/control/schedules` | Create: `{schedule_id, workflow, args?, cron|interval, timezone?, start_at?, end_at?, jitter?, overlap?, catchup_window?, pause_on_failure?, paused?, note?, id_reuse_policy?, id_conflict_policy?, versioning_policy?, run_timeout?, execution_timeout?, search_attributes?}` → `201`. |
 | GET | `/control/schedules` | List: `?limit=`. |
 | GET | `/control/schedules/{schedule_id}` | Describe. |
 | DELETE | `/control/schedules/{schedule_id}` | Delete: `{ok}`. |
