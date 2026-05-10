@@ -173,13 +173,20 @@ async def test_request_and_wait_update(control_client: httpx.AsyncClient) -> Non
     await control_client.post(f"/workflows/{run_id}/terminate", json={"reason": "done"})
 
 
-async def test_cancel_and_terminate(control_client: httpx.AsyncClient) -> None:
+async def test_cancel(control_client: httpx.AsyncClient) -> None:
     started = await control_client.post("/workflows", json={"name": "control.has_update"})
     run_id = started.json()["run_id"]
     cancelled = await control_client.post(f"/workflows/{run_id}/cancel", json={"reason": "x"})
     assert cancelled.status_code == 200
     assert cancelled.json()["ok"] is True
+    await _wait_status(control_client, run_id, "canceled")
 
+
+async def test_terminate(control_client: httpx.AsyncClient) -> None:
+    # A run of its own: after a cancel the worker may close the run as canceled before
+    # a terminate arrives, which would leave nothing to terminate.
+    started = await control_client.post("/workflows", json={"name": "control.has_update"})
+    run_id = started.json()["run_id"]
     terminated = await control_client.post(
         f"/workflows/{run_id}/terminate", json={"reason": "stop"}
     )
