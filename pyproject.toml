@@ -33,12 +33,12 @@ dependencies = [
 [project.optional-dependencies]
 sqlite = ["aiosqlite>=0.20,<0.21"]
 postgres = ["psycopg[binary]>=3.2,<3.3", "psycopg-pool>=3.2,<3.3"]
-crypto = ["cryptography>=43,<44"]
+crypto = ["cryptography>=49,<51"]
 server = [
-    "starlette>=0.39,<0.40",
+    "starlette>=1.3.1,<2",
     "uvicorn>=0.30,<0.31",
     "httpx>=0.27,<0.28",
-    "jinja2>=3.1.4,<3.1.6",
+    "jinja2>=3.1.6,<3.2",
 ]
 client = ["httpx>=0.27,<0.28"]
 s3 = ["httpx>=0.27,<0.28"]
@@ -57,15 +57,15 @@ Changelog = "https://github.com/integral0909/loomwork/blob/main/CHANGELOG.md"
 [dependency-groups]
 dev = [
     "aiosqlite>=0.20,<0.21",
-    "cryptography>=43,<44",
+    "cryptography>=49,<51",
     "httpx>=0.27,<0.28",
     "psycopg[binary]>=3.2,<3.3",
     "psycopg-pool>=3.2,<3.3",
-    "pytest>=8.3,<8.4",
-    "pytest-asyncio>=0.24,<0.25",
-    "starlette>=0.39,<0.40",
+    "pytest>=9.0.3,<10",
+    "pytest-asyncio>=1.2,<2",
+    "starlette>=1.3.1,<2",
     "uvicorn>=0.30,<0.31",
-    "jinja2>=3.1.4,<3.1.6",
+    "jinja2>=3.1.6,<3.2",
     "hypothesis>=6.112,<6.123",
     "coverage[toml]>=7.6,<7.7",
     "mypy>=1.11,<1.12",
@@ -75,10 +75,6 @@ dev = [
     "pyyaml>=6.0.2,<6.0.3",
     "types-pyyaml>=6.0.12.20240917,<6.0.12.20241231",
 ]
-
-[tool.uv]
-# Transitive dependencies held to the same 2024 release lines as the direct ones.
-constraint-dependencies = ["markupsafe<3.0.3"]
 
 [tool.hatch.version]
 path = "src/loomwork/_version.py"

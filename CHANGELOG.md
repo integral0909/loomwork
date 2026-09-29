@@ -217,6 +217,8 @@ All notable changes to this project are documented here. The format follows
   tick's events are inserted with one statement (about 23% fewer statements per
   workflow); PostgreSQL notifications of a transaction are sent in one round trip.
 - Callers waiting for results or update outcomes back off their fallback polling.
+- Dependencies moved to releases with published security fixes: Starlette 1.x,
+  cryptography 49+, Jinja2 3.1.6 and, for development, pytest 9 with pytest-asyncio 1.x.
 
 ### Fixed
 
