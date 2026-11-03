@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.33.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -31,17 +31,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sqlite = ["aiosqlite>=0.20,<0.21"]
-postgres = ["psycopg[binary]>=3.2,<3.3", "psycopg-pool>=3.2,<3.3"]
-crypto = ["cryptography>=49,<51"]
+sqlite = ["aiosqlite>=0.22.1,<0.23"]
+postgres = ["psycopg[binary]>=3.3.6,<3.4", "psycopg-pool>=3.3.3,<3.4"]
+crypto = ["cryptography>=50.0.2,<51"]
 server = [
-    "starlette>=1.3.1,<2",
-    "uvicorn>=0.30,<0.31",
-    "httpx>=0.27,<0.28",
+    "starlette>=1.10.0,<2",
+    "uvicorn>=0.54.0,<0.55",
+    "httpx>=0.28.1,<0.29",
     "jinja2>=3.1.6,<3.2",
 ]
-client = ["httpx>=0.27,<0.28"]
-s3 = ["httpx>=0.27,<0.28"]
+client = ["httpx>=0.28.1,<0.29"]
+s3 = ["httpx>=0.28.1,<0.29"]
 otel = ["opentelemetry-api>=1.27,<1.28"]
 
 [project.scripts]
@@ -56,24 +56,24 @@ Changelog = "https://github.com/integral0909/loomwork/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-    "aiosqlite>=0.20,<0.21",
-    "cryptography>=49,<51",
-    "httpx>=0.27,<0.28",
-    "psycopg[binary]>=3.2,<3.3",
-    "psycopg-pool>=3.2,<3.3",
-    "pytest>=9.0.3,<10",
-    "pytest-asyncio>=1.2,<2",
-    "starlette>=1.3.1,<2",
-    "uvicorn>=0.30,<0.31",
+    "aiosqlite>=0.22.1,<0.23",
+    "cryptography>=50.0.2,<51",
+    "httpx>=0.28.1,<0.29",
+    "psycopg[binary]>=3.3.6,<3.4",
+    "psycopg-pool>=3.3.3,<3.4",
+    "pytest>=9.2.0,<10",
+    "pytest-asyncio>=1.4.1,<2",
+    "starlette>=1.10.0,<2",
+    "uvicorn>=0.54.0,<0.55",
     "jinja2>=3.1.6,<3.2",
-    "hypothesis>=6.112,<6.123",
-    "coverage[toml]>=7.6,<7.7",
-    "mypy>=1.11,<1.12",
+    "hypothesis>=6.170.14,<6.171",
+    "coverage[toml]>=7.17.0,<7.18",
+    "mypy>=2.4.1,<2.5",
     "opentelemetry-api>=1.27,<1.28",
     "opentelemetry-sdk>=1.27,<1.28",
-    "ruff>=0.6.9,<0.7",
-    "pyyaml>=6.0.2,<6.0.3",
-    "types-pyyaml>=6.0.12.20240917,<6.0.12.20241231",
+    "ruff>=0.17.3,<0.18",
+    "pyyaml>=6.0.3,<6.0.4",
+    "types-pyyaml>=6.0.12.20261030,<6.0.12.20261031",
 ]
 
 [tool.hatch.version]
